@@ -141,6 +141,7 @@ func TestValidation(t *testing.T) {
 		{"bad tts model", "tts:\n  model: piper\n", "tts.model"},
 		{"bad llm provider", "llm:\n  provider: anthropic\n", "llm.provider"},
 		{"bad thinking", "llm:\n  thinking: max\n", "llm.thinking"},
+		{"thinking with openai_api", "llm:\n  provider: openai_api\n  thinking: high\n", "llm.thinking"},
 		{"zero vad pool", "vad:\n  pool_size: 0\n", "vad.pool_size"},
 		{"negative asr pool", "asr:\n  pool_size: -1\n", "asr.pool_size"},
 		{"zero tts speed", "tts:\n  speed: 0\n", "tts.speed"},

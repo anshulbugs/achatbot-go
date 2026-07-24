@@ -194,6 +194,9 @@ func (c *Config) validate() error {
 	if !slices.Contains(ValidThinking, c.LLM.Thinking) {
 		return invalidf("llm.thinking %q not in %v", c.LLM.Thinking, ValidThinking[1:])
 	}
+	if c.LLM.Thinking != "" && c.LLM.Provider != "ollama_api" {
+		return invalidf("llm.thinking is only supported when llm.provider is ollama_api, got %q", c.LLM.Provider)
+	}
 	if c.VAD.PoolSize < 1 {
 		return invalidf("vad.pool_size %d must be >= 1", c.VAD.PoolSize)
 	}

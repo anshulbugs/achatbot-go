@@ -48,14 +48,17 @@ func NewDefaultSherpaOnnxTenVadModelConfig() sherpa.TenVadModelConfig {
 }
 func NewDefaultSherpaOnnxVadModelConfig(name string) sherpa.VadModelConfig {
 	conf := sherpa.VadModelConfig{
-		TenVad:     NewDefaultSherpaOnnxTenVadModelConfig(), // small and quick than silero
 		SampleRate: consts.DefaultRate,
 		NumThreads: 1,
 		Provider:   "cpu",
 		Debug:      0,
 	}
+	// Only the requested model's config is populated so a missing model file
+	// fails provider creation instead of silently falling back to the other VAD.
 	if name == "silero" {
 		conf.SileroVad = NewDefaultSherpaOnnxSileroVadModelConfig()
+	} else {
+		conf.TenVad = NewDefaultSherpaOnnxTenVadModelConfig() // small and quick than silero
 	}
 
 	return conf

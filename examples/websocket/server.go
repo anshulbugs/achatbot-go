@@ -24,6 +24,7 @@ import (
 	"achatbot/pkg/common"
 	"achatbot/pkg/config"
 	"achatbot/pkg/consts"
+	"achatbot/pkg/modules/functions"
 	"achatbot/pkg/modules/llm"
 	"achatbot/pkg/modules/speech/asr"
 	"achatbot/pkg/modules/speech/tts"
@@ -101,6 +102,9 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			vad_analyzer.NewDefaultSherpaOnnxVadModelConfig(cfg.VAD.Model),
 			cfg.VAD.BufferSizeSeconds,
 		)
+		if sherpaOnnxProvider == nil {
+			return nil, fmt.Errorf("failed to create VAD provider for model %q (model file downloaded?)", cfg.VAD.Model)
+		}
 		return sherpaOnnxProvider, nil
 	})
 	vadPool := common.NewModuleProviderPool(cfg.VAD.PoolSize, vadPoolType)
@@ -117,6 +121,9 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	asrPoolType := reflect.TypeOf(&asr.SherpaOnnxProvider{})
 	common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
 		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
+		if sherpaOnnxProvider == nil {
+			return nil, fmt.Errorf("failed to create ASR provider for model %q (model files downloaded?)", cfg.ASR.Model)
+		}
 		return sherpaOnnxProvider, nil
 	})
 	asrPool := common.NewModuleProviderPool(cfg.ASR.PoolSize, asrPoolType)
@@ -129,6 +136,9 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	ttsPoolType := reflect.TypeOf(&tts.SherpaOnnxProvider{})
 	common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
 		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(tts.NewDefaultSherpaOnnxOfflineTtsConfig(), cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
+		if sherpaOnnxProvider == nil {
+			return nil, fmt.Errorf("failed to create TTS provider for model %q (model files downloaded?)", cfg.TTS.Model)
+		}
 		return sherpaOnnxProvider, nil
 	})
 	ttsPool := common.NewModuleProviderPool(cfg.TTS.PoolSize, ttsPoolType)
@@ -189,6 +199,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Get VAD instance from pool err: %v", err)
 		return
 	}
+	defer vadPool.Put(vadPoolInstanceInfo)
 	vadProvider := vadPoolInstanceInfo.GetInstance().(*vad_analyzer.SherpaOnnxProvider)
 	vadAnalyzer := vad_analyzer.NewVADAnalyzer(params.NewVADAnalyzerArgs(), vadProvider)
 
@@ -221,6 +232,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Get ASR instance from pool err: %v", err)
 		return
 	}
+	defer asrPool.Put(asrPoolInstanceInfo)
 	asrProvider := asrPoolInstanceInfo.GetInstance().(*asr.SherpaOnnxProvider)
 	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider)
 
@@ -230,6 +242,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Get tts instance from pool err: %v", err)
 		return
 	}
+	defer ttsPool.Put(ttsPoolInstanceInfo)
 	ttsProvider := ttsPoolInstanceInfo.GetInstance().(*tts.SherpaOnnxProvider)
 	ttsProcessor := achatbot_processors.NewTTSProcessor(ttsProvider)
 	outRate, outChannels, outSampleWidth := ttsProvider.GetSampleInfo()
@@ -297,16 +310,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	activeTasks[task] = true
 	serverMu.Unlock()
 
-	// Remove task from active tasks when done
+	// Remove task from active tasks when done; pool instances are released by
+	// the defers registered right after each Get, covering early returns too.
 	defer func() {
 		serverMu.Lock()
 		delete(activeTasks, task)
 		serverMu.Unlock()
-
-		// return each instance to its own pool
-		vadPool.Put(vadPoolInstanceInfo)
-		asrPool.Put(asrPoolInstanceInfo)
-		ttsPool.Put(ttsPoolInstanceInfo)
 	}()
 
 	task.Run()
@@ -320,6 +329,13 @@ func main() {
 	cfg, err = config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Load config failed: %v", err)
+	}
+	// Fail fast on unknown tool names; otherwise every connection would fail
+	// at LLM-provider creation instead.
+	for _, name := range cfg.LLM.Tools {
+		if functions.RegisterFuncs.Get(name) == nil {
+			log.Fatalf("llm.tools: function %q is not registered", name)
+		}
 	}
 
 	logger.InitLoggerWithConfig(logger.NewDefaultLoggerConfig())
