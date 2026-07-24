@@ -194,6 +194,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		allowInterruptions: true, // adaptive echo gate lets real barge-in through
 		idlePrompt:         cfg.Server.IdlePromptText,
 		idleSecs:           cfg.Server.IdlePromptSecs,
+		// Small frames so the caller hears the first synthesized clause
+		// ~160ms sooner than 200ms batching; Telnyx repaces to 20ms RTP.
+		audioOutFrameMS: 40,
 	})
 	log.Printf("telnyx media stream ended call=%s", id)
 }

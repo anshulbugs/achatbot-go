@@ -405,6 +405,7 @@ type sessionConfig struct {
 	allowInterruptions bool    // browser: barge-in; telephony: false (half-duplex, echo-safe)
 	idlePrompt         string  // spoken after idleSecs of silence ("" disables)
 	idleSecs           float64 // silence threshold before idlePrompt fires
+	audioOutFrameMS    int     // outbound audio framing; small = lower first-audio latency
 }
 
 // handleWebSocket serves the browser studio client over protobuf/PCM16.
@@ -490,7 +491,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		AudioCameraParams: audioCameraParams,
 		Serializer:        serializer,
 	}
-	wsParams.WithAudioOutFrameMS(200).WithAudioOutAddWavHeader(sc.addWavHeader)
+	frameMS := sc.audioOutFrameMS
+	if frameMS <= 0 {
+		frameMS = 200
+	}
+	wsParams.WithAudioOutFrameMS(frameMS).WithAudioOutAddWavHeader(sc.addWavHeader)
 
 	// Set Websocket Transport Writer
 	transportWriter := achatbot_processors.NewWebsocketTransportWriter(wsConn, wsParams)
