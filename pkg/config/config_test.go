@@ -22,6 +22,7 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, 3, cfg.Server.MaxConns)
 	assert.True(t, cfg.Server.RateLimitEnabled)
 	assert.Equal(t, 2, cfg.Server.ChatHistorySize)
+	assert.False(t, cfg.Server.AllowInterruptions)
 	assert.NotEmpty(t, cfg.Server.SystemPrompt)
 
 	assert.Equal(t, "silero", cfg.VAD.Model)

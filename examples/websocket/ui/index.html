@@ -64,6 +64,14 @@
 
       // 音频队列，用于确保音频按顺序播放
       let audioQueue = [];
+
+      // Currently playing bot audio source, so barge-in can stop it.
+      let currentBotSource = null;
+
+      // Consecutive loud mic frames; used to detect the user talking over the bot.
+      let bargeInFrames = 0;
+      const BARGE_IN_RMS = 0.04;      // mic RMS above this counts as speech
+      const BARGE_IN_MIN_FRAMES = 4;  // ~128ms of sustained speech triggers barge-in
       let isAudioProcessing = false;
 
       let startBtn = document.getElementById('startAudioBtn');
@@ -165,6 +173,10 @@
 
           isAudioProcessing = true;
           const audioData = audioQueue.shift();
+          if (audioData === undefined) { // queue cleared by barge-in
+              isAudioProcessing = false;
+              return;
+          }
 
           // We should be able to use audioData.audio.buffer but for
           // some reason that contains all the bytes from the protobuf message.
@@ -179,9 +191,13 @@
               source.start(playTime);
               source.connect(audioContext.destination);
               playTime = playTime + buffer.duration;
-              
+              currentBotSource = source;
+
               // 当前音频播放完毕后继续处理队列中的下一个音频
               source.onended = function() {
+                  if (currentBotSource === source) {
+                      currentBotSource = null;
+                  }
                   processAudioQueue();
               };
           }).catch(function(error) {
@@ -241,6 +257,25 @@
                   }
 
                   const audioData = event.inputBuffer.getChannelData(0);
+
+                  // Barge-in: if the user talks while bot audio is queued or
+                  // playing, cut local playback immediately (the server also
+                  // cancels its in-flight reply when interruptions are enabled).
+                  let sumSq = 0;
+                  for (let i = 0; i < audioData.length; i++) {
+                      sumSq += audioData[i] * audioData[i];
+                  }
+                  const rms = Math.sqrt(sumSq / audioData.length);
+                  bargeInFrames = rms > BARGE_IN_RMS ? bargeInFrames + 1 : 0;
+                  if (bargeInFrames >= BARGE_IN_MIN_FRAMES && (audioQueue.length > 0 || currentBotSource)) {
+                      console.log("barge-in: stopping bot playback");
+                      audioQueue = [];
+                      if (currentBotSource) {
+                          try { currentBotSource.stop(); } catch (e) {}
+                          currentBotSource = null;
+                      }
+                      playTime = 0;
+                  }
                   const pcmS16Array = convertFloat32ToS16PCM(audioData);
                   const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
                   const frame = Frame.create({

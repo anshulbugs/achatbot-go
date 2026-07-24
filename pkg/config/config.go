@@ -54,6 +54,9 @@ type ServerConfig struct {
 	RateLimitEnabled bool `mapstructure:"rate_limit_enabled"`
 	// ChatHistorySize is the number of chat turns kept per session.
 	ChatHistorySize int `mapstructure:"chat_history_size"`
+	// AllowInterruptions enables barge-in: when the user starts speaking the
+	// pipeline cancels in-flight LLM generation and drops queued TTS audio.
+	AllowInterruptions bool `mapstructure:"allow_interruptions"`
 	// SystemPrompt seeds every session's system message.
 	SystemPrompt string `mapstructure:"system_prompt"`
 }
@@ -164,6 +167,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.max_conns", 3)
 	v.SetDefault("server.rate_limit_enabled", true)
 	v.SetDefault("server.chat_history_size", 2)
+	v.SetDefault("server.allow_interruptions", false)
 	v.SetDefault("server.system_prompt", consts.DefaultLLMSystemPrompt)
 
 	v.SetDefault("vad.model", "silero")

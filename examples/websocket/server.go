@@ -308,7 +308,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// and properly manage the processor lifecycle
 	// 3. Create and run a pipeline task
 	// NOTE: set IsPushBlock: false, IsUpPushBlock: false to debug queue frame and check slow process
-	task := pipeline.NewPipelineTask(myPipeline, pipeline.PipelineParams{IsPushBlock: true, IsUpPushBlock: true})
+	task := pipeline.NewPipelineTask(myPipeline, pipeline.PipelineParams{
+		AllowInterruptions: cfg.Server.AllowInterruptions,
+		IsPushBlock:        true,
+		IsUpPushBlock:      true,
+	})
 
 	// Add task to active tasks map
 	serverMu.Lock()

@@ -47,3 +47,5 @@ require (
 //replace github.com/weedge/pipeline-go v0.0.0-20251018070827-cb26255476a1 => ../pipeline-go
 
 replace github.com/openai/openai-go/v3 => github.com/weedge/openai-go/v3 v3.0.0-20251017144926-bc848e556df2
+
+replace github.com/weedge/pipeline-go => github.com/anshulbugs/pipeline-go v0.0.0-20260724182640-d4ca30f1abf5
