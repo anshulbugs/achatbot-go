@@ -1,331 +1,656 @@
 <!DOCTYPE html>
 <html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>achatbot studio</title>
+  <script src="./protobuf.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #16130f;
+      --surface: #211c15;
+      --surface-2: #2a241b;
+      --line: #3a3226;
+      --text: #efe7d8;
+      --text-dim: #9c907a;
+      --amber: #f5a028;
+      --amber-soft: rgba(245, 160, 40, 0.14);
+      --green: #86d793;
+      --green-soft: rgba(134, 215, 147, 0.12);
+      --red: #e4573d;
+      --radius: 10px;
+      --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+      --sans: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+    }
 
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="./protobuf.min.js"></script>
-    <title>Achatbot WebSocket Client Example</title>
-    <style>
-        #wsUrl {
-            resize: both; /* 允许水平和垂直调整 */
-            overflow: auto; /* 允许出现滚动条 */
-            width: 100%; /* 设置宽度为100% */
-            max-width: 600px; /* 设置最大宽度 */
+    /* ---------- header ---------- */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .wordmark {
+      font-family: var(--mono);
+      font-size: 13px;
+      letter-spacing: 0.14em;
+      color: var(--text-dim);
+    }
+    .wordmark b { color: var(--text); font-weight: 500; }
+    .lamp {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .lamp-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: #4a4234;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .lamp.on .lamp-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .lamp.err .lamp-dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+    /* ---------- layout ---------- */
+    .frame {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      max-width: 1160px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      padding: 26px 26px 18px;
+    }
+
+    /* ---------- meter (signature) ---------- */
+    .deck {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px 22px 18px;
+      flex-shrink: 0;
+    }
+    #meter { width: 100%; height: 72px; display: block; }
+    .deck-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    #status {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-dim);
+      min-width: 180px;
+    }
+    #status.live { color: var(--green); }
+    #status.bot { color: var(--amber); }
+    #status.think { color: var(--text); }
+    .talk-btn {
+      font-family: var(--sans);
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      padding: 12px 30px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--amber);
+      color: #1d1607;
+      cursor: pointer;
+      transition: transform 0.08s, background 0.2s;
+    }
+    .talk-btn:hover { transform: translateY(-1px); }
+    .talk-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+    .talk-btn[data-live="true"] { background: var(--red); color: #fff; }
+    .talk-btn:disabled { background: var(--surface-2); color: var(--text-dim); cursor: wait; }
+
+    /* ---------- transcript ---------- */
+    .log {
+      flex: 1;
+      overflow-y: auto;
+      margin-top: 20px;
+      padding-right: 6px;
+      min-height: 0;
+    }
+    .log:empty::after {
+      content: "Start audio and say hello — the conversation appears here.";
+      display: block;
+      padding: 36px 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 14px;
+    }
+    .entry {
+      display: grid;
+      grid-template-columns: 52px 1fr;
+      gap: 14px;
+      padding: 12px 4px;
+      border-bottom: 1px solid rgba(58, 50, 38, 0.55);
+      animation: rise 0.18s ease-out;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+    .who {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      padding-top: 3px;
+    }
+    .entry.bot .who { color: var(--amber); }
+    .entry.you .who { color: var(--green); }
+    .entry.meta .who { color: var(--text-dim); }
+    .what { color: var(--text); }
+    .entry.meta .what { color: var(--text-dim); font-size: 13px; font-family: var(--mono); }
+
+    /* ---------- settings rail ---------- */
+    aside {
+      width: 300px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--line);
+      padding: 26px 22px;
+      overflow-y: auto;
+    }
+    .rail-title {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      color: var(--text-dim);
+      margin-bottom: 18px;
+    }
+    .field { margin-bottom: 18px; }
+    .field label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+    .field select, .field input[type="text"] {
+      width: 100%;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      font-family: var(--sans);
+      font-size: 14px;
+    }
+    .field select:focus-visible, .field input:focus-visible, .mini:focus-visible {
+      outline: 2px solid var(--amber);
+      outline-offset: 1px;
+    }
+    .voice-row { display: flex; gap: 8px; }
+    .voice-row select { flex: 1; }
+    .mini {
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 0 13px;
+      font-size: 15px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .mini:hover { border-color: var(--amber); color: var(--amber); }
+    .speed-row { display: flex; align-items: center; gap: 12px; }
+    .speed-row input[type="range"] { flex: 1; accent-color: var(--amber); }
+    #speedVal { font-family: var(--mono); font-size: 13px; width: 42px; text-align: right; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .chip {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 10px;
+    }
+    .chip b { color: var(--text); font-weight: 500; }
+    .rail-note { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; }
+    .applies { font-family: var(--mono); font-size: 11px; color: var(--amber); margin-top: 12px; min-height: 16px; }
+
+    details.adv { margin-top: 18px; }
+    details.adv summary {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+    details.adv .field { margin-top: 12px; }
+
+    @media (max-width: 860px) {
+      .frame { flex-direction: column; }
+      aside { width: 100%; border-left: none; border-top: 1px solid var(--line); }
+      main { padding: 18px 16px 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .entry { animation: none; }
+      .talk-btn { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wordmark"><b>achatbot</b> / studio</div>
+    <div class="lamp" id="connLamp"><span class="lamp-dot"></span><span id="connText">offline</span></div>
+  </header>
+
+  <div class="frame">
+    <main>
+      <section class="deck" aria-label="audio meter and controls">
+        <canvas id="meter" height="72"></canvas>
+        <div class="deck-row">
+          <div id="status">Loading protocol…</div>
+          <button class="talk-btn" id="talkBtn" disabled data-live="false">Start audio</button>
+        </div>
+      </section>
+      <section class="log" id="log" aria-live="polite"></section>
+    </main>
+
+    <aside>
+      <div class="rail-title">SESSION SETTINGS</div>
+
+      <div class="field">
+        <label for="llmSel">Language model</label>
+        <select id="llmSel"></select>
+        <div class="rail-note">Runs per call — pick a bigger model for smarter answers, smaller for faster ones.</div>
+      </div>
+
+      <div class="field">
+        <label for="voiceSel">Voice</label>
+        <div class="voice-row">
+          <select id="voiceSel"></select>
+          <button class="mini" id="previewBtn" title="Preview this voice">&#9654;</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="speed">Speaking speed</label>
+        <div class="speed-row">
+          <input type="range" id="speed" min="0.6" max="1.6" step="0.05" value="1.0">
+          <span id="speedVal">1.00×</span>
+        </div>
+      </div>
+
+      <div class="applies" id="applies"></div>
+
+      <div class="field">
+        <label>Server pipeline (set in config.yaml)</label>
+        <div class="chips" id="pipeChips"></div>
+      </div>
+
+      <details class="adv">
+        <summary>ADVANCED</summary>
+        <div class="field">
+          <label for="wsUrl">WebSocket URL</label>
+          <input type="text" id="wsUrl" value="ws://localhost:4321">
+        </div>
+      </details>
+    </aside>
+  </div>
+
+  <script>
+    const SAMPLE_RATE = 16000;
+    const NUM_CHANNELS = 1;
+    const SAMPLE_WIDTH = 2;
+
+    let Frame = null;
+    let ws = null;
+    let audioContext = null;
+    let micSource = null;
+    let microphoneStream = null;
+    let scriptProcessor = null;
+    let playTime = 0;
+    let isPlaying = false;
+    let audioQueue = [];
+    let isAudioProcessing = false;
+    let currentBotSource = null;
+    let botAnalyser = null;
+    let botGain = null;
+
+    // barge-in detection
+    let bargeInFrames = 0;
+    const BARGE_IN_RMS = 0.04;
+    const BARGE_IN_MIN_FRAMES = 4;
+
+    // status/meter state
+    let micLevel = 0;
+    let userTalking = false;
+    let userTalkFrames = 0;
+    let awaitingReply = false;
+    let currentBotEntry = null;
+
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status"), talkBtn = $("talkBtn"), logEl = $("log");
+    const connLamp = $("connLamp"), connText = $("connText");
+    const llmSel = $("llmSel"), voiceSel = $("voiceSel"), speedInput = $("speed"), speedVal = $("speedVal");
+
+    /* ---------- settings ---------- */
+    function apiBase() {
+      try {
+        const u = new URL($("wsUrl").value.trim());
+        return (u.protocol === "wss:" ? "https://" : "http://") + u.host;
+      } catch { return "http://localhost:4321"; }
+    }
+    const saved = JSON.parse(localStorage.getItem("studio-settings") || "{}");
+    if (saved.wsUrl) $("wsUrl").value = saved.wsUrl;
+    if (saved.speed) { speedInput.value = saved.speed; }
+    speedVal.textContent = Number(speedInput.value).toFixed(2) + "×";
+
+    function persist() {
+      localStorage.setItem("studio-settings", JSON.stringify({
+        llm: llmSel.value, voice: voiceSel.value,
+        speed: speedInput.value, wsUrl: $("wsUrl").value.trim(),
+      }));
+    }
+
+    async function loadOptions() {
+      try {
+        const r = await fetch(apiBase() + "/api/options");
+        const o = await r.json();
+        llmSel.innerHTML = "";
+        for (const m of o.llm_models) {
+          const opt = new Option(m, m, false, m === (saved.llm || o.current.llm_model));
+          llmSel.add(opt);
         }
-    </style>
-  </head>
-
-  <body>
-    <h1>Achatbot WebSocket Client Example</h1>
-    <h3 id="progressText">Loading, wait...</h3>
-    <input type="text" id="wsUrl" placeholder="Enter WebSocket URL" value="ws://localhost:4321" />
-    <br/>
-    <button id="startAudioBtn">Start Audio</button>
-    <button id="stopAudioBtn">Stop Audio</button>
-    
-    <div id="messageContainer" style="margin-top: 20px; border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: auto;">
-      <h3>消息记录</h3>
-      <div id="messages"></div>
-    </div>
-    <script>
-      const SAMPLE_RATE = 16000;
-      const SAMPLE_WIDTH = 2;
-      const NUM_CHANNELS = 1;
-      const PLAY_TIME_RESET_THRESHOLD_MS = 1.0;
-
-      // The protobuf type. We will load it later.
-      let Frame = null;
-
-      // The websocket connection.
-      let ws = null;
-
-      // The audio context
-      let audioContext = null;
-
-      // The audio context media stream source
-      let source = null;
-
-      // The microphone stream from getUserMedia. SHould be sampled to the
-      // proper sample rate.
-      let microphoneStream = null;
-
-      // Script processor to get data from microphone.
-      let scriptProcessor = null;
-
-      // AudioContext play time.
-      let playTime = 0;
-
-      // Last time we received a websocket message.
-      let lastMessageTime = 0;
-
-      // Whether we should be playing audio.
-      let isPlaying = false;
-
-      // 音频队列，用于确保音频按顺序播放
-      let audioQueue = [];
-
-      // Currently playing bot audio source, so barge-in can stop it.
-      let currentBotSource = null;
-
-      // Consecutive loud mic frames; used to detect the user talking over the bot.
-      let bargeInFrames = 0;
-      const BARGE_IN_RMS = 0.04;      // mic RMS above this counts as speech
-      const BARGE_IN_MIN_FRAMES = 4;  // ~128ms of sustained speech triggers barge-in
-      let isAudioProcessing = false;
-
-      let startBtn = document.getElementById('startAudioBtn');
-      let stopBtn = document.getElementById('stopAudioBtn');
-      
-      // 用于显示文本消息的函数
-      function displayTextMessage(textData) {
-        const messagesDiv = document.getElementById('messages');
-        const messageElement = document.createElement('div');
-        messageElement.style.marginBottom = '10px';
-        messageElement.style.padding = '8px';
-        messageElement.style.backgroundColor = '#f0f0f0';
-        messageElement.style.borderRadius = '5px';
-        
-        // 格式化消息内容
-        const messageContent = document.createElement('p');
-        messageContent.style.margin = '0';
-        messageContent.textContent = `${textData.name || 'System'}: ${textData.text || ''}`;
-        
-        messageElement.appendChild(messageContent);
-        messagesDiv.appendChild(messageElement);
-        
-        // 自动滚动到底部
-        const messageContainer = document.getElementById('messageContainer');
-        messageContainer.scrollTop = messageContainer.scrollHeight;
+        voiceSel.innerHTML = "";
+        const savedVoice = saved.voice !== undefined ? Number(saved.voice) : o.current.voice;
+        for (const v of o.voices) {
+          voiceSel.add(new Option(v.name, v.id, false, v.id === savedVoice));
+        }
+        $("pipeChips").innerHTML =
+          `<span class="chip">ASR <b>${o.current.asr_model}</b></span>` +
+          `<span class="chip">TTS <b>${o.current.tts_engine}</b></span>` +
+          `<span class="chip">VAD <b>${o.current.vad_model}</b></span>`;
+      } catch (e) {
+        $("pipeChips").innerHTML = `<span class="chip">server options unavailable — is the tunnel up?</span>`;
       }
+    }
 
-      const proto = protobuf.load("./data_frames.proto", (err, root) => {
-          if (err) {
-              document.getElementById("progressText").textContent =
-                  "Failed to load data_frames.proto - is the UI served from the ui/ directory? " + err;
-              throw err;
+    function settingsChanged() {
+      persist();
+      $("applies").textContent = ws ? "applies to your next call" : "";
+    }
+    llmSel.addEventListener("change", settingsChanged);
+    voiceSel.addEventListener("change", settingsChanged);
+    $("wsUrl").addEventListener("change", () => { persist(); loadOptions(); });
+    speedInput.addEventListener("input", () => {
+      speedVal.textContent = Number(speedInput.value).toFixed(2) + "×";
+      settingsChanged();
+    });
+
+    /* ---------- voice preview ---------- */
+    let previewAudio = null;
+    $("previewBtn").addEventListener("click", () => {
+      if (previewAudio) { previewAudio.pause(); previewAudio = null; }
+      const url = apiBase() + "/api/tts-preview?voice=" + voiceSel.value + "&speed=" + speedInput.value;
+      previewAudio = new Audio(url);
+      previewAudio.play().catch(() => setStatus("Preview failed — is the server reachable?", ""));
+    });
+
+    /* ---------- transcript ---------- */
+    function addEntry(kind, who, text) {
+      const e = document.createElement("div");
+      e.className = "entry " + kind;
+      e.innerHTML = `<div class="who">${who}</div><div class="what"></div>`;
+      e.querySelector(".what").textContent = text;
+      logEl.appendChild(e);
+      logEl.scrollTop = logEl.scrollHeight;
+      return e;
+    }
+    function appendBotText(text) {
+      if (!currentBotEntry) currentBotEntry = addEntry("bot", "BOT", "");
+      currentBotEntry.querySelector(".what").textContent += text;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    /* ---------- status ---------- */
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls || "";
+    }
+    function refreshStatus() {
+      if (!ws) { setStatus(Frame ? "Ready. Start audio to talk." : "Loading protocol…", ""); return; }
+      if (userTalking) setStatus("You're speaking…", "live");
+      else if (currentBotSource || audioQueue.length) setStatus("Bot is speaking…", "bot");
+      else if (awaitingReply) setStatus("Thinking…", "think");
+      else setStatus("Listening…", "live");
+    }
+
+    /* ---------- protobuf ---------- */
+    protobuf.load("./data_frames.proto", (err, root) => {
+      if (err) {
+        setStatus("Failed to load data_frames.proto — serve this page from the ui/ directory. " + err, "");
+        return;
+      }
+      Frame = root.lookupType("pipeline_frames.Frame");
+      talkBtn.disabled = false;
+      refreshStatus();
+    });
+
+    /* ---------- meter ---------- */
+    const meter = $("meter");
+    const mctx = meter.getContext("2d");
+    const BARS = 36;
+    const botData = new Uint8Array(64);
+    function drawMeter() {
+      const w = meter.width = meter.clientWidth * devicePixelRatio;
+      const h = meter.height = 72 * devicePixelRatio;
+      mctx.clearRect(0, 0, w, h);
+
+      let botLevel = 0;
+      if (botAnalyser && (currentBotSource || audioQueue.length)) {
+        botAnalyser.getByteTimeDomainData(botData);
+        let s = 0;
+        for (let i = 0; i < botData.length; i++) { const d = (botData[i] - 128) / 128; s += d * d; }
+        botLevel = Math.sqrt(s / botData.length);
+      }
+      const active = Math.max(micLevel * 2.4, botLevel * 2.0);
+      const color = botLevel > micLevel ? "#f5a028" : "#86d793";
+
+      const gap = w / BARS;
+      for (let i = 0; i < BARS; i++) {
+        const centerDist = Math.abs(i - (BARS - 1) / 2) / (BARS / 2);
+        const wobble = 0.55 + 0.45 * Math.sin(i * 2.3 + performance.now() / 180);
+        let amp = Math.min(1, active * (1.15 - centerDist) * wobble * 3);
+        if (!ws) amp = 0.03;
+        const bh = Math.max(3 * devicePixelRatio, amp * h * 0.9);
+        mctx.fillStyle = amp > 0.06 ? color : "rgba(156,144,122,0.25)";
+        const bw = Math.max(2 * devicePixelRatio, gap * 0.45);
+        mctx.fillRect(i * gap + (gap - bw) / 2, (h - bh) / 2, bw, bh);
+      }
+      requestAnimationFrame(drawMeter);
+    }
+    requestAnimationFrame(drawMeter);
+
+    /* ---------- websocket + audio ---------- */
+    function buildWsUrl() {
+      const base = $("wsUrl").value.trim();
+      const sep = base.includes("?") ? "&" : "?";
+      return base + sep + "voice=" + voiceSel.value + "&speed=" + speedInput.value + "&llm=" + encodeURIComponent(llmSel.value);
+    }
+
+    function setConn(state) {
+      connLamp.className = "lamp" + (state === "on" ? " on" : state === "err" ? " err" : "");
+      connText.textContent = state === "on" ? "connected" : state === "err" ? "error" : "offline";
+    }
+
+    function initWebSocket() {
+      ws = new WebSocket(buildWsUrl());
+      ws.addEventListener("open", () => { setConn("on"); refreshStatus(); });
+      ws.addEventListener("message", handleWebSocketMessage);
+      ws.addEventListener("close", (ev) => { setConn("off"); stopAudio(false); });
+      ws.addEventListener("error", () => { setConn("err"); setStatus("Connection failed — check the tunnel and WebSocket URL.", ""); });
+    }
+
+    async function handleWebSocketMessage(event) {
+      const arrayBuffer = await event.data.arrayBuffer();
+      if (!isPlaying) return;
+      const parsed = Frame.decode(new Uint8Array(arrayBuffer));
+      if (parsed?.text) {
+        awaitingReply = false;
+        appendBotText(parsed.text.text ?? parsed.text);
+        refreshStatus();
+        return;
+      }
+      if (!parsed?.audio) return;
+      awaitingReply = false;
+      const diff = audioContext.currentTime - (handleWebSocketMessage._last || 0);
+      if (playTime === 0 || diff > 1.0) playTime = audioContext.currentTime;
+      handleWebSocketMessage._last = audioContext.currentTime;
+      audioQueue.push(parsed.audio);
+      if (!isAudioProcessing) processAudioQueue();
+      refreshStatus();
+    }
+
+    function processAudioQueue() {
+      if (audioQueue.length === 0) { isAudioProcessing = false; refreshStatus(); return; }
+      isAudioProcessing = true;
+      const audioData = audioQueue.shift();
+      if (audioData === undefined) { isAudioProcessing = false; return; }
+      const audioArray = new Uint8Array(Array.from(audioData.audio));
+      audioContext.decodeAudioData(audioArray.buffer, (buffer) => {
+        const src = new AudioBufferSourceNode(audioContext);
+        src.buffer = buffer;
+        src.connect(botGain);
+        src.start(playTime);
+        playTime += buffer.duration;
+        currentBotSource = src;
+        refreshStatus();
+        src.onended = () => {
+          if (currentBotSource === src) currentBotSource = null;
+          processAudioQueue();
+          refreshStatus();
+        };
+      }, () => processAudioQueue());
+    }
+
+    function convertFloat32ToS16PCM(f32) {
+      const out = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i++) {
+        const c = Math.max(-1, Math.min(1, f32[i]));
+        out[i] = c < 0 ? c * 32768 : c * 32767;
+      }
+      return out;
+    }
+
+    function startAudio() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("This browser can't capture microphone audio.", "");
+        return;
+      }
+      talkBtn.disabled = true;
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
+      botGain = audioContext.createGain();
+      botAnalyser = audioContext.createAnalyser();
+      botAnalyser.fftSize = 64;
+      botGain.connect(botAnalyser);
+      botGain.connect(audioContext.destination);
+      isPlaying = true;
+      currentBotEntry = null;
+      initWebSocket();
+
+      navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: SAMPLE_RATE, channelCount: NUM_CHANNELS, autoGainControl: true, echoCancellation: true, noiseSuppression: true }
+      }).then((stream) => {
+        microphoneStream = stream;
+        scriptProcessor = audioContext.createScriptProcessor(512, 1, 1);
+        micSource = audioContext.createMediaStreamSource(stream);
+        micSource.connect(scriptProcessor);
+        scriptProcessor.connect(audioContext.destination);
+        talkBtn.disabled = false;
+        talkBtn.dataset.live = "true";
+        talkBtn.textContent = "Stop audio";
+        refreshStatus();
+
+        scriptProcessor.onaudioprocess = (event) => {
+          if (!ws) return;
+          const audioData = event.inputBuffer.getChannelData(0);
+
+          let sumSq = 0;
+          for (let i = 0; i < audioData.length; i++) sumSq += audioData[i] * audioData[i];
+          micLevel = Math.sqrt(sumSq / audioData.length);
+
+          // user speech + turn tracking for status line
+          if (micLevel > BARGE_IN_RMS) { userTalkFrames++; } else {
+            if (userTalking && userTalkFrames <= 0) {}
+            userTalkFrames = 0;
+            if (userTalking) { userTalking = false; awaitingReply = true; currentBotEntry = null; addEntry("you", "YOU", "(voice)"); refreshStatus(); }
           }
-          Frame = root.lookupType("pipeline_frames.Frame");
-          const progressText = document.getElementById("progressText");
-          progressText.textContent = "We are ready! Make sure to run the server and then click `Start Audio`.";
+          if (!userTalking && userTalkFrames >= BARGE_IN_MIN_FRAMES) { userTalking = true; refreshStatus(); }
 
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
+          // barge-in: cut local playback when user talks over the bot
+          bargeInFrames = micLevel > BARGE_IN_RMS ? bargeInFrames + 1 : 0;
+          if (bargeInFrames >= BARGE_IN_MIN_FRAMES && (audioQueue.length > 0 || currentBotSource)) {
+            audioQueue = [];
+            if (currentBotSource) { try { currentBotSource.stop(); } catch (e) {} currentBotSource = null; }
+            playTime = 0;
+          }
+
+          const pcm = convertFloat32ToS16PCM(audioData);
+          const frame = Frame.create({
+            audio: { audio: Array.from(new Uint8Array(pcm.buffer)), sampleRate: SAMPLE_RATE, numChannels: NUM_CHANNELS, sampleWidth: SAMPLE_WIDTH }
+          });
+          const encoded = new Uint8Array(Frame.encode(frame).finish());
+          if (ws.readyState === WebSocket.OPEN) ws.send(encoded);
+        };
+      }).catch((err) => {
+        talkBtn.disabled = false;
+        setStatus("Microphone permission denied — allow it and try again.", "");
       });
+    }
 
-      function initWebSocket() {
-          const wsUrl = document.getElementById('wsUrl').value;
-          ws = new WebSocket(wsUrl);
+    function stopAudio(closeWs = true) {
+      playTime = 0;
+      isPlaying = false;
+      audioQueue = [];
+      isAudioProcessing = false;
+      userTalking = false;
+      awaitingReply = false;
+      if (currentBotSource) { try { currentBotSource.stop(); } catch (e) {} currentBotSource = null; }
+      if (ws && closeWs) { ws.close(); }
+      ws = null;
+      if (scriptProcessor) scriptProcessor.disconnect();
+      if (micSource) micSource.disconnect();
+      if (microphoneStream) microphoneStream.getTracks().forEach(t => t.stop());
+      micLevel = 0;
+      talkBtn.dataset.live = "false";
+      talkBtn.textContent = "Start audio";
+      talkBtn.disabled = !Frame;
+      $("applies").textContent = "";
+      setConn("off");
+      refreshStatus();
+    }
 
-          ws.addEventListener('open', () => console.log('WebSocket connection established.'));
-          ws.addEventListener('message', handleWebSocketMessage);
-          ws.addEventListener('close', (event) => {
-              console.log("WebSocket connection closed.", event.code, event.reason);
-              stopAudio(false);
-          });
-          ws.addEventListener('error', (event) => console.error('WebSocket error:', event));
-      }
+    talkBtn.addEventListener("click", () => {
+      if (talkBtn.dataset.live === "true") stopAudio(true);
+      else startAudio();
+    });
 
-      async function handleWebSocketMessage(event) {
-          const arrayBuffer = await event.data.arrayBuffer();
-          if (isPlaying) {
-              enqueueAudioFromProto(arrayBuffer);
-          }
-      }
-
-      function enqueueAudioFromProto(arrayBuffer) {
-          const parsedFrame = Frame.decode(new Uint8Array(arrayBuffer));
-          console.log(parsedFrame)
-          
-          // 处理文本消息
-          if (parsedFrame?.text) {
-              console.log("收到文本消息:", parsedFrame.text);
-              displayTextMessage(parsedFrame.text);
-              return true;
-          }
-          
-          if (!parsedFrame?.audio) {
-              return false;
-          }
-
-          // Reset play time if it's been a while we haven't played anything.
-          const diffTime = audioContext.currentTime - lastMessageTime;
-          if ((playTime == 0) || (diffTime > PLAY_TIME_RESET_THRESHOLD_MS)) {
-              playTime = audioContext.currentTime;
-          }
-          lastMessageTime = audioContext.currentTime;
-
-          // 将音频数据添加到队列中
-          audioQueue.push(parsedFrame.audio);
-          
-          // 如果没有正在处理音频，则开始处理
-          if (!isAudioProcessing) {
-              processAudioQueue();
-          }
-      }
-
-      // 处理音频队列，确保音频按顺序播放
-      function processAudioQueue() {
-          if (audioQueue.length === 0) {
-              isAudioProcessing = false;
-              return;
-          }
-
-          isAudioProcessing = true;
-          const audioData = audioQueue.shift();
-          if (audioData === undefined) { // queue cleared by barge-in
-              isAudioProcessing = false;
-              return;
-          }
-
-          // We should be able to use audioData.audio.buffer but for
-          // some reason that contains all the bytes from the protobuf message.
-          const audioVector = Array.from(audioData.audio);
-          const audioArray = new Uint8Array(audioVector);
-
-          console.log("audioArray-->",audioArray.byteLength)
-          audioContext.decodeAudioData(audioArray.buffer, function(buffer) {
-              console.log("playAudio-->",audioArray.byteLength,buffer.duration,playTime)
-              const source = new AudioBufferSourceNode(audioContext);
-              source.buffer = buffer;
-              source.start(playTime);
-              source.connect(audioContext.destination);
-              playTime = playTime + buffer.duration;
-              currentBotSource = source;
-
-              // 当前音频播放完毕后继续处理队列中的下一个音频
-              source.onended = function() {
-                  if (currentBotSource === source) {
-                      currentBotSource = null;
-                  }
-                  processAudioQueue();
-              };
-          }).catch(function(error) {
-              console.error('解码音频数据失败:', error);
-              // 即使解码失败也要继续处理队列中的下一个音频
-              processAudioQueue();
-          });
-      }
-
-      function convertFloat32ToS16PCM(float32Array) {
-          let int16Array = new Int16Array(float32Array.length);
-
-          for (let i = 0; i < float32Array.length; i++) {
-              let clampedValue = Math.max(-1, Math.min(1, float32Array[i]));
-              int16Array[i] = clampedValue < 0 ? clampedValue * 32768 : clampedValue * 32767;
-          }
-          return int16Array;
-      }
-
-      function startAudioBtnHandler() {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-              alert('getUserMedia is not supported in your browser.');
-              return;
-          }
-
-          startBtn.disabled = true;
-          stopBtn.disabled = false;
-
-          audioContext = new (window.AudioContext || window.webkitAudioContext)({
-              latencyHint: "interactive",
-              sampleRate: SAMPLE_RATE
-          });
-
-          isPlaying = true;
-
-          initWebSocket();
-
-          navigator.mediaDevices.getUserMedia({
-              audio: {
-                  sampleRate: SAMPLE_RATE,
-                  channelCount: NUM_CHANNELS,
-                  autoGainControl: true,
-                  echoCancellation: true,
-                  noiseSuppression: true,
-              }
-          }).then((stream) => {
-              microphoneStream = stream;
-              // 512 is closest thing to 200ms.
-              scriptProcessor = audioContext.createScriptProcessor(512, 1, 1);
-              source = audioContext.createMediaStreamSource(stream);
-              source.connect(scriptProcessor);
-              scriptProcessor.connect(audioContext.destination);
-
-              scriptProcessor.onaudioprocess = (event) => {
-                  if (!ws) {
-                      return;
-                  }
-
-                  const audioData = event.inputBuffer.getChannelData(0);
-
-                  // Barge-in: if the user talks while bot audio is queued or
-                  // playing, cut local playback immediately (the server also
-                  // cancels its in-flight reply when interruptions are enabled).
-                  let sumSq = 0;
-                  for (let i = 0; i < audioData.length; i++) {
-                      sumSq += audioData[i] * audioData[i];
-                  }
-                  const rms = Math.sqrt(sumSq / audioData.length);
-                  bargeInFrames = rms > BARGE_IN_RMS ? bargeInFrames + 1 : 0;
-                  if (bargeInFrames >= BARGE_IN_MIN_FRAMES && (audioQueue.length > 0 || currentBotSource)) {
-                      console.log("barge-in: stopping bot playback");
-                      audioQueue = [];
-                      if (currentBotSource) {
-                          try { currentBotSource.stop(); } catch (e) {}
-                          currentBotSource = null;
-                      }
-                      playTime = 0;
-                  }
-                  const pcmS16Array = convertFloat32ToS16PCM(audioData);
-                  const pcmByteArray = new Uint8Array(pcmS16Array.buffer);
-                  const frame = Frame.create({
-                      audio: {
-                          audio: Array.from(pcmByteArray),
-                          sampleRate: SAMPLE_RATE,
-                          numChannels: NUM_CHANNELS,
-                          sampleWidth: SAMPLE_WIDTH,
-                      }
-                  });
-                  const encodedFrame = new Uint8Array(Frame.encode(frame).finish());
-                  if (ws.readyState === WebSocket.OPEN) {
-                      ws.send(encodedFrame);
-                  }
-              };
-          }).catch((error) => console.error('Error accessing microphone:', error));
-      }
-
-      function stopAudio(closeWebsocket) {
-          playTime = 0;
-          isPlaying = false;
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
-
-          // 清空音频队列
-          audioQueue = [];
-          isAudioProcessing = false;
-
-          if (ws && closeWebsocket) {
-              ws.close();
-              ws = null;
-          }
-
-          if (scriptProcessor) {
-              scriptProcessor.disconnect();
-          }
-          if (source) {
-              source.disconnect();
-          }
-      }
-
-      function stopAudioBtnHandler() {
-          stopAudio(true);
-      }
-
-      startBtn.addEventListener('click', startAudioBtnHandler);
-      stopBtn.addEventListener('click', stopAudioBtnHandler);
-      startBtn.disabled = true;
-      stopBtn.disabled = true;
-    </script>
-  </body>
-
+    loadOptions();
+  </script>
+</body>
 </html>

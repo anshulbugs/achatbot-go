@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -9,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -56,6 +60,155 @@ var (
 	cfg                       *config.Config
 	vadPool, asrPool, ttsPool *common.ModuleProviderPool
 )
+
+// kokoroVoice describes one selectable speaker of the kokoro multi-lang model.
+// IDs follow the model's alphabetical voice ordering (zh voices 45-52 match
+// the constants in pkg/modules/speech/tts).
+type kokoroVoice struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+var kokoroVoices = []kokoroVoice{
+	{0, "Alloy (US female)"}, {1, "Aoede (US female)"}, {2, "Bella (US female)"},
+	{3, "Heart (US female)"}, {4, "Jessica (US female)"}, {5, "Kore (US female)"},
+	{6, "Nicole (US female)"}, {7, "Nova (US female)"}, {8, "River (US female)"},
+	{9, "Sarah (US female)"}, {10, "Sky (US female)"},
+	{11, "Adam (US male)"}, {12, "Echo (US male)"}, {13, "Eric (US male)"},
+	{14, "Fenrir (US male)"}, {15, "Liam (US male)"}, {16, "Michael (US male)"},
+	{17, "Onyx (US male)"}, {18, "Puck (US male)"}, {19, "Santa (US male)"},
+	{20, "Alice (UK female)"}, {21, "Emma (UK female)"}, {22, "Isabella (UK female)"},
+	{23, "Lily (UK female)"},
+	{24, "Daniel (UK male)"}, {25, "Fable (UK male)"}, {26, "George (UK male)"},
+	{27, "Lewis (UK male)"},
+	{45, "Xiaobei (zh female)"}, {46, "Xiaoni (zh female)"}, {47, "Xiaoxiao (zh female)"},
+	{48, "Xiaoyi (zh female)"}, {49, "Yunjian (zh male)"}, {50, "Yunxi (zh male)"},
+	{51, "Yunxia (zh male)"}, {52, "Yunyang (zh male)"},
+}
+
+func isValidVoiceID(id int) bool {
+	for _, v := range kokoroVoices {
+		if v.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// wavHeader builds a 44-byte PCM WAV header for 16-bit mono audio.
+func wavHeader(dataLen, sampleRate int) []byte {
+	h := make([]byte, 44)
+	copy(h[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(h[4:8], uint32(36+dataLen))
+	copy(h[8:12], "WAVE")
+	copy(h[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(h[16:20], 16)
+	binary.LittleEndian.PutUint16(h[20:22], 1)
+	binary.LittleEndian.PutUint16(h[22:24], 1)
+	binary.LittleEndian.PutUint32(h[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(h[28:32], uint32(sampleRate*2))
+	binary.LittleEndian.PutUint16(h[32:34], 2)
+	binary.LittleEndian.PutUint16(h[34:36], 16)
+	copy(h[36:40], "data")
+	binary.LittleEndian.PutUint32(h[40:44], uint32(dataLen))
+	return h
+}
+
+func writeCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+}
+
+// ollamaModels lists model names from the Ollama native API, derived from the
+// configured OpenAI-compatible base URL. Returns just the configured model
+// when the endpoint is not Ollama or unreachable.
+func ollamaModels() []string {
+	fallback := []string{cfg.LLM.Model}
+	base := strings.TrimSuffix(cfg.LLM.BaseURL, "/v1")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(base + "/api/tags")
+	if err != nil {
+		return fallback
+	}
+	defer resp.Body.Close()
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&tags) != nil || len(tags.Models) == 0 {
+		return fallback
+	}
+	names := make([]string, 0, len(tags.Models))
+	for _, m := range tags.Models {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
+// handleOptions serves the selectable settings for the UI.
+func handleOptions(w http.ResponseWriter, r *http.Request) {
+	writeCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"voices":     kokoroVoices,
+		"llm_models": ollamaModels(),
+		"current": map[string]any{
+			"llm_model":  cfg.LLM.Model,
+			"asr_model":  cfg.ASR.Model,
+			"tts_engine": cfg.TTS.Model,
+			"vad_model":  cfg.VAD.Model,
+			"voice":      cfg.TTS.SpeakerID,
+			"speed":      cfg.TTS.Speed,
+		},
+	})
+}
+
+// handleTTSPreview synthesizes a short sample with the requested voice/speed
+// and returns it as WAV, so the UI can preview voices before a call.
+func handleTTSPreview(w http.ResponseWriter, r *http.Request) {
+	writeCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
+	voiceID, err := strconv.Atoi(r.URL.Query().Get("voice"))
+	if err != nil || !isValidVoiceID(voiceID) {
+		http.Error(w, "unknown voice id", http.StatusBadRequest)
+		return
+	}
+	speed := 1.0
+	if s := r.URL.Query().Get("speed"); s != "" {
+		if speed, err = strconv.ParseFloat(s, 32); err != nil || speed <= 0.2 || speed > 3 {
+			http.Error(w, "speed must be in (0.2, 3]", http.StatusBadRequest)
+			return
+		}
+	}
+	text := r.URL.Query().Get("text")
+	if text == "" {
+		text = "Hi there! This is how I sound. Shall we talk?"
+	}
+	if len(text) > 200 {
+		text = text[:200]
+	}
+
+	info, err := ttsPool.Get()
+	if err != nil {
+		http.Error(w, "all voices are busy right now, try again in a moment", http.StatusServiceUnavailable)
+		return
+	}
+	defer ttsPool.Put(info)
+	provider := info.GetInstance().(*tts.SherpaOnnxProvider)
+	provider.SetVoice(voiceID, float32(speed))
+	pcm := provider.Synthesize(text)
+	rate, _, _ := provider.GetSampleInfo()
+
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Write(wavHeader(len(pcm), rate))
+	w.Write(pcm)
+}
 
 // ExampleIWebSocketConn wraps *websocket.Conn to implement our IWebSocketConn interface
 type ExampleIWebSocketConn struct {
@@ -159,22 +312,27 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 // matching pipeline processor. openai_api works against any OpenAI-compatible
 // endpoint (OpenAI, OpenRouter, Ollama /v1, vLLM); ollama_api uses the native
 // Ollama client (endpoint from OLLAMA_HOST).
-func newLLMProcessor(cfg *config.Config, session *common.Session) (processors.IFrameProcessor, error) {
+// newLLMProcessor builds the LLM provider and processor. model overrides the
+// configured model when non-empty (per-session selection from the UI).
+func newLLMProcessor(cfg *config.Config, session *common.Session, model string) (processors.IFrameProcessor, error) {
+	if model == "" {
+		model = cfg.LLM.Model
+	}
 	switch cfg.LLM.Provider {
 	case "ollama_api":
 		var thinking *string
 		if cfg.LLM.Thinking != "" {
 			thinking = &cfg.LLM.Thinking
 		}
-		provider := llm.NewOllamaAPIProvider(llm.OllamaAPIProviderName, cfg.LLM.Model, cfg.LLM.Stream, thinking, nil, cfg.LLM.Tools)
+		provider := llm.NewOllamaAPIProvider(llm.OllamaAPIProviderName, model, cfg.LLM.Stream, thinking, nil, cfg.LLM.Tools)
 		if provider == nil {
-			return nil, fmt.Errorf("failed to create ollama_api LLM provider for model %q", cfg.LLM.Model)
+			return nil, fmt.Errorf("failed to create ollama_api LLM provider for model %q", model)
 		}
 		return llm_processors.NewLLMOllamaApiProcessor(provider, session, llm_processors.Mode_Chat), nil
 	case "openai_api":
-		provider := llm.NewOpenAIAPIProvider(llm.OpenAIAPIProviderName, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.Tools)
+		provider := llm.NewOpenAIAPIProvider(llm.OpenAIAPIProviderName, cfg.LLM.BaseURL, model, cfg.LLM.Tools)
 		if provider == nil {
-			return nil, fmt.Errorf("failed to create openai_api LLM provider for model %q at %s", cfg.LLM.Model, cfg.LLM.BaseURL)
+			return nil, fmt.Errorf("failed to create openai_api LLM provider for model %q at %s", model, cfg.LLM.BaseURL)
 		}
 		return llm_processors.NewLLMOpenAIApiProcessor(provider, session, llm_processors.Mode_Chat, cfg.LLM.Stream, *types.NewLMGenerateArgs()), nil
 	default:
@@ -182,8 +340,32 @@ func newLLMProcessor(cfg *config.Config, session *common.Session) (processors.IF
 	}
 }
 
+// sessionOverrides holds per-connection settings parsed from ws query params.
+type sessionOverrides struct {
+	voiceID  int
+	speed    float32
+	llmModel string
+}
+
+func parseSessionOverrides(r *http.Request) sessionOverrides {
+	o := sessionOverrides{voiceID: -1, speed: 0}
+	q := r.URL.Query()
+	if v, err := strconv.Atoi(q.Get("voice")); err == nil && isValidVoiceID(v) {
+		o.voiceID = v
+	}
+	if s, err := strconv.ParseFloat(q.Get("speed"), 32); err == nil && s > 0.2 && s <= 3 {
+		o.speed = float32(s)
+	}
+	if m := q.Get("llm"); m != "" && len(m) <= 100 {
+		o.llmModel = m
+	}
+	return o
+}
+
 // handleWebSocket handles incoming WebSocket connections
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	overrides := parseSessionOverrides(r)
+
 	// Upgrade the HTTP connection to a WebSocket connection
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -249,16 +431,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ttsPool.Put(ttsPoolInstanceInfo)
 	ttsProvider := ttsPoolInstanceInfo.GetInstance().(*tts.SherpaOnnxProvider)
+	// Pool instances keep the previous session's voice: reset to config
+	// defaults first, then apply overrides (no-ops when unset).
+	ttsProvider.SetVoice(cfg.TTS.SpeakerID, cfg.TTS.Speed)
+	ttsProvider.SetVoice(overrides.voiceID, overrides.speed)
 	ttsProcessor := achatbot_processors.NewTTSProcessor(ttsProvider)
 	outRate, outChannels, outSampleWidth := ttsProvider.GetSampleInfo()
 	audioCameraParams.WithAudioOutSampleWidth(outSampleWidth).WithAudioOutSampleRate(outRate).WithAudioOutChannels(outChannels)
 
-	// Set LLM Processor from config
-	llmProcessor, err := newLLMProcessor(cfg, session)
+	// Set LLM Processor from config plus per-session overrides
+	llmProcessor, err := newLLMProcessor(cfg, session, overrides.llmModel)
 	if err != nil {
 		log.Printf("Create LLM processor err: %v", err)
 		return
 	}
+	log.Printf("session %s: voice=%d speed=%.2f llm=%q", clientId, overrides.voiceID, overrides.speed, overrides.llmModel)
 
 	// Set Sentence Processor
 	sentenceProcessor := aggregators.NewSentenceAggregatorWithEnd(reflect.TypeOf(&achatbot_frames.TurnEndFrame{}))
@@ -363,6 +550,8 @@ func main() {
 
 	// Set up the WebSocket endpoint with Rate Limiter middleware
 	rateLimiter := middleware.NewDefaultRateLimiter().WithEnable(cfg.Server.RateLimitEnabled).WithMaxConns(cfg.Server.MaxConns)
+	http.HandleFunc("/api/options", handleOptions)
+	http.HandleFunc("/api/tts-preview", handleTTSPreview)
 	http.Handle("/", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
 
 	// Channel to listen for interrupt signal

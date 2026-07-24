@@ -87,6 +87,18 @@ func NewSherpaOnnxProvider(config sherpa.OfflineTtsConfig, sid int, speed float3
 	return provider
 }
 
+// SetVoice changes the speaker and speed for subsequent syntheses. Safe only
+// while the instance is checked out exclusively (the pool guarantees one
+// holder), which is how per-session voice selection works.
+func (p *SherpaOnnxProvider) SetVoice(sid int, speed float32) {
+	if sid >= 0 {
+		p.sid = sid
+	}
+	if speed > 0 {
+		p.speed = speed
+	}
+}
+
 func (p *SherpaOnnxProvider) Synthesize(text string) []byte {
 	generateAudio := p.tts.Generate(text, p.sid, float32(math.Max(float64(p.speed), 1e-6)))
 	p.sampleRate = generateAudio.SampleRate
