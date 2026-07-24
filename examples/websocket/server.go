@@ -38,6 +38,7 @@ import (
 	achatbot_aggregators "achatbot/pkg/processors/aggregators"
 	"achatbot/pkg/processors/llm_processors"
 	"achatbot/pkg/services/middleware"
+	"achatbot/pkg/telnyx"
 	"achatbot/pkg/transports"
 	"achatbot/pkg/types"
 	achatbot_frames "achatbot/pkg/types/frames"
@@ -591,6 +592,17 @@ func main() {
 	rateLimiter := middleware.NewDefaultRateLimiter().WithEnable(cfg.Server.RateLimitEnabled).WithMaxConns(cfg.Server.MaxConns)
 	http.HandleFunc("/api/options", handleOptions)
 	http.HandleFunc("/api/tts-preview", handleTTSPreview)
+
+	// Telephony (optional): enabled when TELNYX_API_KEY is set.
+	telnyxClient = telnyx.NewClientFromEnv()
+	if telnyxClient != nil {
+		http.HandleFunc("/api/call", handleCall)
+		http.HandleFunc("/telnyx/webhook", handleTelnyxWebhook)
+		logger.Info("Telephony enabled", "from", telnyxClient.FromNumber(), "public_url", telnyxClient.PublicURL())
+	} else {
+		logger.Info("Telephony disabled (TELNYX_API_KEY not set)")
+	}
+
 	http.Handle("/", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
 
 	// Channel to listen for interrupt signal

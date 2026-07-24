@@ -51,3 +51,5 @@ resources/
 
 .vscode/
 TODO.md
+# telnyx secrets
+telnyx.env
