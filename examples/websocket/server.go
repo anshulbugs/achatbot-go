@@ -599,7 +599,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// Set Sentence Processor: flush the opening ~4 words of each reply fast so
 	// TTS (and the caller) start immediately, then normal sentence boundaries.
 	sentenceProcessor := achatbot_aggregators.NewFastFirstAggregatorWithEnd(
-		reflect.TypeOf(&achatbot_frames.TurnEndFrame{}), 4)
+		reflect.TypeOf(&achatbot_frames.TurnEndFrame{}), cfg.Server.FirstChunkWords)
 
 	// 1. Create the WebSocket server input processor
 	ws_transport := transports.NewWebsocketTransport(
