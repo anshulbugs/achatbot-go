@@ -6,7 +6,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/k2-fsa/sherpa-onnx-go v1.12.12
+	github.com/k2-fsa/sherpa-onnx-go v1.13.4
 	github.com/ollama/ollama v0.12.5
 	github.com/openai/openai-go/v3 v3.4.0
 	github.com/spf13/viper v1.21.0
@@ -19,9 +19,9 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-linux v1.12.13 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-macos v1.12.13 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-windows v1.12.13 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-linux v1.13.4 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-macos v1.13.4 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-windows v1.13.4 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
