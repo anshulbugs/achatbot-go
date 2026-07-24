@@ -169,6 +169,7 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"voices":     kokoroVoices,
 		"llm_models": ollamaModels(),
+		"telephony":  telnyxClient != nil,
 		"current": map[string]any{
 			"llm_model":  cfg.LLM.Model,
 			"asr_model":  cfg.ASR.Model,
@@ -390,11 +391,20 @@ func systemPromptFor(lang string) string {
 	return prompt
 }
 
-// handleWebSocket handles incoming WebSocket connections
+// sessionConfig fully describes one voice session, independent of transport.
+type sessionConfig struct {
+	clientID     string
+	systemPrompt string
+	voiceID      int
+	speed        float32
+	llmModel     string
+	addWavHeader bool   // true for the browser; false for raw telephony audio
+	hello        string // optional greeting synthesized and played on connect
+}
+
+// handleWebSocket serves the browser studio client over protobuf/PCM16.
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	overrides := parseSessionOverrides(r)
-
-	// Upgrade the HTTP connection to a WebSocket connection
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Error upgrading to WebSocket: %v", err)
@@ -402,11 +412,42 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Set Session
-	clientId := fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String())
+	runVoiceSession(&ExampleIWebSocketConn{Conn: conn}, serializers.NewProtobufSerializer(), sessionConfig{
+		clientID:     fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
+		systemPrompt: systemPromptFor(overrides.lang),
+		voiceID:      overrides.voiceID,
+		speed:        overrides.speed,
+		llmModel:     overrides.llmModel,
+		addWavHeader: true,
+	})
+}
+
+// sendAudioChunks synthesizes-then-streams pre-rendered PCM to the client as
+// ~20 ms AudioRawFrames via the serializer, used to play the greeting before
+// the conversation loop starts.
+func sendAudioChunks(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int) {
+	chunk := rate * 2 * 100 / 1000 // 100 ms chunks limit per-chunk resample boundary artifacts
+	if chunk <= 0 {
+		return
+	}
+	for off := 0; off < len(pcm); off += chunk {
+		end := off + chunk
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if err := tw.SendPayload(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+			return
+		}
+	}
+}
+
+// runVoiceSession builds and runs the VAD->ASR->LLM->TTS pipeline over the
+// given connection and serializer. The browser and telephony transports differ
+// only in the serializer, WAV framing, and greeting; everything else is shared.
+func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serializer, sc sessionConfig) {
 	chatHistorySize := cfg.Server.ChatHistorySize
-	session := common.NewSession(clientId, &chatHistorySize)
-	session.InitChatMessage(map[string]any{"role": "system", "content": systemPromptFor(overrides.lang)})
+	session := common.NewSession(sc.clientID, &chatHistorySize)
+	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
 
 	// vad provider
 	vadPoolInstanceInfo, err := vadPool.Get()
@@ -419,9 +460,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	vadArgs := params.NewVADAnalyzerArgs().WithStartSecs(cfg.VAD.StartSecs).WithStopSecs(cfg.VAD.StopSecs)
 	vadAnalyzer := vad_analyzer.NewVADAnalyzer(vadArgs, vadProvider)
 
-	// Wrap the connection to implement our interface
-	wsConn := &ExampleIWebSocketConn{Conn: conn}
-
 	// Create audio VAD parameters
 	audioCameraParams := params.NewAudioCameraParams()
 	audioCameraParams.AudioVADParams.WithVADAnalyzer(vadAnalyzer).
@@ -433,9 +471,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Create WebSocket server parameters
 	wsParams := &params.WebsocketServerParams{
 		AudioCameraParams: audioCameraParams,
-		Serializer:        serializers.NewProtobufSerializer(),
+		Serializer:        serializer,
 	}
-	wsParams.WithAudioOutFrameMS(200).WithAudioOutAddWavHeader(true) //200ms + wav head
+	wsParams.WithAudioOutFrameMS(200).WithAudioOutAddWavHeader(sc.addWavHeader)
 
 	// Set Websocket Transport Writer
 	transportWriter := achatbot_processors.NewWebsocketTransportWriter(wsConn, wsParams)
@@ -454,6 +492,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		WithOnTranscript(func(text string) {
 			// Surface the user's transcript to the client, tagged so the UI
 			// can render it as the user's turn (bot text uses "TextFrame").
+			// Harmless for telephony: the Telnyx serializer drops TextFrames.
 			frame := &frames.TextFrame{
 				DataFrame: frames.NewDataFrameWithName(userTranscriptName),
 				Text:      text,
@@ -474,18 +513,24 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Pool instances keep the previous session's voice: reset to config
 	// defaults first, then apply overrides (no-ops when unset).
 	ttsProvider.SetVoice(cfg.TTS.SpeakerID, cfg.TTS.Speed)
-	ttsProvider.SetVoice(overrides.voiceID, overrides.speed)
+	ttsProvider.SetVoice(sc.voiceID, sc.speed)
 	ttsProcessor := achatbot_processors.NewTTSProcessor(ttsProvider)
 	outRate, outChannels, outSampleWidth := ttsProvider.GetSampleInfo()
 	audioCameraParams.WithAudioOutSampleWidth(outSampleWidth).WithAudioOutSampleRate(outRate).WithAudioOutChannels(outChannels)
 
+	// Play the greeting (if any) before the conversation loop. Safe to
+	// synthesize directly here: the pipeline's TTS processor is not yet active.
+	if sc.hello != "" {
+		go sendAudioChunks(transportWriter, ttsProvider.Synthesize(sc.hello), outRate)
+	}
+
 	// Set LLM Processor from config plus per-session overrides
-	llmProcessor, err := newLLMProcessor(cfg, session, overrides.llmModel)
+	llmProcessor, err := newLLMProcessor(cfg, session, sc.llmModel)
 	if err != nil {
 		log.Printf("Create LLM processor err: %v", err)
 		return
 	}
-	log.Printf("session %s: voice=%d speed=%.2f llm=%q", clientId, overrides.voiceID, overrides.speed, overrides.llmModel)
+	log.Printf("session %s: voice=%d speed=%.2f llm=%q", sc.clientID, sc.voiceID, sc.speed, sc.llmModel)
 
 	// Set Sentence Processor
 	sentenceProcessor := aggregators.NewSentenceAggregatorWithEnd(reflect.TypeOf(&achatbot_frames.TurnEndFrame{}))
@@ -598,6 +643,7 @@ func main() {
 	if telnyxClient != nil {
 		http.HandleFunc("/api/call", handleCall)
 		http.HandleFunc("/telnyx/webhook", handleTelnyxWebhook)
+		http.HandleFunc("/telnyx/media", handleTelnyxMedia)
 		logger.Info("Telephony enabled", "from", telnyxClient.FromNumber(), "public_url", telnyxClient.PublicURL())
 	} else {
 		logger.Info("Telephony disabled (TELNYX_API_KEY not set)")

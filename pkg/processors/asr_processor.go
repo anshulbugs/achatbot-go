@@ -43,6 +43,7 @@ func (p *ASRProcessor) WithOnTranscript(fn func(text string)) *ASRProcessor {
 // guess a language). Also notifies the transcript callback.
 func (p *ASRProcessor) emit(audio []byte) {
 	text := strings.TrimSpace(p.provider.Transcribe(audio))
+	logger.Infof("ASR result (%d audio bytes -> %d chars): %q", len(audio), len(text), text)
 	if text == "" {
 		return
 	}

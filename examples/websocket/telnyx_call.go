@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gorilla/websocket"
+
+	"achatbot/pkg/consts"
 	"achatbot/pkg/telnyx"
 )
 
@@ -127,25 +130,62 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch ev.Data.EventType {
 	case "call.answered":
-		p := calls.get(id)
-		if p == nil {
+		if calls.get(id) == nil {
 			return
 		}
-		// Milestone A: prove the loop with Telnyx's built-in TTS. The media
-		// bridge (real pipeline audio) replaces this next.
+		// Fork the call's audio to our media bridge (wss on the public tunnel).
+		streamURL := wsURL(telnyxClient.PublicURL()) + "/telnyx/media?cc=" + id
 		go func() {
-			ctx := context.Background()
-			if err := telnyxClient.Speak(ctx, id, p.Hello, ""); err != nil {
-				log.Printf("telnyx speak err: %v", err)
-			}
-		}()
-	case "call.speak.ended":
-		go func() {
-			if err := telnyxClient.Hangup(context.Background(), id); err != nil {
-				log.Printf("telnyx hangup err: %v", err)
+			if err := telnyxClient.StreamingStart(context.Background(), id, streamURL); err != nil {
+				log.Printf("telnyx streaming_start err: %v", err)
 			}
 		}()
 	case "call.hangup":
 		calls.del(id)
 	}
+}
+
+// wsURL converts an http(s) base URL to its ws(s) equivalent.
+func wsURL(httpURL string) string {
+	if strings.HasPrefix(httpURL, "https://") {
+		return "wss://" + strings.TrimPrefix(httpURL, "https://")
+	}
+	return "ws://" + strings.TrimPrefix(httpURL, "http://")
+}
+
+var telnyxUpgrader = websocket.Upgrader{
+	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+}
+
+// handleTelnyxMedia is the media bridge: Telnyx forks call audio to this
+// WebSocket (base64 µ-law/8 kHz). It runs the full voice pipeline over a
+// Telnyx serializer, so the caller talks to the same VAD->ASR->LLM->TTS agent
+// as the browser client.
+func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("cc")
+	p := calls.get(id)
+	if p == nil {
+		http.Error(w, "unknown call", http.StatusNotFound)
+		return
+	}
+	ws, err := telnyxUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("telnyx media upgrade err: %v", err)
+		return
+	}
+	defer ws.Close()
+	log.Printf("telnyx media stream connected call=%s", id)
+
+	runVoiceSession(telnyx.NewConn(ws), telnyx.NewSerializer(consts.DefaultRate), sessionConfig{
+		clientID:     "telnyx_" + id,
+		systemPrompt: p.SystemPrompt,
+		voiceID:      p.VoiceID,
+		speed:        p.Speed,
+		llmModel:     p.LLMModel,
+		addWavHeader: false,
+		hello:        p.Hello,
+	})
+	log.Printf("telnyx media stream ended call=%s", id)
 }

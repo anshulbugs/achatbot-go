@@ -302,6 +302,25 @@
         <div class="chips" id="pipeChips"></div>
       </div>
 
+      <div class="rail-title" id="phoneTitle" style="margin-top:26px; display:none;">PLACE A CALL</div>
+      <div id="phonePanel" style="display:none;">
+        <div class="field">
+          <label for="toNumber">Phone number (E.164)</label>
+          <input type="text" id="toNumber" placeholder="+15551234567">
+        </div>
+        <div class="field">
+          <label for="helloMsg">Greeting</label>
+          <input type="text" id="helloMsg" value="Hi! I am your voice assistant. Ask me anything.">
+        </div>
+        <div class="field">
+          <label for="sysPrompt">System prompt</label>
+          <textarea id="sysPrompt" rows="3" style="width:100%; background:var(--surface); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:9px 10px; font-family:var(--sans); font-size:13px; resize:vertical;">You are a friendly helpful voice assistant. Keep answers to one short sentence, no emoji.</textarea>
+        </div>
+        <button class="talk-btn" id="callBtn" style="width:100%; background:var(--green); color:#12210f;">Call</button>
+        <div class="applies" id="callStatus"></div>
+        <div class="rail-note">Uses the voice and speed selected above. The call is placed from the server's Telnyx number.</div>
+      </div>
+
       <details class="adv">
         <summary>ADVANCED</summary>
         <div class="field">
@@ -387,6 +406,11 @@
           `<span class="chip">ASR <b>${o.current.asr_model}</b></span>` +
           `<span class="chip">TTS <b>${o.current.tts_engine}</b></span>` +
           `<span class="chip">VAD <b>${o.current.vad_model}</b></span>`;
+        // Show the phone panel only when the server has telephony enabled.
+        if (o.telephony) {
+          $("phoneTitle").style.display = "";
+          $("phonePanel").style.display = "";
+        }
       } catch (e) {
         $("pipeChips").innerHTML = `<span class="chip">server options unavailable — is the tunnel up?</span>`;
       }
