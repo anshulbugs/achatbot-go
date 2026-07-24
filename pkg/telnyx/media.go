@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/weedge/pipeline-go/pkg/frames"
@@ -13,6 +14,10 @@ import (
 
 // Telnyx media streaming audio is G.711 µ-law at 8 kHz.
 const telnyxRate = 8000
+
+// echoTail is how long after the bot's audio finishes playing we keep
+// suppressing inbound audio, to catch the tail of acoustic echo.
+const echoTail = 250 * time.Millisecond
 
 // mediaMessage is the Telnyx bidirectional media-streaming envelope (a subset).
 type mediaMessage struct {
@@ -30,15 +35,51 @@ type mediaMessage struct {
 // transport and processors work unchanged.
 type Serializer struct {
 	pipelineRate int
+
+	// Half-duplex echo suppression: while the bot's audio is still playing
+	// (Telnyx buffers what we send), inbound audio is mostly the bot echoing
+	// back on a phone without echo cancellation. We estimate when playback
+	// ends and drop inbound until then, so the bot does not hear itself.
+	mu             sync.Mutex
+	playbackEndsAt time.Time
+	suppressEcho   bool
 }
 
 // NewSerializer builds a Telnyx media serializer for the given pipeline sample
-// rate (typically 16000).
+// rate (typically 16000), with half-duplex echo suppression enabled.
 func NewSerializer(pipelineRate int) *Serializer {
 	if pipelineRate == 0 {
 		pipelineRate = consts.DefaultRate
 	}
-	return &Serializer{pipelineRate: pipelineRate}
+	return &Serializer{pipelineRate: pipelineRate, suppressEcho: true}
+}
+
+// echoActive reports whether the bot is (estimated to be) still playing.
+func (s *Serializer) echoActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Now().Before(s.playbackEndsAt.Add(echoTail))
+}
+
+// noteOutbound advances the estimated playback-end clock by the duration of a
+// chunk of outbound audio (given as sample count at telnyxRate).
+func (s *Serializer) noteOutbound(samples int) {
+	dur := time.Duration(samples) * time.Second / telnyxRate
+	s.mu.Lock()
+	now := time.Now()
+	if now.After(s.playbackEndsAt) {
+		s.playbackEndsAt = now
+	}
+	s.playbackEndsAt = s.playbackEndsAt.Add(dur)
+	s.mu.Unlock()
+}
+
+// resetPlayback marks playback as finished (used on interruption/clear, when
+// Telnyx flushes its buffer).
+func (s *Serializer) resetPlayback() {
+	s.mu.Lock()
+	s.playbackEndsAt = time.Now()
+	s.mu.Unlock()
 }
 
 // Deserialize turns an inbound Telnyx "media" message into an AudioRawFrame at
@@ -51,6 +92,9 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 	}
 	if m.Event != "media" || m.Media == nil || m.Media.Payload == "" {
 		return nil, nil
+	}
+	if s.suppressEcho && s.echoActive() {
+		return nil, nil // drop inbound while the bot is still speaking (echo)
 	}
 	mulaw, err := base64.StdEncoding.DecodeString(m.Media.Payload)
 	if err != nil {
@@ -69,12 +113,14 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 	switch af := frame.(type) {
 	case *frames.StartInterruptionFrame:
+		s.resetPlayback()
 		return json.Marshal(map[string]string{"event": "clear"})
 	case *frames.AudioRawFrame:
 		if len(af.Audio) == 0 {
 			return nil, nil
 		}
 		pcm8 := ResamplePCM16(af.Audio, af.SampleRate, telnyxRate)
+		s.noteOutbound(len(pcm8) / 2)
 		mulaw := PCM16ToMuLaw(pcm8)
 		payload := base64.StdEncoding.EncodeToString(mulaw)
 		out := mediaMessage{Event: "media", Media: &struct {

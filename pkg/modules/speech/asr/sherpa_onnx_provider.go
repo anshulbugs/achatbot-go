@@ -32,8 +32,8 @@ func NewDefaultSherpaOnnxOfflineParaformerModelConfig() (sherpa.OfflineParaforme
 // https://arxiv.org/abs/2212.04356
 func NewDefaultSherpaOnnxOfflineWhisperModelConfig() (sherpa.OfflineWhisperModelConfig, string) {
 	return sherpa.OfflineWhisperModelConfig{
-		Encoder: filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-whisper-tiny.en/tiny-encoder.onnx"),
-		Decoder: filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-whisper-tiny.en/tiny-decoder.onnx"),
+		Encoder: filepath.Join(consts.MODELS_DIR, "sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx"),
+		Decoder: filepath.Join(consts.MODELS_DIR, "sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx"),
 		// Available languages can be found at
 		// https://github.com/openai/whisper/blob/main/whisper/tokenizer.py#L10
 		//
@@ -55,7 +55,7 @@ func NewDefaultSherpaOnnxOfflineWhisperModelConfig() (sherpa.OfflineWhisperModel
 		//   - 50 for English models
 		//   - 300 for multilingual models
 		TailPaddings: -1,
-	}, filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-whisper-tiny.en/tokens.txt")
+	}, filepath.Join(consts.MODELS_DIR, "sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt")
 }
 
 // https://github.com/k2-fsa/sherpa-onnx/blob/v1.12.14/sherpa-onnx/csrc/offline-zipformer-ctc-model-config.h
@@ -94,12 +94,13 @@ func WithLanguage(conf sherpa.OfflineRecognizerConfig, language string) sherpa.O
 // https://arxiv.org/abs/2410.15608
 // https://arxiv.org/abs/2509.02523
 func NewDefaultSherpaOnnxOfflineMoonshineModelConfig() (sherpa.OfflineMoonshineModelConfig, string) {
+	dir := filepath.Join(consts.MODELS_DIR, "sherpa-onnx-moonshine-base-en-int8")
 	return sherpa.OfflineMoonshineModelConfig{
-		Preprocessor:    filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-moonshine-tiny-en-int8/preprocess.onnx"),
-		Encoder:         filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-moonshine-tiny-en-int8/encoder.int8.onnx"),
-		UncachedDecoder: filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-moonshine-tiny-en-int8/uncached_decoder.int8.onnx"),
-		CachedDecoder:   filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-moonshine-tiny-en-int8/cached_decoder.int8.onnx"),
-	}, filepath.Join(consts.MODELS_DIR, "csukuangfj/sherpa-onnx-moonshine-tiny-en-int8/tokens.txt")
+		Preprocessor:    filepath.Join(dir, "preprocess.onnx"),
+		Encoder:         filepath.Join(dir, "encode.int8.onnx"),
+		UncachedDecoder: filepath.Join(dir, "uncached_decode.int8.onnx"),
+		CachedDecoder:   filepath.Join(dir, "cached_decode.int8.onnx"),
+	}, filepath.Join(dir, "tokens.txt")
 }
 
 // https://github.com/k2-fsa/sherpa-onnx/blob/v1.12.14/sherpa-onnx/csrc/offline-fire-red-asr-model-config.h

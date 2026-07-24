@@ -179,13 +179,14 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	log.Printf("telnyx media stream connected call=%s", id)
 
 	runVoiceSession(telnyx.NewConn(ws), telnyx.NewSerializer(consts.DefaultRate), sessionConfig{
-		clientID:     "telnyx_" + id,
-		systemPrompt: p.SystemPrompt,
-		voiceID:      p.VoiceID,
-		speed:        p.Speed,
-		llmModel:     p.LLMModel,
-		addWavHeader: false,
-		hello:        p.Hello,
+		clientID:           "telnyx_" + id,
+		systemPrompt:       p.SystemPrompt,
+		voiceID:            p.VoiceID,
+		speed:              p.Speed,
+		llmModel:           p.LLMModel,
+		addWavHeader:       false,
+		hello:              p.Hello,
+		allowInterruptions: false, // half-duplex: echo suppression handles turn-taking
 	})
 	log.Printf("telnyx media stream ended call=%s", id)
 }

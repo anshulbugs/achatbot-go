@@ -393,13 +393,14 @@ func systemPromptFor(lang string) string {
 
 // sessionConfig fully describes one voice session, independent of transport.
 type sessionConfig struct {
-	clientID     string
-	systemPrompt string
-	voiceID      int
-	speed        float32
-	llmModel     string
-	addWavHeader bool   // true for the browser; false for raw telephony audio
-	hello        string // optional greeting synthesized and played on connect
+	clientID           string
+	systemPrompt       string
+	voiceID            int
+	speed              float32
+	llmModel           string
+	addWavHeader       bool   // true for the browser; false for raw telephony audio
+	hello              string // optional greeting synthesized and played on connect
+	allowInterruptions bool   // browser: barge-in; telephony: false (half-duplex, echo-safe)
 }
 
 // handleWebSocket serves the browser studio client over protobuf/PCM16.
@@ -413,12 +414,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	runVoiceSession(&ExampleIWebSocketConn{Conn: conn}, serializers.NewProtobufSerializer(), sessionConfig{
-		clientID:     fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
-		systemPrompt: systemPromptFor(overrides.lang),
-		voiceID:      overrides.voiceID,
-		speed:        overrides.speed,
-		llmModel:     overrides.llmModel,
-		addWavHeader: true,
+		clientID:           fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
+		systemPrompt:       systemPromptFor(overrides.lang),
+		voiceID:            overrides.voiceID,
+		speed:              overrides.speed,
+		llmModel:           overrides.llmModel,
+		addWavHeader:       true,
+		allowInterruptions: cfg.Server.AllowInterruptions,
 	})
 }
 
@@ -581,7 +583,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// 3. Create and run a pipeline task
 	// NOTE: set IsPushBlock: false, IsUpPushBlock: false to debug queue frame and check slow process
 	task := pipeline.NewPipelineTask(myPipeline, pipeline.PipelineParams{
-		AllowInterruptions: cfg.Server.AllowInterruptions,
+		AllowInterruptions: sc.allowInterruptions,
 		IsPushBlock:        true,
 		IsUpPushBlock:      true,
 	})
