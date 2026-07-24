@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/weedge/pipeline-go/pkg/serializers"
 
 	"achatbot/pkg/common"
+	"achatbot/pkg/config"
 	"achatbot/pkg/consts"
 	"achatbot/pkg/modules/llm"
 	"achatbot/pkg/modules/speech/asr"
@@ -49,6 +51,9 @@ var upgrader = websocket.Upgrader{
 var (
 	serverMu    sync.Mutex
 	activeTasks = make(map[*pipeline.PipelineTask]bool)
+
+	cfg                       *config.Config
+	vadPool, asrPool, ttsPool *common.ModuleProviderPool
 )
 
 // ExampleIWebSocketConn wraps *websocket.Conn to implement our IWebSocketConn interface
@@ -87,31 +92,34 @@ func (wsc *ExampleIWebSocketConn) Close() error {
 	return wsc.Conn.Close()
 }
 
-func load() (*common.ModuleProviderPool, *common.ModuleProviderPool, *common.ModuleProviderPool) {
+func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProviderPool, *common.ModuleProviderPool) {
 	var err error
 	// vad
 	vadPoolType := reflect.TypeOf(&vad_analyzer.SherpaOnnxProvider{})
 	common.RegisterNewFunc(vadPoolType, func() (common.IPoolInstance, error) {
 		sherpaOnnxProvider := vad_analyzer.NewSherpaOnnxProvider(
-			//vad_analyzer.NewDefaultSherpaOnnxVadModelConfig("ten"),
-			vad_analyzer.NewDefaultSherpaOnnxVadModelConfig("silero"),
-			100,
+			vad_analyzer.NewDefaultSherpaOnnxVadModelConfig(cfg.VAD.Model),
+			cfg.VAD.BufferSizeSeconds,
 		)
 		return sherpaOnnxProvider, nil
 	})
-	vadPool := common.NewModuleProviderPool(3, vadPoolType)
+	vadPool := common.NewModuleProviderPool(cfg.VAD.PoolSize, vadPoolType)
 	err = vadPool.Initialize()
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// asr
+	asrConfig, err := asr.NewOfflineRecognizerConfigForModel(cfg.ASR.Model)
+	if err != nil {
+		log.Fatal(err)
+	}
 	asrPoolType := reflect.TypeOf(&asr.SherpaOnnxProvider{})
 	common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
-		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asr.NewDefaultSherpaOnnxOfflineRecognizerConfig())
+		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
 		return sherpaOnnxProvider, nil
 	})
-	asrPool := common.NewModuleProviderPool(1, asrPoolType)
+	asrPool := common.NewModuleProviderPool(cfg.ASR.PoolSize, asrPoolType)
 	err = asrPool.Initialize()
 	if err != nil {
 		log.Fatal(err)
@@ -120,10 +128,10 @@ func load() (*common.ModuleProviderPool, *common.ModuleProviderPool, *common.Mod
 	// tts
 	ttsPoolType := reflect.TypeOf(&tts.SherpaOnnxProvider{})
 	common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
-		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(tts.NewDefaultSherpaOnnxOfflineTtsConfig(), tts.KokoroTTS_Speaker_ZM_YunJian, 1.0, "kokoroTTS")
+		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(tts.NewDefaultSherpaOnnxOfflineTtsConfig(), cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
 		return sherpaOnnxProvider, nil
 	})
-	ttsPool := common.NewModuleProviderPool(1, ttsPoolType)
+	ttsPool := common.NewModuleProviderPool(cfg.TTS.PoolSize, ttsPoolType)
 	err = ttsPool.Initialize()
 	if err != nil {
 		log.Fatal(err)
@@ -132,11 +140,31 @@ func load() (*common.ModuleProviderPool, *common.ModuleProviderPool, *common.Mod
 	return vadPool, asrPool, ttsPool
 }
 
-var vadPool, asrPool, ttsPool *common.ModuleProviderPool
-
-func init() {
-	logger.InitLoggerWithConfig(logger.NewDefaultLoggerConfig())
-	vadPool, asrPool, ttsPool = load()
+// newLLMProcessor builds the configured LLM provider and wraps it in the
+// matching pipeline processor. openai_api works against any OpenAI-compatible
+// endpoint (OpenAI, OpenRouter, Ollama /v1, vLLM); ollama_api uses the native
+// Ollama client (endpoint from OLLAMA_HOST).
+func newLLMProcessor(cfg *config.Config, session *common.Session) (processors.IFrameProcessor, error) {
+	switch cfg.LLM.Provider {
+	case "ollama_api":
+		var thinking *string
+		if cfg.LLM.Thinking != "" {
+			thinking = &cfg.LLM.Thinking
+		}
+		provider := llm.NewOllamaAPIProvider(llm.OllamaAPIProviderName, cfg.LLM.Model, cfg.LLM.Stream, thinking, nil, cfg.LLM.Tools)
+		if provider == nil {
+			return nil, fmt.Errorf("failed to create ollama_api LLM provider for model %q", cfg.LLM.Model)
+		}
+		return llm_processors.NewLLMOllamaApiProcessor(provider, session, llm_processors.Mode_Chat), nil
+	case "openai_api":
+		provider := llm.NewOpenAIAPIProvider(llm.OpenAIAPIProviderName, cfg.LLM.BaseURL, cfg.LLM.Model, cfg.LLM.Tools)
+		if provider == nil {
+			return nil, fmt.Errorf("failed to create openai_api LLM provider for model %q at %s", cfg.LLM.Model, cfg.LLM.BaseURL)
+		}
+		return llm_processors.NewLLMOpenAIApiProcessor(provider, session, llm_processors.Mode_Chat, cfg.LLM.Stream, *types.NewLMGenerateArgs()), nil
+	default:
+		return nil, fmt.Errorf("unknown llm.provider %q", cfg.LLM.Provider)
+	}
 }
 
 // handleWebSocket handles incoming WebSocket connections
@@ -151,9 +179,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Set Session
 	clientId := fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String())
-	chatHistorySize := 2
+	chatHistorySize := cfg.Server.ChatHistorySize
 	session := common.NewSession(clientId, &chatHistorySize)
-	session.InitChatMessage(map[string]any{"role": "system", "content": consts.DefaultLLMSystemPrompt})
+	session.InitChatMessage(map[string]any{"role": "system", "content": cfg.Server.SystemPrompt})
 
 	// vad provider
 	vadPoolInstanceInfo, err := vadPool.Get()
@@ -167,7 +195,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Wrap the connection to implement our interface
 	wsConn := &ExampleIWebSocketConn{Conn: conn}
 
-	// Create audio VAD parameters todo: use viper config to hot load
+	// Create audio VAD parameters
 	audioCameraParams := params.NewAudioCameraParams()
 	audioCameraParams.AudioVADParams.WithVADAnalyzer(vadAnalyzer).
 		WithVADEnabled(true).WithVADAudioPassthrough(true)
@@ -207,14 +235,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	outRate, outChannels, outSampleWidth := ttsProvider.GetSampleInfo()
 	audioCameraParams.WithAudioOutSampleWidth(outSampleWidth).WithAudioOutSampleRate(outRate).WithAudioOutChannels(outChannels)
 
-	// Set LLM Processor
-	//llmProvider := llm.NewOllamaAPIProviderWithoutTools(llm.OllamaAPIProviderName, llm.OllamaAPIProviderModel_QWEN3_0_6, true, nil, nil)
-	//llmProvider := llm.NewOllamaAPIProvider(llm.OllamaAPIProviderName, llm.OllamaAPIProviderModel_QWEN3_0_6, true, nil, nil, []string{"web_search"})
-	//llmProcessor := llm_processors.NewLLMOllamaApiProcessor(llmProvider, session, llm_processors.Mode_Chat)
-	llmProvider := llm.NewOpenAIAPIProvider(llm.OllamaAPIProviderName, llm.OllamaAPIProviderBaseUrl, llm.OllamaAPIProviderModel_QWEN3_0_6, []string{"web_search"})
-	//llmProvider := llm.NewOpenAIAPIProvider(llm.OpenAIAPIProviderName, llm.OpenRouterAIAPIProviderBaseUrl, llm.OpenRouterAIAPIProviderModelQwen2_5_72b_free)
-	//llmProvider := llm.NewOpenAIAPIProvider(llm.OpenAIAPIProviderName, llm.OpenRouterAIAPIProviderBaseUrl, llm.OpenRouterAIAPIProviderModelQwen3_235b_free)
-	llmProcessor := llm_processors.NewLLMOpenAIApiProcessor(llmProvider, session, llm_processors.Mode_Chat, true, *types.NewLMGenerateArgs())
+	// Set LLM Processor from config
+	llmProcessor, err := newLLMProcessor(cfg, session)
+	if err != nil {
+		log.Printf("Create LLM processor err: %v", err)
+		return
+	}
 
 	// Set Sentence Processor
 	sentenceProcessor := aggregators.NewSentenceAggregatorWithEnd(reflect.TypeOf(&achatbot_frames.TurnEndFrame{}))
@@ -277,23 +303,41 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		delete(activeTasks, task)
 		serverMu.Unlock()
 
-		// put to pool
-		asrPool.Put(vadPoolInstanceInfo)
+		// return each instance to its own pool
+		vadPool.Put(vadPoolInstanceInfo)
 		asrPool.Put(asrPoolInstanceInfo)
-		asrPool.Put(ttsPoolInstanceInfo)
+		ttsPool.Put(ttsPoolInstanceInfo)
 	}()
 
 	task.Run()
 }
 
 func main() {
-	// Create HTTP server
-	server := &http.Server{
-		Addr: ":4321",
+	configPath := flag.String("config", "", "path to config.yaml (default: discover config.yaml in . or ./configs, else built-in defaults)")
+	flag.Parse()
+
+	var err error
+	cfg, err = config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("Load config failed: %v", err)
 	}
 
-	// Set up the WebSocket endpoint with Rate Limiter middleware, set max one connect for local test
-	rateLimiter := middleware.NewDefaultRateLimiter().WithEnable(true).WithMaxConns(3)
+	logger.InitLoggerWithConfig(logger.NewDefaultLoggerConfig())
+	logger.Info("Loaded config",
+		"vad.model", cfg.VAD.Model, "vad.pool_size", cfg.VAD.PoolSize,
+		"asr.model", cfg.ASR.Model, "asr.pool_size", cfg.ASR.PoolSize,
+		"tts.model", cfg.TTS.Model, "tts.speaker_id", cfg.TTS.SpeakerID, "tts.pool_size", cfg.TTS.PoolSize,
+		"llm.provider", cfg.LLM.Provider, "llm.model", cfg.LLM.Model, "llm.base_url", cfg.LLM.BaseURL,
+	)
+	vadPool, asrPool, ttsPool = load(cfg)
+
+	// Create HTTP server
+	server := &http.Server{
+		Addr: cfg.Server.Addr,
+	}
+
+	// Set up the WebSocket endpoint with Rate Limiter middleware
+	rateLimiter := middleware.NewDefaultRateLimiter().WithEnable(cfg.Server.RateLimitEnabled).WithMaxConns(cfg.Server.MaxConns)
 	http.Handle("/", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
 
 	// Channel to listen for interrupt signal
@@ -302,7 +346,7 @@ func main() {
 
 	// Run server in a goroutine
 	go func() {
-		logger.Info("Starting WebSocket server on :4321")
+		logger.Info("Starting WebSocket server on " + cfg.Server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
 		}
