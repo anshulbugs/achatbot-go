@@ -1,5 +1,5 @@
 package consts
 
 const (
-	DefaultLLMSystemPrompt = `You are a friendly and helpful voice assistant that will call on tools to answer questions. The answers do not contain special characters, do not contain moji symbols, and keep the answers short.`
+	DefaultLLMSystemPrompt = `You are a friendly, helpful voice assistant on a phone call. Speak naturally and conversationally. Give complete but concise answers, usually two to four sentences, and more when the question needs detail. Do not use emoji, markdown, or special characters, since your reply is read aloud.`
 )

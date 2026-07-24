@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -178,7 +179,11 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 	log.Printf("telnyx media stream connected call=%s", id)
 
-	runVoiceSession(telnyx.NewConn(ws), telnyx.NewSerializer(consts.DefaultRate), sessionConfig{
+	ser := telnyx.NewSerializer(consts.DefaultRate)
+	ser.SetLatencyHook(func(d time.Duration) {
+		log.Printf("telnyx response latency ~%dms call=%s", d.Milliseconds(), id)
+	})
+	runVoiceSession(telnyx.NewConn(ws), ser, sessionConfig{
 		clientID:           "telnyx_" + id,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,
@@ -187,6 +192,8 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		addWavHeader:       false,
 		hello:              p.Hello,
 		allowInterruptions: true, // adaptive echo gate lets real barge-in through
+		idlePrompt:         cfg.Server.IdlePromptText,
+		idleSecs:           cfg.Server.IdlePromptSecs,
 	})
 	log.Printf("telnyx media stream ended call=%s", id)
 }

@@ -59,6 +59,11 @@ type ServerConfig struct {
 	AllowInterruptions bool `mapstructure:"allow_interruptions"`
 	// SystemPrompt seeds every session's system message.
 	SystemPrompt string `mapstructure:"system_prompt"`
+	// IdlePromptSecs, when > 0, makes the agent speak IdlePromptText after
+	// this many seconds of silence (no bot or caller audio). 0 disables it.
+	IdlePromptSecs float64 `mapstructure:"idle_prompt_secs"`
+	// IdlePromptText is spoken on idle timeout (e.g. "Are you still there?").
+	IdlePromptText string `mapstructure:"idle_prompt_text"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -179,6 +184,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.chat_history_size", 2)
 	v.SetDefault("server.allow_interruptions", false)
 	v.SetDefault("server.system_prompt", consts.DefaultLLMSystemPrompt)
+	v.SetDefault("server.idle_prompt_secs", 0)
+	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 
 	v.SetDefault("vad.model", "silero")
 	v.SetDefault("vad.pool_size", 3)

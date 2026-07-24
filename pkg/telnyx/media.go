@@ -18,7 +18,7 @@ const telnyxRate = 8000
 
 // echoTail is how long after the bot's audio finishes playing we keep the
 // echo gate active, to catch the tail of acoustic echo.
-const echoTail = 250 * time.Millisecond
+const echoTail = 150 * time.Millisecond
 
 // Adaptive echo-gate tuning. While the bot is speaking, inbound audio is
 // mostly its own echo at a low, stable level; the caller interrupting is
@@ -55,7 +55,17 @@ type Serializer struct {
 	playbackEndsAt time.Time
 	suppressEcho   bool
 	echoFloor      float64 // running estimate of inbound echo RMS during bot speech
+
+	// Wire-level response-latency measurement: time from the caller's last
+	// speech frame to the bot's first reply audio.
+	lastSpeechAt time.Time
+	awaitingBot  bool
+	onLatency    func(time.Duration)
 }
+
+// SetLatencyHook registers a callback fired once per turn with the measured
+// time from the caller's last speech to the bot's first reply audio.
+func (s *Serializer) SetLatencyHook(fn func(time.Duration)) { s.onLatency = fn }
 
 // NewSerializer builds a Telnyx media serializer for the given pipeline sample
 // rate (typically 16000), with half-duplex echo suppression enabled.
@@ -86,13 +96,17 @@ func rms16(pcm []byte) float64 {
 // caller barging in); the quiet, steady echo is dropped and used to update the
 // floor. This keeps barge-in working without the bot hearing itself.
 func (s *Serializer) keepInbound(pcm8 []byte) bool {
+	rms := rms16(pcm8)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rms > bargeAbsFloor { // actual speech: remember it for latency timing
+		s.lastSpeechAt = time.Now()
+		s.awaitingBot = true
+	}
 	if time.Now().After(s.playbackEndsAt.Add(echoTail)) {
-		s.echoFloor = 0 // bot silent: reset floor for the next turn
+		s.echoFloor = 0 // bot silent: pass everything
 		return true
 	}
-	rms := rms16(pcm8)
 	if s.echoFloor == 0 {
 		s.echoFloor = rms
 	}
@@ -104,7 +118,8 @@ func (s *Serializer) keepInbound(pcm8 []byte) bool {
 }
 
 // noteOutbound advances the estimated playback-end clock by the duration of a
-// chunk of outbound audio (given as sample count at telnyxRate).
+// chunk of outbound audio (given as sample count at telnyxRate) and, on the
+// first reply audio of a turn, reports the response latency.
 func (s *Serializer) noteOutbound(samples int) {
 	dur := time.Duration(samples) * time.Second / telnyxRate
 	s.mu.Lock()
@@ -113,7 +128,16 @@ func (s *Serializer) noteOutbound(samples int) {
 		s.playbackEndsAt = now
 	}
 	s.playbackEndsAt = s.playbackEndsAt.Add(dur)
+	var latency time.Duration
+	if s.awaitingBot && !s.lastSpeechAt.IsZero() {
+		latency = now.Sub(s.lastSpeechAt)
+		s.awaitingBot = false
+	}
+	hook := s.onLatency
 	s.mu.Unlock()
+	if latency > 0 && hook != nil {
+		hook(latency)
+	}
 }
 
 // resetPlayback marks playback as finished (used on interruption/clear, when
@@ -122,6 +146,20 @@ func (s *Serializer) resetPlayback() {
 	s.mu.Lock()
 	s.playbackEndsAt = time.Now()
 	s.mu.Unlock()
+}
+
+// BotActive reports whether the bot is estimated to still be playing audio.
+func (s *Serializer) BotActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Now().Before(s.playbackEndsAt.Add(echoTail))
+}
+
+// PlaybackEnd returns the estimated time the bot's audio finishes playing.
+func (s *Serializer) PlaybackEnd() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.playbackEndsAt
 }
 
 // Deserialize turns an inbound Telnyx "media" message into an AudioRawFrame at

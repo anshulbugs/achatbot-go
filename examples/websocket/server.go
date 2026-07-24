@@ -399,9 +399,11 @@ type sessionConfig struct {
 	voiceID            int
 	speed              float32
 	llmModel           string
-	addWavHeader       bool   // true for the browser; false for raw telephony audio
-	hello              string // optional greeting synthesized and played on connect
-	allowInterruptions bool   // browser: barge-in; telephony: false (half-duplex, echo-safe)
+	addWavHeader       bool    // true for the browser; false for raw telephony audio
+	hello              string  // optional greeting synthesized and played on connect
+	allowInterruptions bool    // browser: barge-in; telephony: false (half-duplex, echo-safe)
+	idlePrompt         string  // spoken after idleSecs of silence ("" disables)
+	idleSecs           float64 // silence threshold before idlePrompt fires
 }
 
 // handleWebSocket serves the browser studio client over protobuf/PCM16.
@@ -452,6 +454,17 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	session := common.NewSession(sc.clientID, &chatHistorySize)
 	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
 
+	// Track caller activity for the idle re-prompt.
+	var actMu sync.Mutex
+	lastUser := time.Now()
+	idlePrompts := 0
+	touchUser := func() {
+		actMu.Lock()
+		lastUser = time.Now()
+		idlePrompts = 0
+		actMu.Unlock()
+	}
+
 	// vad provider
 	vadPoolInstanceInfo, err := vadPool.Get()
 	if err != nil {
@@ -493,6 +506,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	asrProvider := asrPoolInstanceInfo.GetInstance().(*asr.SherpaOnnxProvider)
 	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider).
 		WithOnTranscript(func(text string) {
+			touchUser() // the caller spoke: reset the idle timer
 			// Surface the user's transcript to the client, tagged so the UI
 			// can render it as the user's turn (bot text uses "TextFrame").
 			// Harmless for telephony: the Telnyx serializer drops TextFrames.
@@ -525,6 +539,48 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// synthesize directly here: the pipeline's TTS processor is not yet active.
 	if sc.hello != "" {
 		go sendAudioChunks(transportWriter, ttsProvider.Synthesize(sc.hello), outRate)
+	}
+
+	// Idle re-prompt (telephony): if the line goes silent for idleSecs with no
+	// bot or caller audio, speak idlePrompt ("Are you still there?") up to
+	// twice before giving up. Pre-synthesize once to avoid racing the pipeline
+	// TTS instance.
+	if sc.idlePrompt != "" && sc.idleSecs > 0 {
+		if tser, ok := serializer.(*telnyx.Serializer); ok {
+			idlePCM := ttsProvider.Synthesize(sc.idlePrompt)
+			idleDur := time.Duration(sc.idleSecs * float64(time.Second))
+			idleStop := make(chan struct{})
+			defer close(idleStop)
+			go func() {
+				t := time.NewTicker(time.Second)
+				defer t.Stop()
+				var lastPrompt time.Time
+				for {
+					select {
+					case <-idleStop:
+						return
+					case <-t.C:
+						if tser.BotActive() {
+							continue
+						}
+						actMu.Lock()
+						ref := lastUser
+						np := idlePrompts
+						actMu.Unlock()
+						if pe := tser.PlaybackEnd(); pe.After(ref) {
+							ref = pe
+						}
+						if time.Since(ref) >= idleDur && np < 2 && time.Since(lastPrompt) >= idleDur {
+							sendAudioChunks(transportWriter, idlePCM, outRate)
+							lastPrompt = time.Now()
+							actMu.Lock()
+							idlePrompts++
+							actMu.Unlock()
+						}
+					}
+				}
+			}()
+		}
 	}
 
 	// Set LLM Processor from config plus per-session overrides
