@@ -40,6 +40,7 @@ import (
 	"achatbot/pkg/services/middleware"
 	"achatbot/pkg/telnyx"
 	"achatbot/pkg/transports"
+	"achatbot/pkg/turngate"
 	"achatbot/pkg/types"
 	achatbot_frames "achatbot/pkg/types/frames"
 )
@@ -600,39 +601,44 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		wsParams,
 	)
 
-	// 2. Create a simple pipeline with the async processor
-	myPipeline := pipeline.NewPipelineWithVerbose(
-		[]processors.IFrameProcessor{
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame(
-				[]frames.Frame{&frames.StartFrame{}, &frames.EndFrame{}, &frames.CancelFrame{}},
-			),
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&achatbot_frames.BotSpeakingFrame{}}).WithMaxIdToLogs([]uint64{}),
+	// 2. Assemble the pipeline. The optional turn gate (semantic endpointing)
+	// sits between ASR and the LLM: it holds partial utterances until the
+	// caller has finished, so vad.stop_secs can stay short.
+	procs := []processors.IFrameProcessor{
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame(
+			[]frames.Frame{&frames.StartFrame{}, &frames.EndFrame{}, &frames.CancelFrame{}},
+		),
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&achatbot_frames.BotSpeakingFrame{}}).WithMaxIdToLogs([]uint64{}),
 
-			ws_transport.InputProcessor(),
-			achatbot_aggregators.NewAudioResponseAggregatorWithAccumulate(
-				reflect.TypeOf(&achatbot_frames.UserStartedSpeakingFrame{}),
-				reflect.TypeOf(&achatbot_frames.UserStoppedSpeakingFrame{}),
-				reflect.TypeOf(&achatbot_frames.VADStateAudioRawFrame{}),
-			),
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}, &achatbot_frames.VADStateAudioRawFrame{}}),
-			//achatbot_processors.NewAudioSaveProcessor("user_speak", consts.RECORDS_DIR, true),
-			asrProcessor.WithPassRawAudio(false),
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.TextFrame{}}),
-			llmProcessor,
-			//processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&achatbot_frames.ThinkTextFrame{}, &frames.TextFrame{}}),
-			sentenceProcessor,
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.TextFrame{}}),
-			ttsProcessor.WithPassText(true),
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}}),
-			//achatbot_processors.NewAudioResampleProcessor(audioCameraParams.AudioOutSampleRate),
-			//processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}}),
-			//achatbot_processors.NewAudioSaveProcessor("bot_speak", consts.RECORDS_DIR, true),
-			processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}}),
-			ws_transport.OutputProcessor(),
-		},
-		nil, nil,
-		false,
+		ws_transport.InputProcessor(),
+		achatbot_aggregators.NewAudioResponseAggregatorWithAccumulate(
+			reflect.TypeOf(&achatbot_frames.UserStartedSpeakingFrame{}),
+			reflect.TypeOf(&achatbot_frames.UserStoppedSpeakingFrame{}),
+			reflect.TypeOf(&achatbot_frames.VADStateAudioRawFrame{}),
+		),
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}, &achatbot_frames.VADStateAudioRawFrame{}}),
+		asrProcessor.WithPassRawAudio(false),
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.TextFrame{}}),
+	}
+	if cfg.Server.TurnGateEnabled {
+		gate := turngate.New(cfg.LLM.BaseURL, cfg.Server.TurnGateModel)
+		gateProc := achatbot_processors.NewTurnGateProcessor(
+			gate, time.Duration(cfg.Server.TurnGateMaxWaitSecs*float64(time.Second)),
+		).WithOnDecide(func(refined string, complete bool) {
+			logger.Infof("turn gate: complete=%v refined=%q", complete, refined)
+		})
+		procs = append(procs, gateProc)
+	}
+	procs = append(procs,
+		llmProcessor,
+		sentenceProcessor,
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.TextFrame{}}),
+		ttsProcessor.WithPassText(true),
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}}),
+		processors.NewDefaultFrameLoggerProcessorWithIncludeFrame([]frames.Frame{&frames.AudioRawFrame{}}),
+		ws_transport.OutputProcessor(),
 	)
+	myPipeline := pipeline.NewPipelineWithVerbose(procs, nil, nil, false)
 	logger.Info(myPipeline.String())
 
 	// In a real application, you would integrate this with your frame processing pipeline

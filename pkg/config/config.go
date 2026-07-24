@@ -64,6 +64,15 @@ type ServerConfig struct {
 	IdlePromptSecs float64 `mapstructure:"idle_prompt_secs"`
 	// IdlePromptText is spoken on idle timeout (e.g. "Are you still there?").
 	IdlePromptText string `mapstructure:"idle_prompt_text"`
+	// TurnGateEnabled inserts a semantic-endpointing LLM between ASR and the
+	// main LLM: it decides whether the caller has finished (respond) or is
+	// pausing (wait), and cleans up STT errors. Lets vad.stop_secs stay short.
+	TurnGateEnabled bool `mapstructure:"turn_gate_enabled"`
+	// TurnGateModel is the small/fast model used for the gate decision.
+	TurnGateModel string `mapstructure:"turn_gate_model"`
+	// TurnGateMaxWaitSecs is the absolute silence after which a held
+	// (incomplete) utterance is forwarded anyway, so the gate can never hang.
+	TurnGateMaxWaitSecs float64 `mapstructure:"turn_gate_max_wait_secs"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -186,6 +195,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.system_prompt", consts.DefaultLLMSystemPrompt)
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
+	v.SetDefault("server.turn_gate_enabled", false)
+	v.SetDefault("server.turn_gate_model", "qwen3:0.6b")
+	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 
 	v.SetDefault("vad.model", "silero")
 	v.SetDefault("vad.pool_size", 3)
