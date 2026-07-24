@@ -91,10 +91,10 @@
         messageContainer.scrollTop = messageContainer.scrollHeight;
       }
 
-      const proto = protobuf.load("../protos/data_frames.proto", (err, root) => {
+      const proto = protobuf.load("./data_frames.proto", (err, root) => {
           if (err) {
               document.getElementById("progressText").textContent =
-                  "Failed to load protos/data_frames.proto - is the UI served from the ui/ directory with the protos symlink intact? " + err;
+                  "Failed to load data_frames.proto - is the UI served from the ui/ directory? " + err;
               throw err;
           }
           Frame = root.lookupType("pipeline_frames.Frame");
