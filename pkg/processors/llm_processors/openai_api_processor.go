@@ -68,6 +68,7 @@ func (p *LLMOpenAIApiProcessor) ProcessFrame(frame frames.Frame, direction proce
 		logger.Info("LLMOpenAIApiProcessor Cancel")
 		p.PushFrame(f, direction)
 	case *frames.TextFrame:
+		logger.Infof("STAGE llm_recv %q", f.Text)
 		switch p.mode {
 		case "chat":
 			p.chat(f, direction)
@@ -165,6 +166,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 		} else { //stream
 			acc := openai.ChatCompletionAccumulator{}
 			toolMsgs := []types.Message{}
+			firstToken := true
 			p.provider.ChatStream(context.Background(), p.args, messages, func(chunk *openai.ChatCompletionChunk) error {
 				acc.AddChunk(*chunk)
 				if len(chunk.Choices) == 0 {
@@ -175,6 +177,10 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 					p.QueueFrame(achatbot_frames.NewThinkTextFrame(chunk.Choices[0].Delta.Reasoning), direction)
 				}
 				if chunk.Choices[0].Delta.Content != "" {
+					if firstToken {
+						logger.Infof("STAGE llm_first_token")
+						firstToken = false
+					}
 					p.QueueFrame(frames.NewTextFrame(chunk.Choices[0].Delta.Content), direction)
 				}
 

@@ -22,7 +22,6 @@ import (
 	"github.com/weedge/pipeline-go/pkg/logger"
 	"github.com/weedge/pipeline-go/pkg/pipeline"
 	"github.com/weedge/pipeline-go/pkg/processors"
-	"github.com/weedge/pipeline-go/pkg/processors/aggregators"
 	"github.com/weedge/pipeline-go/pkg/serializers"
 
 	"achatbot/pkg/common"
@@ -597,8 +596,10 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	}
 	log.Printf("session %s: voice=%d speed=%.2f llm=%q", sc.clientID, sc.voiceID, sc.speed, sc.llmModel)
 
-	// Set Sentence Processor
-	sentenceProcessor := aggregators.NewSentenceAggregatorWithEnd(reflect.TypeOf(&achatbot_frames.TurnEndFrame{}))
+	// Set Sentence Processor: flush the opening ~4 words of each reply fast so
+	// TTS (and the caller) start immediately, then normal sentence boundaries.
+	sentenceProcessor := achatbot_aggregators.NewFastFirstAggregatorWithEnd(
+		reflect.TypeOf(&achatbot_frames.TurnEndFrame{}), 4)
 
 	// 1. Create the WebSocket server input processor
 	ws_transport := transports.NewWebsocketTransport(
