@@ -67,6 +67,8 @@ type VADConfig struct {
 	PoolSize int `mapstructure:"pool_size"`
 	// BufferSizeSeconds is the sherpa-onnx VAD ring-buffer length.
 	BufferSizeSeconds float32 `mapstructure:"buffer_size_seconds"`
+	// NumThreads is the onnxruntime intra-op thread count per instance.
+	NumThreads int `mapstructure:"num_threads"`
 }
 
 // ASRConfig selects the speech-recognition model and its provider pool.
@@ -76,6 +78,9 @@ type ASRConfig struct {
 	Model string `mapstructure:"model"`
 	// PoolSize is how many ASR provider instances to preload.
 	PoolSize int `mapstructure:"pool_size"`
+	// NumThreads is the onnxruntime intra-op thread count per instance;
+	// raising it shortens transcription latency on multi-core hosts.
+	NumThreads int `mapstructure:"num_threads"`
 }
 
 // TTSConfig selects the speech-synthesis model, voice, and provider pool.
@@ -88,6 +93,9 @@ type TTSConfig struct {
 	Speed float32 `mapstructure:"speed"`
 	// PoolSize is how many TTS provider instances to preload.
 	PoolSize int `mapstructure:"pool_size"`
+	// NumThreads is the onnxruntime intra-op thread count per instance;
+	// raising it shortens synthesis latency (the dominant per-reply cost).
+	NumThreads int `mapstructure:"num_threads"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.
@@ -161,14 +169,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("vad.model", "silero")
 	v.SetDefault("vad.pool_size", 3)
 	v.SetDefault("vad.buffer_size_seconds", 100)
+	v.SetDefault("vad.num_threads", 1)
 
 	v.SetDefault("asr.model", "sense_voice")
 	v.SetDefault("asr.pool_size", 1)
+	v.SetDefault("asr.num_threads", 1)
 
 	v.SetDefault("tts.model", "kokoro")
 	v.SetDefault("tts.speaker_id", 49) // kokoro zm_yunjian
 	v.SetDefault("tts.speed", 1.0)
 	v.SetDefault("tts.pool_size", 1)
+	v.SetDefault("tts.num_threads", 1)
 
 	v.SetDefault("llm.provider", "openai_api")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:11434/v1")
@@ -208,6 +219,15 @@ func (c *Config) validate() error {
 	}
 	if c.VAD.BufferSizeSeconds <= 0 {
 		return invalidf("vad.buffer_size_seconds %v must be > 0", c.VAD.BufferSizeSeconds)
+	}
+	if c.VAD.NumThreads < 1 {
+		return invalidf("vad.num_threads %d must be >= 1", c.VAD.NumThreads)
+	}
+	if c.ASR.NumThreads < 1 {
+		return invalidf("asr.num_threads %d must be >= 1", c.ASR.NumThreads)
+	}
+	if c.TTS.NumThreads < 1 {
+		return invalidf("tts.num_threads %d must be >= 1", c.TTS.NumThreads)
 	}
 	if c.TTS.Speed <= 0 {
 		return invalidf("tts.speed %v must be > 0", c.TTS.Speed)

@@ -98,8 +98,10 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	// vad
 	vadPoolType := reflect.TypeOf(&vad_analyzer.SherpaOnnxProvider{})
 	common.RegisterNewFunc(vadPoolType, func() (common.IPoolInstance, error) {
+		vadConfig := vad_analyzer.NewDefaultSherpaOnnxVadModelConfig(cfg.VAD.Model)
+		vadConfig.NumThreads = cfg.VAD.NumThreads
 		sherpaOnnxProvider := vad_analyzer.NewSherpaOnnxProvider(
-			vad_analyzer.NewDefaultSherpaOnnxVadModelConfig(cfg.VAD.Model),
+			vadConfig,
 			cfg.VAD.BufferSizeSeconds,
 		)
 		if sherpaOnnxProvider == nil {
@@ -118,6 +120,7 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	if err != nil {
 		log.Fatal(err)
 	}
+	asrConfig.ModelConfig.NumThreads = cfg.ASR.NumThreads
 	asrPoolType := reflect.TypeOf(&asr.SherpaOnnxProvider{})
 	common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
 		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
@@ -135,7 +138,9 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	// tts
 	ttsPoolType := reflect.TypeOf(&tts.SherpaOnnxProvider{})
 	common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
-		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(tts.NewDefaultSherpaOnnxOfflineTtsConfig(), cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
+		ttsConfig := tts.NewDefaultSherpaOnnxOfflineTtsConfig()
+		ttsConfig.Model.NumThreads = cfg.TTS.NumThreads
+		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(ttsConfig, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
 		if sherpaOnnxProvider == nil {
 			return nil, fmt.Errorf("failed to create TTS provider for model %q (model files downloaded?)", cfg.TTS.Model)
 		}

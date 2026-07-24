@@ -32,6 +32,8 @@ asr:
   # Model files must be downloaded under models/ first (see README).
   model: sense_voice
   pool_size: 1
+  # onnxruntime threads per instance; raise to shorten transcription latency.
+  num_threads: 1
 
 tts:
   # Only kokoro is implemented today.
@@ -42,6 +44,9 @@ tts:
   # Larger is faster; must be > 0.
   speed: 1.0
   pool_size: 1
+  # onnxruntime threads per instance. Synthesis is the dominant per-reply
+  # latency on CPU; raise this on multi-core hosts (e.g. 8).
+  num_threads: 1
 
 llm:
   # openai_api: any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM,

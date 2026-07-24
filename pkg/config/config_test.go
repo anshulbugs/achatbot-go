@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	assert.Equal(t, "sense_voice", cfg.ASR.Model)
 	assert.Equal(t, 1, cfg.ASR.PoolSize)
+	assert.Equal(t, 1, cfg.ASR.NumThreads)
+	assert.Equal(t, 1, cfg.TTS.NumThreads)
+	assert.Equal(t, 1, cfg.VAD.NumThreads)
 
 	assert.Equal(t, "kokoro", cfg.TTS.Model)
 	assert.Equal(t, 49, cfg.TTS.SpeakerID)
@@ -58,10 +61,12 @@ vad:
 asr:
   model: whisper
   pool_size: 4
+  num_threads: 4
 tts:
   speaker_id: 47
   speed: 1.2
   pool_size: 4
+  num_threads: 8
 llm:
   provider: ollama_api
   model: qwen2.5:7b
@@ -80,8 +85,10 @@ llm:
 	assert.Equal(t, 8, cfg.VAD.PoolSize)
 	assert.Equal(t, "whisper", cfg.ASR.Model)
 	assert.Equal(t, 4, cfg.ASR.PoolSize)
+	assert.Equal(t, 4, cfg.ASR.NumThreads)
 	assert.Equal(t, 47, cfg.TTS.SpeakerID)
 	assert.Equal(t, float32(1.2), cfg.TTS.Speed)
+	assert.Equal(t, 8, cfg.TTS.NumThreads)
 	assert.Equal(t, "ollama_api", cfg.LLM.Provider)
 	assert.Equal(t, "qwen2.5:7b", cfg.LLM.Model)
 	assert.False(t, cfg.LLM.Stream)
@@ -145,6 +152,7 @@ func TestValidation(t *testing.T) {
 		{"zero vad pool", "vad:\n  pool_size: 0\n", "vad.pool_size"},
 		{"negative asr pool", "asr:\n  pool_size: -1\n", "asr.pool_size"},
 		{"zero tts speed", "tts:\n  speed: 0\n", "tts.speed"},
+		{"zero tts threads", "tts:\n  num_threads: 0\n", "tts.num_threads"},
 		{"negative speaker", "tts:\n  speaker_id: -2\n", "tts.speaker_id"},
 		{"empty llm model", "llm:\n  model: \"\"\n", "llm.model"},
 		{"empty base url for openai", "llm:\n  base_url: \"\"\n", "llm.base_url"},
