@@ -105,6 +105,19 @@ func (p *SherpaOnnxProvider) Synthesize(text string) []byte {
 	return utils.SamplesFloatToInt16(generateAudio.Samples)
 }
 
+// SynthesizeStream synthesizes text and delivers PCM16 audio chunks to onAudio
+// as sherpa-onnx produces them, so playback starts before the whole utterance
+// is rendered. onAudio returns false to stop synthesis early (e.g. barge-in).
+func (p *SherpaOnnxProvider) SynthesizeStream(text string, onAudio func(pcm []byte) bool) {
+	p.tts.GenerateWithCallback(text, p.sid, float32(math.Max(float64(p.speed), 1e-6)),
+		func(samples []float32) bool {
+			if len(samples) == 0 {
+				return true
+			}
+			return onAudio(utils.SamplesFloatToInt16(samples))
+		})
+}
+
 func (p *SherpaOnnxProvider) Warmup() {
 	generateAudio := p.tts.Generate("hi", p.sid, float32(math.Max(float64(p.speed), 1e-6)))
 	p.sampleRate = generateAudio.SampleRate

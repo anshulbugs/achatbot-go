@@ -8,6 +8,12 @@ import (
 	"achatbot/pkg/common"
 )
 
+// streamingTTS is the optional low-latency synthesis path; providers that
+// implement it deliver audio chunks as they render instead of one blob.
+type streamingTTS interface {
+	SynthesizeStream(text string, onAudio func(pcm []byte) bool)
+}
+
 type TTSProcessor struct {
 	*processors.AsyncFrameProcessor
 	provider common.ITTSProvider
@@ -57,9 +63,18 @@ func (p *TTSProcessor) ProcessFrame(frame frames.Frame, direction processors.Fra
 		if p.PassText() {
 			p.QueueFrame(f, direction)
 		}
-		audio := p.provider.Synthesize(f.Text)
 		rate, channels, sampleWidth := p.provider.GetSampleInfo()
-		p.PushDownstreamFrame(frames.NewAudioRawFrame(audio, rate, channels, sampleWidth))
+		if st, ok := p.provider.(streamingTTS); ok {
+			// Stream audio chunks as they render so the caller hears the
+			// reply's opening ~250ms sooner than waiting for the full clause.
+			st.SynthesizeStream(f.Text, func(pcm []byte) bool {
+				p.PushDownstreamFrame(frames.NewAudioRawFrame(pcm, rate, channels, sampleWidth))
+				return true
+			})
+		} else {
+			audio := p.provider.Synthesize(f.Text)
+			p.PushDownstreamFrame(frames.NewAudioRawFrame(audio, rate, channels, sampleWidth))
+		}
 	default:
 		p.QueueFrame(f, direction)
 	}
