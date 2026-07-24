@@ -17,19 +17,32 @@ import (
 	"time"
 )
 
-const systemPrompt = `You decide when a phone caller has finished speaking. The input is a speech-to-text transcript of what the caller has said so far. It may contain recognition errors, and it may be an incomplete sentence because the caller paused while thinking.
+const systemPrompt = `You are a turn-taking classifier for a phone voice assistant. Given the caller's speech so far (a live speech-to-text transcript that may cut off mid-thought when they pause), decide whether they have finished a complete thought and expect a reply now, or are still mid-sentence and about to continue.
 
-Do two things:
-1. Produce a corrected, cleaned version of the text (fix obvious transcription errors, punctuation, casing).
-2. Decide whether the caller has clearly finished their thought and is waiting for a reply. If the text trails off, ends mid-clause, ends with a filler like "and", "so", "um", or is only a partial phrase, they are NOT finished.
+Rules:
+- A grammatically complete sentence or a clear question/command is COMPLETE.
+- Text that trails off, ends on a preposition/conjunction/filler ("to", "and", "so", "um", "the"), or is a bare fragment is INCOMPLETE.
+- Do not consider politeness or length; a two-word answer like "Yes please" is COMPLETE.
 
-Reply with ONLY a compact JSON object and nothing else:
-{"complete": true or false, "refined": "cleaned text"}`
+Examples:
+"What time is it?" => complete
+"I want to book a flight to" => incomplete
+"Tell me a joke." => complete
+"So the thing is" => incomplete
+"Yes." => complete
+"Can you tell me the weather in Delhi today?" => complete
+"Um, I was thinking that maybe we could" => incomplete
+"gene" => incomplete
+"What does relativity actually mean?" => complete
 
-// Decision is the gate LLM's verdict for one accumulated utterance.
+Reply with exactly one word: complete or incomplete.`
+
+// Decision is the gate's verdict for one accumulated utterance. Refined is the
+// text to forward downstream (currently the input unchanged; the gate no
+// longer rewrites transcripts, to avoid the model hallucinating completions).
 type Decision struct {
-	Complete bool   `json:"complete"`
-	Refined  string `json:"refined"`
+	Complete bool
+	Refined  string
 }
 
 // Gate calls an OpenAI-compatible chat endpoint to make endpointing decisions.
@@ -70,20 +83,24 @@ type chatResp struct {
 	} `json:"choices"`
 }
 
-// Decide returns whether the accumulated text is a complete turn and a cleaned
-// version of it. It fails open: on any error or unparseable output it returns
-// {Complete: true, Refined: text} so the agent replies rather than hanging.
-func (g *Gate) Decide(ctx context.Context, text string) Decision {
+// Decide classifies whether text is a complete turn. priorAssistant is what
+// the bot last said, given as context so short replies to a question are read
+// as complete. It fails open: on any error it returns Complete=true so the
+// agent replies rather than hanging. Refined is the input text unchanged.
+func (g *Gate) Decide(ctx context.Context, priorAssistant, text string) Decision {
 	fallback := Decision{Complete: true, Refined: text}
+	userContent := "Caller so far: \"" + text + "\""
+	if priorAssistant != "" {
+		userContent = "The assistant just said: \"" + priorAssistant + "\"\n" + userContent
+	}
 	body, err := json.Marshal(chatReq{
 		Model: g.model,
 		Messages: []message{
 			{Role: "system", Content: systemPrompt},
-			// /no_think keeps reasoning models (e.g. qwen3) fast and terse.
-			{Role: "user", Content: text + " /no_think"},
+			{Role: "user", Content: userContent},
 		},
 		Temperature: 0,
-		MaxTokens:   200,
+		MaxTokens:   4,
 		Stream:      false,
 	})
 	if err != nil {
@@ -109,29 +126,15 @@ func (g *Gate) Decide(ctx context.Context, text string) Decision {
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil || len(cr.Choices) == 0 {
 		return fallback
 	}
-	d, ok := parseDecision(cr.Choices[0].Message.Content)
-	if !ok {
-		return fallback
+	out := strings.ToLower(cr.Choices[0].Message.Content)
+	// "incomplete" contains "complete", so test for it first.
+	if strings.Contains(out, "incomplete") {
+		return Decision{Complete: false, Refined: text}
 	}
-	if strings.TrimSpace(d.Refined) == "" {
-		d.Refined = text
+	if strings.Contains(out, "complete") {
+		return Decision{Complete: true, Refined: text}
 	}
-	return d
-}
-
-// parseDecision extracts the JSON object from the model's reply, tolerating
-// surrounding prose or code fences.
-func parseDecision(content string) (Decision, bool) {
-	start := strings.Index(content, "{")
-	end := strings.LastIndex(content, "}")
-	if start < 0 || end <= start {
-		return Decision{}, false
-	}
-	var d Decision
-	if err := json.Unmarshal([]byte(content[start:end+1]), &d); err != nil {
-		return Decision{}, false
-	}
-	return d, true
+	return fallback // unrecognized: reply rather than hang
 }
 
 // String is handy for logs.

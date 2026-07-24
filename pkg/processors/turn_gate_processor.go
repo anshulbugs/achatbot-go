@@ -10,6 +10,7 @@ import (
 	"github.com/weedge/pipeline-go/pkg/logger"
 	"github.com/weedge/pipeline-go/pkg/processors"
 
+	"achatbot/pkg/common"
 	"achatbot/pkg/turngate"
 )
 
@@ -24,10 +25,34 @@ type TurnGateProcessor struct {
 	gate    *turngate.Gate
 	maxWait time.Duration
 
+	session  *common.Session
 	mu       sync.Mutex
 	buffer   string
 	timer    *time.Timer
 	onDecide func(refined string, complete bool)
+}
+
+// WithSession lets the gate read the last assistant turn as context, so a
+// short reply to the bot's question is correctly judged complete.
+func (p *TurnGateProcessor) WithSession(s *common.Session) *TurnGateProcessor {
+	p.session = s
+	return p
+}
+
+// lastAssistant returns the most recent assistant message content, or "".
+func (p *TurnGateProcessor) lastAssistant() string {
+	if p.session == nil {
+		return ""
+	}
+	list := p.session.GetChatHistory().ToList()
+	for i := len(list) - 1; i >= 0; i-- {
+		if role, _ := list[i]["role"].(string); role == "assistant" {
+			if c, ok := list[i]["content"].(string); ok {
+				return c
+			}
+		}
+	}
+	return ""
 }
 
 // NewTurnGateProcessor builds the gate. maxWait is the absolute silence after
@@ -81,7 +106,7 @@ func (p *TurnGateProcessor) handleText(text string) {
 	p.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	decision := p.gate.Decide(ctx, combined)
+	decision := p.gate.Decide(ctx, p.lastAssistant(), combined)
 	cancel()
 	if p.onDecide != nil {
 		p.onDecide(decision.Refined, decision.Complete)

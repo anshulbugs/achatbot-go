@@ -624,7 +624,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		gate := turngate.New(cfg.LLM.BaseURL, cfg.Server.TurnGateModel)
 		gateProc := achatbot_processors.NewTurnGateProcessor(
 			gate, time.Duration(cfg.Server.TurnGateMaxWaitSecs*float64(time.Second)),
-		).WithOnDecide(func(refined string, complete bool) {
+		).WithSession(session).WithOnDecide(func(refined string, complete bool) {
 			logger.Infof("turn gate: complete=%v refined=%q", complete, refined)
 		})
 		procs = append(procs, gateProc)
