@@ -129,7 +129,8 @@ func wavHeader(dataLen, sampleRate int) []byte {
 
 func writeCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
 // ollamaModels lists model names from the Ollama native API, derived from the

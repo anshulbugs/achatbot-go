@@ -684,6 +684,42 @@
       else startAudio();
     });
 
+    // Place an outbound phone call with the current voice/speed/model.
+    const callBtn = $("callBtn"), callStatus = $("callStatus");
+    callBtn.addEventListener("click", async () => {
+      const to = $("toNumber").value.trim();
+      if (!/^\+\d{7,15}$/.test(to)) {
+        callStatus.textContent = "Enter a valid number like +15551234567";
+        return;
+      }
+      callBtn.disabled = true;
+      callStatus.textContent = "Dialing " + to + "…";
+      try {
+        const r = await fetch(apiBase() + "/api/call", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            to,
+            hello: $("helloMsg").value,
+            system_prompt: $("sysPrompt").value,
+            voice: Number(voiceSel.value),
+            speed: Number(speedInput.value),
+            llm: llmSel.value,
+          }),
+        });
+        const body = await r.text();
+        if (!r.ok) {
+          callStatus.textContent = "Call failed: " + body;
+        } else {
+          callStatus.textContent = "Calling " + to + " — pick up your phone.";
+        }
+      } catch (e) {
+        callStatus.textContent = "Call failed: " + e.message + " (is the tunnel up?)";
+      } finally {
+        setTimeout(() => { callBtn.disabled = false; }, 2000);
+      }
+    });
+
     loadOptions();
   </script>
 </body>
