@@ -72,6 +72,11 @@ type VADConfig struct {
 	BufferSizeSeconds float32 `mapstructure:"buffer_size_seconds"`
 	// NumThreads is the onnxruntime intra-op thread count per instance.
 	NumThreads int `mapstructure:"num_threads"`
+	// StartSecs is how much sustained speech marks a turn start.
+	StartSecs float64 `mapstructure:"start_secs"`
+	// StopSecs is how much trailing silence ends the user's turn. Lower is
+	// snappier but risks cutting slow speakers off mid-sentence.
+	StopSecs float64 `mapstructure:"stop_secs"`
 }
 
 // ASRConfig selects the speech-recognition model and its provider pool.
@@ -174,6 +179,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("vad.pool_size", 3)
 	v.SetDefault("vad.buffer_size_seconds", 100)
 	v.SetDefault("vad.num_threads", 1)
+	v.SetDefault("vad.start_secs", 0.032)
+	v.SetDefault("vad.stop_secs", 0.32)
 
 	v.SetDefault("asr.model", "sense_voice")
 	v.SetDefault("asr.pool_size", 1)
@@ -226,6 +233,12 @@ func (c *Config) validate() error {
 	}
 	if c.VAD.NumThreads < 1 {
 		return invalidf("vad.num_threads %d must be >= 1", c.VAD.NumThreads)
+	}
+	if c.VAD.StartSecs <= 0 || c.VAD.StartSecs > 2 {
+		return invalidf("vad.start_secs %v must be in (0, 2]", c.VAD.StartSecs)
+	}
+	if c.VAD.StopSecs <= 0 || c.VAD.StopSecs > 5 {
+		return invalidf("vad.stop_secs %v must be in (0, 5]", c.VAD.StopSecs)
 	}
 	if c.ASR.NumThreads < 1 {
 		return invalidf("asr.num_threads %d must be >= 1", c.ASR.NumThreads)

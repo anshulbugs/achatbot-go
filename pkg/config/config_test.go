@@ -28,6 +28,8 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "silero", cfg.VAD.Model)
 	assert.Equal(t, 3, cfg.VAD.PoolSize)
 	assert.Equal(t, float32(100), cfg.VAD.BufferSizeSeconds)
+	assert.Equal(t, 0.032, cfg.VAD.StartSecs)
+	assert.Equal(t, 0.32, cfg.VAD.StopSecs)
 
 	assert.Equal(t, "sense_voice", cfg.ASR.Model)
 	assert.Equal(t, 1, cfg.ASR.PoolSize)
@@ -154,6 +156,7 @@ func TestValidation(t *testing.T) {
 		{"negative asr pool", "asr:\n  pool_size: -1\n", "asr.pool_size"},
 		{"zero tts speed", "tts:\n  speed: 0\n", "tts.speed"},
 		{"zero tts threads", "tts:\n  num_threads: 0\n", "tts.num_threads"},
+		{"zero vad stop", "vad:\n  stop_secs: 0\n", "vad.stop_secs"},
 		{"negative speaker", "tts:\n  speaker_id: -2\n", "tts.speaker_id"},
 		{"empty llm model", "llm:\n  model: \"\"\n", "llm.model"},
 		{"empty base url for openai", "llm:\n  base_url: \"\"\n", "llm.base_url"},

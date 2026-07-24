@@ -388,7 +388,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer vadPool.Put(vadPoolInstanceInfo)
 	vadProvider := vadPoolInstanceInfo.GetInstance().(*vad_analyzer.SherpaOnnxProvider)
-	vadAnalyzer := vad_analyzer.NewVADAnalyzer(params.NewVADAnalyzerArgs(), vadProvider)
+	vadArgs := params.NewVADAnalyzerArgs().WithStartSecs(cfg.VAD.StartSecs).WithStopSecs(cfg.VAD.StopSecs)
+	vadAnalyzer := vad_analyzer.NewVADAnalyzer(vadArgs, vadProvider)
 
 	// Wrap the connection to implement our interface
 	wsConn := &ExampleIWebSocketConn{Conn: conn}
