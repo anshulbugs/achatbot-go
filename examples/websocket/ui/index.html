@@ -4,7 +4,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.X.X/dist/protobuf.min.js"></script>
+    <script src="./protobuf.min.js"></script>
     <title>Achatbot WebSocket Client Example</title>
     <style>
         #wsUrl {
@@ -93,6 +93,8 @@
 
       const proto = protobuf.load("../protos/data_frames.proto", (err, root) => {
           if (err) {
+              document.getElementById("progressText").textContent =
+                  "Failed to load protos/data_frames.proto - is the UI served from the ui/ directory with the protos symlink intact? " + err;
               throw err;
           }
           Frame = root.lookupType("pipeline_frames.Frame");
