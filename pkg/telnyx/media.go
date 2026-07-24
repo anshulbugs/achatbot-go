@@ -3,6 +3,7 @@ package telnyx
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"sync"
 	"time"
 
@@ -15,9 +16,19 @@ import (
 // Telnyx media streaming audio is G.711 µ-law at 8 kHz.
 const telnyxRate = 8000
 
-// echoTail is how long after the bot's audio finishes playing we keep
-// suppressing inbound audio, to catch the tail of acoustic echo.
+// echoTail is how long after the bot's audio finishes playing we keep the
+// echo gate active, to catch the tail of acoustic echo.
 const echoTail = 250 * time.Millisecond
+
+// Adaptive echo-gate tuning. While the bot is speaking, inbound audio is
+// mostly its own echo at a low, stable level; the caller interrupting is
+// clearly louder. We track the echo floor and let audio through only when it
+// exceeds both an absolute floor and a multiple of that echo level.
+const (
+	bargeAbsFloor = 900.0 // min inbound RMS (int16) to count as speech at all
+	bargeFactor   = 2.6   // inbound must exceed echoFloor * this to be barge-in
+	echoFloorEMA  = 0.15  // smoothing for the running echo-floor estimate
+)
 
 // mediaMessage is the Telnyx bidirectional media-streaming envelope (a subset).
 type mediaMessage struct {
@@ -43,6 +54,7 @@ type Serializer struct {
 	mu             sync.Mutex
 	playbackEndsAt time.Time
 	suppressEcho   bool
+	echoFloor      float64 // running estimate of inbound echo RMS during bot speech
 }
 
 // NewSerializer builds a Telnyx media serializer for the given pipeline sample
@@ -54,11 +66,41 @@ func NewSerializer(pipelineRate int) *Serializer {
 	return &Serializer{pipelineRate: pipelineRate, suppressEcho: true}
 }
 
-// echoActive reports whether the bot is (estimated to be) still playing.
-func (s *Serializer) echoActive() bool {
+// rms16 returns the RMS amplitude of little-endian 16-bit PCM.
+func rms16(pcm []byte) float64 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i < n; i++ {
+		v := float64(int16(pcm[2*i]) | int16(pcm[2*i+1])<<8)
+		sum += v * v
+	}
+	return math.Sqrt(sum / float64(n))
+}
+
+// keepInbound decides whether an inbound 8 kHz PCM chunk should be fed to the
+// pipeline. When the bot is not speaking, everything passes. While the bot is
+// speaking, only audio clearly louder than the tracked echo floor passes (the
+// caller barging in); the quiet, steady echo is dropped and used to update the
+// floor. This keeps barge-in working without the bot hearing itself.
+func (s *Serializer) keepInbound(pcm8 []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return time.Now().Before(s.playbackEndsAt.Add(echoTail))
+	if time.Now().After(s.playbackEndsAt.Add(echoTail)) {
+		s.echoFloor = 0 // bot silent: reset floor for the next turn
+		return true
+	}
+	rms := rms16(pcm8)
+	if s.echoFloor == 0 {
+		s.echoFloor = rms
+	}
+	if rms > bargeAbsFloor && rms > s.echoFloor*bargeFactor {
+		return true // clearly louder than the echo: real barge-in
+	}
+	s.echoFloor = (1-echoFloorEMA)*s.echoFloor + echoFloorEMA*rms
+	return false
 }
 
 // noteOutbound advances the estimated playback-end clock by the duration of a
@@ -93,14 +135,14 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 	if m.Event != "media" || m.Media == nil || m.Media.Payload == "" {
 		return nil, nil
 	}
-	if s.suppressEcho && s.echoActive() {
-		return nil, nil // drop inbound while the bot is still speaking (echo)
-	}
 	mulaw, err := base64.StdEncoding.DecodeString(m.Media.Payload)
 	if err != nil {
 		return nil, nil
 	}
 	pcm8 := MuLawToPCM16(mulaw)
+	if s.suppressEcho && !s.keepInbound(pcm8) {
+		return nil, nil // steady echo while the bot speaks: drop it
+	}
 	pcm := ResamplePCM16(pcm8, telnyxRate, s.pipelineRate)
 	return frames.NewAudioRawFrame(pcm, s.pipelineRate, 1, 2), nil
 }

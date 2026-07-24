@@ -186,7 +186,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		llmModel:           p.LLMModel,
 		addWavHeader:       false,
 		hello:              p.Hello,
-		allowInterruptions: false, // half-duplex: echo suppression handles turn-taking
+		allowInterruptions: true, // adaptive echo gate lets real barge-in through
 	})
 	log.Printf("telnyx media stream ended call=%s", id)
 }
