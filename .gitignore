@@ -35,7 +35,8 @@ go.work.sum
 models
 # dir
 log/
-config/
+/config/
+/config.yaml
 models/
 demo/
 records/

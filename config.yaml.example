@@ -1,0 +1,59 @@
+# achatbot-go configuration.
+#
+# Copy to config.yaml next to the server binary (or pass -config <path>).
+# Every key is optional; omitted keys use the defaults shown here, which
+# reproduce the original hardcoded example-server behavior.
+#
+# Any key can also be overridden with an ACHATBOT_* environment variable using
+# underscores, e.g. ACHATBOT_LLM_MODEL=qwen2.5:7b ACHATBOT_ASR_POOL_SIZE=8
+# (list-valued keys like llm.tools are file-only).
+
+server:
+  addr: ":4321"
+  # Per-IP connection cap enforced by the rate limiter.
+  max_conns: 3
+  rate_limit_enabled: true
+  # Chat turns kept per session.
+  chat_history_size: 2
+  # Uncomment to replace the built-in voice-assistant system prompt.
+  # system_prompt: "You are a helpful voice assistant."
+
+vad:
+  # silero | ten
+  model: silero
+  # Instances preloaded at startup. Each live connection holds one VAD
+  # instance, so this bounds concurrent sessions.
+  pool_size: 3
+  buffer_size_seconds: 100
+
+asr:
+  # sense_voice | whisper | paraformer | zipformer_ctc | moonshine |
+  # fire_red_asr | dolphin | nemo_ctc
+  # Model files must be downloaded under models/ first (see README).
+  model: sense_voice
+  pool_size: 1
+
+tts:
+  # Only kokoro is implemented today.
+  model: kokoro
+  # Kokoro multi-speaker voices: 45 zf_xiaobei, 46 zf_xiaoni, 47 zf_xiaoxiao,
+  # 48 zf_xiaoyi, 49 zm_yunjian, 50 zm_yunxi, 51 zm_yunxia, 52 zm_yunyang.
+  speaker_id: 49
+  # Larger is faster; must be > 0.
+  speed: 1.0
+  pool_size: 1
+
+llm:
+  # openai_api: any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM,
+  #             Ollama's /v1). API key from OPENAI_API_KEY env var.
+  # ollama_api: native Ollama client. Endpoint from OLLAMA_HOST env var;
+  #             base_url is ignored.
+  provider: openai_api
+  base_url: "http://127.0.0.1:11434/v1"
+  model: "qwen3:0.6b"
+  stream: true
+  # ollama_api only: low | medium | high, or empty to disable reasoning.
+  thinking: ""
+  # Registered function names the LLM may call. web_search needs
+  # SERPER_API_KEY or SEARCH_API_KEY (see README). Use [] to disable tools.
+  tools: [web_search]

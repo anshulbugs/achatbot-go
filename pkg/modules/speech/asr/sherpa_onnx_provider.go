@@ -2,6 +2,7 @@ package asr
 
 import (
 	"achatbot/pkg/consts"
+	"fmt"
 	"path/filepath"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -121,18 +122,49 @@ func NewDefaultSherpaOnnxOfflineNemoEncDecCtcModelConfig() (sherpa.OfflineNemoEn
 }
 
 func NewDefaultSherpaOnnxOfflineRecognizerConfig() sherpa.OfflineRecognizerConfig {
-	asrConf, tokenPath := NewDefaultSherpaOnnxOfflineSenseVoiceModelConfig()
+	conf, _ := NewOfflineRecognizerConfigForModel("sense_voice")
+	return conf
+}
+
+// NewOfflineRecognizerConfigForModel builds an OfflineRecognizerConfig for the
+// named ASR model using that model's default file layout under models/.
+// Supported names: sense_voice, whisper, paraformer, zipformer_ctc, moonshine,
+// fire_red_asr, dolphin, nemo_ctc. Unknown names return an error listing the
+// valid options. Model files must already be downloaded (see README).
+func NewOfflineRecognizerConfigForModel(model string) (sherpa.OfflineRecognizerConfig, error) {
 	conf := sherpa.OfflineRecognizerConfig{
 		FeatConfig: sherpa.FeatureConfig{SampleRate: consts.DefaultRate, FeatureDim: 80},
 		ModelConfig: sherpa.OfflineModelConfig{
-			SenseVoice: asrConf,
-			Tokens:     tokenPath,
-			NumThreads: 1, Debug: 0, Provider: "cpu", ModelingUnit: "cjkchar",
+			NumThreads: 1, Debug: 0, Provider: "cpu",
 		},
 		DecodingMethod: "greedy_search", // greedy_search, modified_beam_search
 		MaxActivePaths: 4,               // only valid when decoding_method is modified_beam_search
 	}
-	return conf
+	switch model {
+	case "sense_voice":
+		conf.ModelConfig.SenseVoice, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineSenseVoiceModelConfig()
+		conf.ModelConfig.ModelingUnit = "cjkchar"
+	case "whisper":
+		conf.ModelConfig.Whisper, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineWhisperModelConfig()
+	case "paraformer":
+		conf.ModelConfig.Paraformer, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineParaformerModelConfig()
+		conf.ModelConfig.ModelingUnit = "cjkchar"
+	case "zipformer_ctc":
+		conf.ModelConfig.ZipformerCtc, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineZipformerCtcModelConfig()
+		conf.ModelConfig.ModelingUnit = "cjkchar"
+	case "moonshine":
+		conf.ModelConfig.Moonshine, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineMoonshineModelConfig()
+	case "fire_red_asr":
+		conf.ModelConfig.FireRedAsr, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineFireRedAsrModelConfig()
+		conf.ModelConfig.ModelingUnit = "cjkchar"
+	case "dolphin":
+		conf.ModelConfig.Dolphin, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineDolphinModelConfig()
+	case "nemo_ctc":
+		conf.ModelConfig.NemoCTC, conf.ModelConfig.Tokens = NewDefaultSherpaOnnxOfflineNemoEncDecCtcModelConfig()
+	default:
+		return conf, fmt.Errorf("unknown ASR model %q, valid: sense_voice, whisper, paraformer, zipformer_ctc, moonshine, fire_red_asr, dolphin, nemo_ctc", model)
+	}
+	return conf, nil
 }
 
 func NewSherpaOnnxProvider(config sherpa.OfflineRecognizerConfig) *SherpaOnnxProvider {
