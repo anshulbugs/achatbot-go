@@ -1,6 +1,8 @@
 package processors
 
 import (
+	"strings"
+
 	"github.com/weedge/pipeline-go/pkg/frames"
 	"github.com/weedge/pipeline-go/pkg/logger"
 	"github.com/weedge/pipeline-go/pkg/processors"
@@ -11,7 +13,8 @@ import (
 
 type ASRProcessor struct {
 	*processors.AsyncFrameProcessor
-	provider common.IASRProvider
+	provider     common.IASRProvider
+	onTranscript func(text string)
 }
 
 func NewASRProcessor(provider common.IASRProvider) *ASRProcessor {
@@ -24,6 +27,29 @@ func NewASRProcessor(provider common.IASRProvider) *ASRProcessor {
 func (p *ASRProcessor) WithPassRawAudio(passRawAudio bool) *ASRProcessor {
 	p.AsyncFrameProcessor = p.AsyncFrameProcessor.WithPassRawAudio(passRawAudio)
 	return p
+}
+
+// WithOnTranscript registers a callback fired with each non-empty user
+// transcript, used to surface the user's speech to the client. The callback
+// runs on the ASR processing goroutine.
+func (p *ASRProcessor) WithOnTranscript(fn func(text string)) *ASRProcessor {
+	p.onTranscript = fn
+	return p
+}
+
+// emit transcribes the audio and pushes a downstream TextFrame only when the
+// result is non-empty, so silence or noise that slips past the VAD doesn't
+// trigger a spurious LLM turn (which otherwise makes the model ramble or
+// guess a language). Also notifies the transcript callback.
+func (p *ASRProcessor) emit(audio []byte) {
+	text := strings.TrimSpace(p.provider.Transcribe(audio))
+	if text == "" {
+		return
+	}
+	if p.onTranscript != nil {
+		p.onTranscript(text)
+	}
+	p.PushDownstreamFrame(frames.NewTextFrame(text))
 }
 
 func (p *ASRProcessor) Start(frame *frames.StartFrame) {
@@ -58,20 +84,17 @@ func (p *ASRProcessor) ProcessFrame(frame frames.Frame, direction processors.Fra
 		if p.PassRawAudio() {
 			p.QueueFrame(f, direction)
 		}
-		text := p.provider.Transcribe(f.Audio)
-		p.PushDownstreamFrame(frames.NewTextFrame(text))
+		p.emit(f.Audio)
 	case *achatbot_frames.VADStateAudioRawFrame:
 		if p.PassRawAudio() {
 			p.QueueFrame(f, direction)
 		}
-		text := p.provider.Transcribe(f.Audio)
-		p.PushDownstreamFrame(frames.NewTextFrame(text))
+		p.emit(f.Audio)
 	case *achatbot_frames.AnimationAudioRawFrame:
 		if p.PassRawAudio() {
 			p.QueueFrame(f, direction)
 		}
-		text := p.provider.Transcribe(f.Audio)
-		p.PushDownstreamFrame(frames.NewTextFrame(text))
+		p.emit(f.Audio)
 	default:
 		p.QueueFrame(f, direction)
 	}

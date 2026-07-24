@@ -61,29 +61,41 @@ var (
 	vadPool, asrPool, ttsPool *common.ModuleProviderPool
 )
 
+// userTranscriptName tags TextFrames carrying the user's own transcribed
+// speech, so the browser distinguishes them from bot replies (whose frames
+// are named "TextFrame"). The serializer emits it as "<name>#<n>".
+const userTranscriptName = "user_transcript"
+
 // kokoroVoice describes one selectable speaker of the kokoro multi-lang model.
 // IDs follow the model's alphabetical voice ordering (zh voices 45-52 match
 // the constants in pkg/modules/speech/tts).
 type kokoroVoice struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
+	Lang string `json:"lang"` // "en" or "zh"
 }
 
 var kokoroVoices = []kokoroVoice{
-	{0, "Alloy (US female)"}, {1, "Aoede (US female)"}, {2, "Bella (US female)"},
-	{3, "Heart (US female)"}, {4, "Jessica (US female)"}, {5, "Kore (US female)"},
-	{6, "Nicole (US female)"}, {7, "Nova (US female)"}, {8, "River (US female)"},
-	{9, "Sarah (US female)"}, {10, "Sky (US female)"},
-	{11, "Adam (US male)"}, {12, "Echo (US male)"}, {13, "Eric (US male)"},
-	{14, "Fenrir (US male)"}, {15, "Liam (US male)"}, {16, "Michael (US male)"},
-	{17, "Onyx (US male)"}, {18, "Puck (US male)"}, {19, "Santa (US male)"},
-	{20, "Alice (UK female)"}, {21, "Emma (UK female)"}, {22, "Isabella (UK female)"},
-	{23, "Lily (UK female)"},
-	{24, "Daniel (UK male)"}, {25, "Fable (UK male)"}, {26, "George (UK male)"},
-	{27, "Lewis (UK male)"},
-	{45, "Xiaobei (zh female)"}, {46, "Xiaoni (zh female)"}, {47, "Xiaoxiao (zh female)"},
-	{48, "Xiaoyi (zh female)"}, {49, "Yunjian (zh male)"}, {50, "Yunxi (zh male)"},
-	{51, "Yunxia (zh male)"}, {52, "Yunyang (zh male)"},
+	{0, "Alloy (US female)", "en"}, {1, "Aoede (US female)", "en"}, {2, "Bella (US female)", "en"},
+	{3, "Heart (US female)", "en"}, {4, "Jessica (US female)", "en"}, {5, "Kore (US female)", "en"},
+	{6, "Nicole (US female)", "en"}, {7, "Nova (US female)", "en"}, {8, "River (US female)", "en"},
+	{9, "Sarah (US female)", "en"}, {10, "Sky (US female)", "en"},
+	{11, "Adam (US male)", "en"}, {12, "Echo (US male)", "en"}, {13, "Eric (US male)", "en"},
+	{14, "Fenrir (US male)", "en"}, {15, "Liam (US male)", "en"}, {16, "Michael (US male)", "en"},
+	{17, "Onyx (US male)", "en"}, {18, "Puck (US male)", "en"}, {19, "Santa (US male)", "en"},
+	{20, "Alice (UK female)", "en"}, {21, "Emma (UK female)", "en"}, {22, "Isabella (UK female)", "en"},
+	{23, "Lily (UK female)", "en"},
+	{24, "Daniel (UK male)", "en"}, {25, "Fable (UK male)", "en"}, {26, "George (UK male)", "en"},
+	{27, "Lewis (UK male)", "en"},
+	{45, "Xiaobei (zh female)", "zh"}, {46, "Xiaoni (zh female)", "zh"}, {47, "Xiaoxiao (zh female)", "zh"},
+	{48, "Xiaoyi (zh female)", "zh"}, {49, "Yunjian (zh male)", "zh"}, {50, "Yunxi (zh male)", "zh"},
+	{51, "Yunxia (zh male)", "zh"}, {52, "Yunyang (zh male)", "zh"},
+}
+
+// languageNames maps the UI language codes to the human name used in the LLM
+// instruction and to the SenseVoice language hint.
+var languageNames = map[string]string{
+	"en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean", "yue": "Cantonese",
 }
 
 func isValidVoiceID(id int) bool {
@@ -274,6 +286,7 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 		log.Fatal(err)
 	}
 	asrConfig.ModelConfig.NumThreads = cfg.ASR.NumThreads
+	asrConfig = asr.WithLanguage(asrConfig, cfg.ASR.Language)
 	asrPoolType := reflect.TypeOf(&asr.SherpaOnnxProvider{})
 	common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
 		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
@@ -345,6 +358,7 @@ type sessionOverrides struct {
 	voiceID  int
 	speed    float32
 	llmModel string
+	lang     string // "" | en | zh | ja | ko | yue
 }
 
 func parseSessionOverrides(r *http.Request) sessionOverrides {
@@ -359,7 +373,20 @@ func parseSessionOverrides(r *http.Request) sessionOverrides {
 	if m := q.Get("llm"); m != "" && len(m) <= 100 {
 		o.llmModel = m
 	}
+	if l := q.Get("lang"); languageNames[l] != "" {
+		o.lang = l
+	}
 	return o
+}
+
+// systemPromptFor returns the base system prompt with an optional
+// "respond only in <language>" instruction appended for the chosen language.
+func systemPromptFor(lang string) string {
+	prompt := cfg.Server.SystemPrompt
+	if name := languageNames[lang]; name != "" {
+		prompt += " Always respond only in " + name + "."
+	}
+	return prompt
 }
 
 // handleWebSocket handles incoming WebSocket connections
@@ -378,7 +405,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientId := fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String())
 	chatHistorySize := cfg.Server.ChatHistorySize
 	session := common.NewSession(clientId, &chatHistorySize)
-	session.InitChatMessage(map[string]any{"role": "system", "content": cfg.Server.SystemPrompt})
+	session.InitChatMessage(map[string]any{"role": "system", "content": systemPromptFor(overrides.lang)})
 
 	// vad provider
 	vadPoolInstanceInfo, err := vadPool.Get()
@@ -422,7 +449,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer asrPool.Put(asrPoolInstanceInfo)
 	asrProvider := asrPoolInstanceInfo.GetInstance().(*asr.SherpaOnnxProvider)
-	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider)
+	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider).
+		WithOnTranscript(func(text string) {
+			// Surface the user's transcript to the client, tagged so the UI
+			// can render it as the user's turn (bot text uses "TextFrame").
+			frame := &frames.TextFrame{
+				DataFrame: frames.NewDataFrameWithName(userTranscriptName),
+				Text:      text,
+			}
+			if err := transportWriter.SendPayload(frame); err != nil {
+				log.Printf("send transcript err: %v", err)
+			}
+		})
 
 	// Set TTS Processor
 	ttsPoolInstanceInfo, err := ttsPool.Get()

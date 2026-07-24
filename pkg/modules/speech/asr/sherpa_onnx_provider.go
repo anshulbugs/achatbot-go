@@ -79,6 +79,16 @@ func NewDefaultSherpaOnnxOfflineSenseVoiceModelConfig() (sherpa.OfflineSenseVoic
 
 }
 
+// WithLanguage returns a copy of the recognizer config with the SenseVoice
+// language forced, when the config uses SenseVoice and language is non-empty.
+// Other models ignore it.
+func WithLanguage(conf sherpa.OfflineRecognizerConfig, language string) sherpa.OfflineRecognizerConfig {
+	if language != "" && conf.ModelConfig.SenseVoice.Model != "" {
+		conf.ModelConfig.SenseVoice.Language = language
+	}
+	return conf
+}
+
 // https://github.com/k2-fsa/sherpa-onnx/blob/v1.12.14/sherpa-onnx/csrc/offline-moonshine-model-config.h
 // https://github.com/moonshine-ai/moonshine
 // https://arxiv.org/abs/2410.15608

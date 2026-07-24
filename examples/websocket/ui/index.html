@@ -377,8 +377,10 @@
           llmSel.add(opt);
         }
         voiceSel.innerHTML = "";
-        const savedVoice = saved.voice !== undefined ? Number(saved.voice) : o.current.voice;
-        for (const v of o.voices) {
+        const englishVoices = o.voices.filter(v => v.lang === "en");
+        let savedVoice = saved.voice !== undefined ? Number(saved.voice) : o.current.voice;
+        if (!englishVoices.some(v => v.id === savedVoice)) savedVoice = 3; // default: Heart
+        for (const v of englishVoices) {
           voiceSel.add(new Option(v.name, v.id, false, v.id === savedVoice));
         }
         $("pipeChips").innerHTML =
@@ -511,8 +513,16 @@
       if (!isPlaying) return;
       const parsed = Frame.decode(new Uint8Array(arrayBuffer));
       if (parsed?.text) {
-        awaitingReply = false;
-        appendBotText(parsed.text.text ?? parsed.text);
+        const name = parsed.text.name || "";
+        const text = parsed.text.text ?? "";
+        if (name.startsWith("user_transcript")) {
+          // The server transcribed the user's turn.
+          currentBotEntry = null;
+          addEntry("you", "YOU", text);
+        } else {
+          awaitingReply = false;
+          appendBotText(text);
+        }
         refreshStatus();
         return;
       }
@@ -594,11 +604,11 @@
           for (let i = 0; i < audioData.length; i++) sumSq += audioData[i] * audioData[i];
           micLevel = Math.sqrt(sumSq / audioData.length);
 
-          // user speech + turn tracking for status line
+          // user speech tracking for the status line only; the actual "YOU"
+          // transcript entry is rendered from the server's user_transcript frame.
           if (micLevel > BARGE_IN_RMS) { userTalkFrames++; } else {
-            if (userTalking && userTalkFrames <= 0) {}
             userTalkFrames = 0;
-            if (userTalking) { userTalking = false; awaitingReply = true; currentBotEntry = null; addEntry("you", "YOU", "(voice)"); refreshStatus(); }
+            if (userTalking) { userTalking = false; awaitingReply = true; refreshStatus(); }
           }
           if (!userTalking && userTalkFrames >= BARGE_IN_MIN_FRAMES) { userTalking = true; refreshStatus(); }
 

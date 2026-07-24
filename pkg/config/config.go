@@ -89,6 +89,11 @@ type ASRConfig struct {
 	// NumThreads is the onnxruntime intra-op thread count per instance;
 	// raising it shortens transcription latency on multi-core hosts.
 	NumThreads int `mapstructure:"num_threads"`
+	// Language forces the recognized language for models that support it
+	// (currently sense_voice: "en", "zh", "ja", "ko", "yue"). Empty means
+	// auto-detect. Forcing the expected language avoids mis-detection on
+	// short or noisy utterances.
+	Language string `mapstructure:"language"`
 }
 
 // TTSConfig selects the speech-synthesis model, voice, and provider pool.
@@ -185,6 +190,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("asr.model", "sense_voice")
 	v.SetDefault("asr.pool_size", 1)
 	v.SetDefault("asr.num_threads", 1)
+	v.SetDefault("asr.language", "")
 
 	v.SetDefault("tts.model", "kokoro")
 	v.SetDefault("tts.speaker_id", 49) // kokoro zm_yunjian
