@@ -77,7 +77,7 @@ func synthCallerFrames(ttsURL, voice, text string) ([]string, error) {
 	}
 	defer resp.Body.Close()
 	pcm24, _ := io.ReadAll(resp.Body)
-	pcm8 := telnyx.ResamplePCM16(pcm24, 24000, telnyxRate)
+	pcm8 := telnyx.ResamplePCM16(pcm24, 24000, 8000) // Telnyx µ-law is 8 kHz
 	mulaw := telnyx.PCM16ToMuLaw(pcm8)
 	var out []string
 	for i := 0; i < len(mulaw); i += 160 {
