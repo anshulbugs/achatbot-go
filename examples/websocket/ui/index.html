@@ -97,9 +97,7 @@
       width: 100%; height: 360px; border-radius: 12px; overflow: hidden; margin-bottom: 12px;
       background: radial-gradient(120% 120% at 50% 20%, rgba(124,108,255,0.16), rgba(11,13,23,0) 60%);
     }
-    /* Zoom into the head. Scaling the iframe element is safe here — the
-       renderer measures its own document inside, unaffected by this transform. */
-    .avatar-stage iframe { width: 100%; height: 100%; border: 0; display: block; transform: scale(1.75); transform-origin: 50% 60%; }
+    .avatar-stage iframe { width: 100%; height: 100%; border: 0; display: block; }
     #meter { width: 100%; height: 40px; display: block; }
     .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
     #status { font-family: var(--mono); font-size: 13px; color: var(--dim); }
