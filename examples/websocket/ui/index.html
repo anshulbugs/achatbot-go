@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Voice Agent — Live Demo</title>
   <script src="./protobuf.min.js"></script>
-  <script type="module" src="./lam-avatar.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -95,12 +94,10 @@
     /* meter + avatar */
     .meter-wrap { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
     .avatar-stage {
-      width: 100%; height: 300px; border-radius: 12px; overflow: hidden; margin-bottom: 12px;
+      width: 100%; height: 360px; border-radius: 12px; overflow: hidden; margin-bottom: 12px;
       background: radial-gradient(120% 120% at 50% 20%, rgba(124,108,255,0.16), rgba(11,13,23,0) 60%);
-      position: relative;
     }
-    #lamAvatar { position: absolute; inset: 0; }
-    #lamAvatar canvas { display: block; }
+    .avatar-stage iframe { width: 100%; height: 100%; border: 0; display: block; }
     #meter { width: 100%; height: 40px; display: block; }
     .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
     #status { font-family: var(--mono); font-size: 13px; color: var(--dim); }
@@ -206,7 +203,7 @@
         <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
         <div class="stage-hint">Uses your mic and speakers — the fastest way to try the agent. Allow microphone access when prompted.</div>
         <div class="meter-wrap">
-          <div class="avatar-stage" id="lamAvatar"></div>
+          <div class="avatar-stage"><iframe id="avatarFrame" src="/avatar-app.html?asset=/avatar-taj.zip" title="AI avatar"></iframe></div>
           <canvas id="meter" height="40"></canvas>
           <div class="stage-row">
             <div id="status">Loading…</div>
@@ -447,61 +444,24 @@ Your goal:
     }
     requestAnimationFrame(drawMeter);
 
-    // ---------- LAM Gaussian avatar (WebGL) driven by LAM_Audio2Expression ----------
-    // Real ARKit expression frames for the current reply, set by the WS handler:
-    //   {fps, names:[...52], frames:[[...52], ...]}. Anchored to playback start.
-    let a2eExpr = null;
-    window.__setAvatarExpr = function (payload) {
-      if (!payload || !payload.frames || !payload.frames.length) return;
-      a2eExpr = { fps: payload.fps || 30, names: payload.names, frames: payload.frames, t0: performance.now() / 1000 };
-    };
-    function lamState() {
+    // ---------- LAM avatar iframe driver ----------
+    // The Gaussian renderer runs isolated in /avatar-app.html (iframe); we push
+    // call state + real A2E expression frames to it via postMessage.
+    const avatarFrame = document.getElementById("avatarFrame");
+    function avatarState() {
       if (userTalking) return "Listening";
       if (currentBotSource || audioQueue.length) return "Responding";
       return "Idle";
     }
-    const NEUTRAL = {};
-    function lamExpr() {
-      const speaking = currentBotSource || audioQueue.length;
-      // Prefer real A2E frames for the current reply, indexed by elapsed time.
-      if (a2eExpr && speaking) {
-        const dt = 1 / a2eExpr.fps;
-        const idx = Math.floor((performance.now() / 1000 - a2eExpr.t0) / dt);
-        if (idx >= 0 && idx < a2eExpr.frames.length) {
-          const w = a2eExpr.frames[idx], out = {};
-          a2eExpr.names.forEach((nm, i) => { out[nm] = w[i]; });
-          return out;
-        }
-      }
-      // Fallback: loop the bundled sample expression while speaking (placeholder
-      // until server-side A2E is wired), else neutral.
-      const bs = window.LAMAvatar && window.LAMAvatar.bsData;
-      if (speaking && bs) {
-        const dt = 1 / 30, n = bs.frames.length;
-        const idx = Math.floor((performance.now() / 1000 % (n * dt)) / dt);
-        const out = {};
-        bs.names.forEach((nm, i) => { out[nm] = bs.frames[idx].weights[i]; });
-        return out;
-      }
-      return NEUTRAL;
+    function postAvatar(msg) {
+      try { avatarFrame && avatarFrame.contentWindow && avatarFrame.contentWindow.postMessage(msg, "*"); } catch (e) {}
     }
-    (function initLAMAvatar() {
-      const div = document.getElementById("lamAvatar");
-      if (!div) return;
-      let tries = 0;
-      (function tryCreate() {
-        if (!(window.LAMAvatar && window.LAMAvatar.create)) {
-          if (tries++ < 120) return setTimeout(tryCreate, 100);
-          div.style.display = "none"; return;
-        }
-        window.LAMAvatar.create(div, "./avatar-taj.zip", {
-          getChatState: lamState,
-          getExpressionData: lamExpr,
-          backgroundColor: "0x0b0d17",
-          alpha: 1.0,
-        }).catch((e) => { console.warn("LAM avatar failed", e); div.style.display = "none"; });
-      })();
-    })();
+    setInterval(() => postAvatar({ type: "state", state: avatarState() }), 100);
+    // Real A2E lip-sync frames for the current reply (set by the WS handler).
+    window.__setAvatarExpr = function (payload) {
+      if (!payload || !payload.frames || !payload.frames.length) return;
+      postAvatar({ type: "expr", fps: payload.fps || 30, names: payload.names, frames: payload.frames });
+    };
 
     // ---------- websocket ----------
     function buildWsUrl() {
