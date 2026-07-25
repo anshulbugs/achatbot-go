@@ -417,6 +417,21 @@ type sessionConfig struct {
 	idlePrompt         string  // spoken after idleSecs of silence ("" disables)
 	idleSecs           float64 // silence threshold before idlePrompt fires
 	audioOutFrameMS    int     // outbound audio framing; small = lower first-audio latency
+	demoVoices         []int   // if set, play a sample in each voice then converse in voiceID
+}
+
+// voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
+// "(US female)" qualifier used in the UI list.
+func voiceLabel(id int) string {
+	for _, v := range kokoroVoices {
+		if v.ID == id {
+			if i := strings.Index(v.Name, " ("); i > 0 {
+				return v.Name[:i]
+			}
+			return v.Name
+		}
+	}
+	return "this"
 }
 
 // handleWebSocket serves the browser studio client over protobuf/PCM16.
@@ -554,7 +569,22 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 
 	// Play the greeting (if any) before the conversation loop. Safe to
 	// synthesize directly here: the pipeline's TTS processor is not yet active.
-	if sc.hello != "" {
+	if len(sc.demoVoices) > 0 {
+		// Voice-demo call: speak the same sample in each candidate voice,
+		// paced to roughly real time so they play in order, then leave the
+		// configured voiceID active for any conversation that follows.
+		go func() {
+			for _, vid := range sc.demoVoices {
+				ttsProvider.SetVoice(vid, sc.speed)
+				text := "This is the " + voiceLabel(vid) + " voice. I can help you book appointments and answer questions on a call."
+				pcm := ttsProvider.Synthesize(text)
+				sendAudioChunks(transportWriter, pcm, outRate)
+				dur := time.Duration(len(pcm)/2/outRate)*time.Second + 800*time.Millisecond
+				time.Sleep(dur)
+			}
+			ttsProvider.SetVoice(sc.voiceID, sc.speed)
+		}()
+	} else if sc.hello != "" {
 		go sendAudioChunks(transportWriter, ttsProvider.Synthesize(sc.hello), outRate)
 	}
 

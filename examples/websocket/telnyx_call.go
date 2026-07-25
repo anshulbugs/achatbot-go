@@ -25,7 +25,13 @@ type callParams struct {
 	VoiceID      int     `json:"voice"`
 	Speed        float32 `json:"speed"`
 	LLMModel     string  `json:"llm"`
+	Demo         bool    `json:"demo"`   // play a curated set of voices, one after another
+	Voices       []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
 }
+
+// demoVoiceSet is the curated shortlist of the best-sounding Kokoro English
+// voices to audition on a demo call.
+var demoVoiceSet = []int{2, 6, 9, 16, 14, 18, 21, 26} // Bella, Nicole, Sarah, Michael, Fenrir, Puck, Emma, George
 
 // callRegistry maps a Telnyx call_control_id to its params for the life of a call.
 type callRegistry struct {
@@ -183,6 +189,21 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	ser.SetLatencyHook(func(d time.Duration) {
 		log.Printf("telnyx response latency ~%dms call=%s", d.Milliseconds(), id)
 	})
+	// Voice-demo call: audition either the caller-supplied voice ids or the
+	// curated shortlist. Suppress the idle re-prompt so it can't cut in.
+	var demoVoices []int
+	idlePrompt := cfg.Server.IdlePromptText
+	idleSecs := cfg.Server.IdlePromptSecs
+	if len(p.Voices) > 0 {
+		demoVoices = p.Voices
+	} else if p.Demo {
+		demoVoices = demoVoiceSet
+	}
+	if len(demoVoices) > 0 {
+		idlePrompt = ""
+		idleSecs = 0
+	}
+
 	runVoiceSession(telnyx.NewConn(ws), ser, sessionConfig{
 		clientID:           "telnyx_" + id,
 		systemPrompt:       p.SystemPrompt,
@@ -191,9 +212,10 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		llmModel:           p.LLMModel,
 		addWavHeader:       false,
 		hello:              p.Hello,
+		demoVoices:         demoVoices,
 		allowInterruptions: true, // adaptive echo gate lets real barge-in through
-		idlePrompt:         cfg.Server.IdlePromptText,
-		idleSecs:           cfg.Server.IdlePromptSecs,
+		idlePrompt:         idlePrompt,
+		idleSecs:           idleSecs,
 		// Small frames so the caller hears the first synthesized clause
 		// ~160ms sooner than 200ms batching; Telnyx repaces to 20ms RTP.
 		audioOutFrameMS: 40,
