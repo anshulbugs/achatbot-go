@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Voice Agent — Live Demo</title>
   <script src="./protobuf.min.js"></script>
+  <script src="./three.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -91,9 +92,14 @@
     .stage-title { font-size: 15px; font-weight: 600; }
     .stage-hint { font-size: 12.5px; color: var(--dim-2); margin-bottom: 18px; }
 
-    /* meter */
+    /* meter + avatar */
     .meter-wrap { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-    #meter { width: 100%; height: 84px; display: block; }
+    .avatar-stage {
+      width: 100%; height: 300px; border-radius: 12px; overflow: hidden; margin-bottom: 12px;
+      background: radial-gradient(120% 120% at 50% 20%, rgba(124,108,255,0.16), rgba(11,13,23,0) 60%);
+    }
+    #avatar { width: 100%; height: 100%; display: block; }
+    #meter { width: 100%; height: 40px; display: block; }
     .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
     #status { font-family: var(--mono); font-size: 13px; color: var(--dim); }
     #status.live { color: var(--live); }
@@ -198,7 +204,8 @@
         <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
         <div class="stage-hint">Uses your mic and speakers — the fastest way to try the agent. Allow microphone access when prompted.</div>
         <div class="meter-wrap">
-          <canvas id="meter" height="84"></canvas>
+          <div class="avatar-stage"><canvas id="avatar"></canvas></div>
+          <canvas id="meter" height="40"></canvas>
           <div class="stage-row">
             <div id="status">Loading…</div>
             <button class="btn btn-accent" id="talkBtn" disabled>Start call</button>
@@ -413,7 +420,7 @@ Your goal:
     // ---------- meter ----------
     const meter = $("meter"), mctx = meter.getContext("2d"), BARS = 40, botData = new Uint8Array(64);
     function drawMeter() {
-      const w = meter.width = meter.clientWidth * devicePixelRatio, h = meter.height = 84 * devicePixelRatio;
+      const w = meter.width = meter.clientWidth * devicePixelRatio, h = meter.height = 40 * devicePixelRatio;
       mctx.clearRect(0, 0, w, h);
       let botLevel = 0;
       if (botAnalyser && (currentBotSource || audioQueue.length)) {
@@ -437,6 +444,90 @@ Your goal:
       requestAnimationFrame(drawMeter);
     }
     requestAnimationFrame(drawMeter);
+
+    // ---------- 3D avatar (three.js) ----------
+    (function initAvatar() {
+      if (!window.THREE) return;
+      const canvas = $("avatar");
+      let renderer;
+      try { renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true }); }
+      catch (e) { canvas.style.display = "none"; return; }
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
+      camera.position.set(0, 0.15, 6.2);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const key = new THREE.DirectionalLight(0xffffff, 1.0); key.position.set(3, 5, 6); scene.add(key);
+      const rim = new THREE.PointLight(0x7c6cff, 1.6, 40); rim.position.set(-5, 1, 4); scene.add(rim);
+      const fill = new THREE.PointLight(0x34e2b0, 0.5, 40); fill.position.set(5, -2, 3); scene.add(fill);
+
+      const head = new THREE.Group(); scene.add(head);
+      const headGeo = new THREE.SphereGeometry(1.5, 64, 64); headGeo.scale(1, 1.12, 0.95);
+      head.add(new THREE.Mesh(headGeo, new THREE.MeshStandardMaterial({ color: 0xece9ff, roughness: 0.42, metalness: 0.08 })));
+
+      const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
+      const pupilMat = new THREE.MeshStandardMaterial({ color: 0x2a2450, roughness: 0.2 });
+      const eyes = [];
+      for (const sx of [-1, 1]) {
+        const g = new THREE.Group();
+        const white = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 32), whiteMat); white.scale.set(1, 1.15, 0.7); g.add(white);
+        const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.15, 24, 24), pupilMat); pupil.position.set(0, 0, 0.22); g.add(pupil);
+        g.position.set(sx * 0.55, 0.35, 1.18); head.add(g); eyes.push(g);
+      }
+      const browMat = new THREE.MeshStandardMaterial({ color: 0x7c6cff, roughness: 0.5 });
+      const brows = [];
+      for (const sx of [-1, 1]) {
+        const brow = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.09, 0.12), browMat);
+        brow.position.set(sx * 0.55, 0.78, 1.22); brow.rotation.z = sx * 0.1; head.add(brow); brows.push(brow);
+      }
+      const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1f4d, roughness: 0.5, emissive: 0x2a1030, emissiveIntensity: 0.2 });
+      const mouth = new THREE.Mesh(new THREE.SphereGeometry(0.5, 32, 24), mouthMat);
+      mouth.position.set(0, -0.55, 1.12); mouth.scale.set(0.7, 0.08, 0.35); head.add(mouth);
+
+      let lastW = 0;
+      function resize() {
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        if (!w || !h) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h; camera.updateProjectionMatrix(); lastW = w;
+      }
+      window.addEventListener("resize", resize); resize();
+
+      let blink = 0, nextBlink = 1600, avatarBot = 0, last = performance.now();
+      function loop(t) {
+        const dt = t - last; last = t;
+        if (canvas.clientWidth && canvas.clientWidth !== lastW) resize();
+        let bl = 0;
+        if (botAnalyser && (currentBotSource || audioQueue.length)) {
+          botAnalyser.getByteTimeDomainData(botData);
+          let s = 0; for (let i = 0; i < botData.length; i++) { const d = (botData[i] - 128) / 128; s += d * d; }
+          bl = Math.sqrt(s / botData.length);
+        }
+        avatarBot += (Math.min(1, bl * 3.4) - avatarBot) * 0.35;
+
+        head.rotation.y = Math.sin(t * 0.0005) * 0.22 + (avatarBot > 0.05 ? Math.sin(t * 0.006) * 0.03 : 0);
+        head.rotation.x = Math.sin(t * 0.0007) * 0.07 + avatarBot * 0.05;
+        head.position.y = Math.sin(t * 0.0011) * 0.05;
+
+        nextBlink -= dt;
+        if (nextBlink <= 0) { blink = 1; nextBlink = 1400 + Math.random() * 3200; }
+        blink = Math.max(0, blink - dt * 0.009);
+        for (const e of eyes) e.scale.y = 1 - Math.min(1, blink) * 0.9;
+        for (const b of brows) b.position.y = 0.78 + (userTalking ? 0.06 : 0) + avatarBot * 0.03;
+
+        mouth.scale.y = 0.08 + avatarBot * 0.6;
+        mouth.scale.x = 0.7 - avatarBot * 0.12;
+        mouthMat.emissiveIntensity = 0.2 + avatarBot * 0.6;
+
+        rim.intensity = userTalking ? 0.7 : 1.6;
+        fill.intensity = userTalking ? 1.5 : 0.5;
+
+        renderer.render(scene, camera);
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
 
     // ---------- websocket ----------
     function buildWsUrl() {
