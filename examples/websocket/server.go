@@ -333,6 +333,15 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			}
 			return p, nil
 		})
+	} else if cfg.TTS.Model == "kani_http" {
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewKaniProvider(cfg.TTS.HTTPURL, cfg.TTS.HTTPVoice, cfg.TTS.Speed, cfg.TTS.Gain)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach Kani TTS service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
 	} else if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {

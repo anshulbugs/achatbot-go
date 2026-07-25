@@ -51,13 +51,16 @@ type HTTPTTSProvider struct {
 	gain    float32
 	client  *http.Client
 	name    string
+	rate    int // output sample rate of the service (Kokoro 24k, Kani 22.05k)
 
 	// OpenAI-speech mode (e.g. Voxtral via vLLM-Omni): POST /v1/audio/speech
 	// with a named voice and response_format "pcm" (24 kHz) instead of the
 	// Kokoro /tts contract.
 	openaiSpeech bool
 	model        string
-	voiceName    string
+	// voiceName, when set, is sent as the /tts "voice" (a fixed voice or, for
+	// Kani, a language tag) instead of mapping the numeric speaker id.
+	voiceName string
 }
 
 const httpTTSRate = 24000
@@ -93,6 +96,7 @@ func NewHTTPTTSProvider(baseURL string, sid int, speed, gain float32) *HTTPTTSPr
 		sid:     sid,
 		speed:   speed,
 		gain:    gain,
+		rate:    httpTTSRate,
 		client:  &http.Client{Timeout: 30 * time.Second},
 		name:    "kokoroHTTP",
 	}
@@ -117,6 +121,7 @@ func NewOpenAISpeechProvider(baseURL, model, voice string, speed, gain float32) 
 		baseURL:      baseURL,
 		speed:        speed,
 		gain:         gain,
+		rate:         httpTTSRate,
 		client:       &http.Client{Timeout: 60 * time.Second},
 		name:         "voxtralHTTP",
 		openaiSpeech: true,
@@ -149,6 +154,31 @@ func (p *HTTPTTSProvider) SetGain(gain float32) {
 	}
 }
 
+// NewKaniProvider builds a provider for a KaniTTS service exposing the Kokoro
+// /tts contract but outputting 22.05 kHz. languageTag (e.g. "en_us") is sent as
+// the "voice" field. Returns nil if the service is unreachable at startup.
+func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSProvider {
+	if gain <= 0 {
+		gain = 1.0
+	}
+	p := &HTTPTTSProvider{
+		baseURL:   baseURL,
+		speed:     speed,
+		gain:      gain,
+		rate:      22050,
+		client:    &http.Client{Timeout: 90 * time.Second},
+		name:      "kaniHTTP",
+		voiceName: languageTag,
+	}
+	resp, err := p.client.Get(baseURL + "/health")
+	if err != nil {
+		logger.Error("Kani TTS health check failed", "url", baseURL, "err", err)
+		return nil
+	}
+	resp.Body.Close()
+	return p
+}
+
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
 	if p.openaiSpeech {
 		body, _ := json.Marshal(map[string]any{
@@ -159,9 +189,13 @@ func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
 		})
 		return p.client.Post(p.baseURL+"/v1/audio/speech", "application/json", bytes.NewReader(body))
 	}
+	voice := voiceNameFor(p.sid)
+	if p.voiceName != "" {
+		voice = p.voiceName
+	}
 	body, _ := json.Marshal(map[string]any{
 		"input": text,
-		"voice": voiceNameFor(p.sid),
+		"voice": voice,
 		"speed": p.speed,
 	})
 	return p.client.Post(p.baseURL+"/tts", "application/json", bytes.NewReader(body))
@@ -190,8 +224,8 @@ func (p *HTTPTTSProvider) SynthesizeStream(text string, onAudio func(pcm []byte)
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, httpTTSRate*2*100/1000) // 100 ms read buffer
-	var pending []byte                          // odd leftover byte between reads
+	buf := make([]byte, p.rate*2*100/1000) // 100 ms read buffer
+	var pending []byte                     // odd leftover byte between reads
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
@@ -217,8 +251,8 @@ func (p *HTTPTTSProvider) SynthesizeStream(text string, onAudio func(pcm []byte)
 
 func (p *HTTPTTSProvider) Warmup() {}
 
-// GetSampleInfo returns the fixed Kokoro output format: 24 kHz mono 16-bit.
-func (p *HTTPTTSProvider) GetSampleInfo() (int, int, int) { return httpTTSRate, 1, 2 }
+// GetSampleInfo returns the service's output format: rate Hz, mono, 16-bit.
+func (p *HTTPTTSProvider) GetSampleInfo() (int, int, int) { return p.rate, 1, 2 }
 
 func (p *HTTPTTSProvider) SetPromptAudio(string, []byte) error { return nil }
 func (p *HTTPTTSProvider) Name() string                        { return p.name }
