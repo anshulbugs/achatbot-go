@@ -5,8 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Voice Agent — Live Demo</title>
   <script src="./protobuf.min.js"></script>
-  <script src="./three.min.js"></script>
-  <script src="./GLTFLoader.js"></script>
+  <script type="module" src="./lam-avatar.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -205,7 +204,7 @@
         <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
         <div class="stage-hint">Uses your mic and speakers — the fastest way to try the agent. Allow microphone access when prompted.</div>
         <div class="meter-wrap">
-          <div class="avatar-stage"><canvas id="avatar"></canvas></div>
+          <div class="avatar-stage" id="lamAvatar"></div>
           <canvas id="meter" height="40"></canvas>
           <div class="stage-row">
             <div id="status">Loading…</div>
@@ -446,91 +445,60 @@ Your goal:
     }
     requestAnimationFrame(drawMeter);
 
-    // ---------- realistic 3D avatar (three.js + Ready Player Me GLB) ----------
-    (function initAvatar() {
-      if (!window.THREE || !THREE.GLTFLoader) return;
-      const canvas = $("avatar");
-      let renderer;
-      try { renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true }); }
-      catch (e) { canvas.style.display = "none"; return; }
-      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-      renderer.outputEncoding = THREE.sRGBEncoding;
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
-
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 0.9));
-      const key = new THREE.DirectionalLight(0xffffff, 1.7); key.position.set(1.5, 3, 2.5); scene.add(key);
-      const rim = new THREE.PointLight(0x9a8bff, 1.4, 12); rim.position.set(-2.5, 2, 1.5); scene.add(rim);
-      const fill = new THREE.PointLight(0x34e2b0, 0.4, 12); fill.position.set(2.5, 0.5, 2); scene.add(fill);
-
-      const morphMeshes = [];
-      let headBone = null, ready = false, camY = 1.6;
-      const setMorph = (name, v) => {
-        for (const m of morphMeshes) {
-          const i = m.morphTargetDictionary[name];
-          if (i !== undefined) m.morphTargetInfluences[i] = v;
+    // ---------- LAM Gaussian avatar (WebGL) driven by LAM_Audio2Expression ----------
+    // Real ARKit expression frames for the current reply, set by the WS handler:
+    //   {fps, names:[...52], frames:[[...52], ...]}. Anchored to playback start.
+    let a2eExpr = null;
+    window.__setAvatarExpr = function (payload) {
+      if (!payload || !payload.frames || !payload.frames.length) return;
+      a2eExpr = { fps: payload.fps || 30, names: payload.names, frames: payload.frames, t0: performance.now() / 1000 };
+    };
+    function lamState() {
+      if (userTalking) return "Listening";
+      if (currentBotSource || audioQueue.length) return "Responding";
+      return "Idle";
+    }
+    const NEUTRAL = {};
+    function lamExpr() {
+      const speaking = currentBotSource || audioQueue.length;
+      // Prefer real A2E frames for the current reply, indexed by elapsed time.
+      if (a2eExpr && speaking) {
+        const dt = 1 / a2eExpr.fps;
+        const idx = Math.floor((performance.now() / 1000 - a2eExpr.t0) / dt);
+        if (idx >= 0 && idx < a2eExpr.frames.length) {
+          const w = a2eExpr.frames[idx], out = {};
+          a2eExpr.names.forEach((nm, i) => { out[nm] = w[i]; });
+          return out;
         }
-      };
-
-      new THREE.GLTFLoader().load("./avatar.glb", (gltf) => {
-        const root = gltf.scene;
-        root.traverse((o) => {
-          if (o.isMesh && o.morphTargetDictionary) { o.frustumCulled = false; morphMeshes.push(o); }
-          if (o.isBone && /head$/i.test(o.name)) headBone = o;
-        });
-        // Frame the head: use the head bone's world height, else fall back.
-        if (headBone) { const p = new THREE.Vector3(); headBone.getWorldPosition(p); camY = p.y + 0.04; }
-        camera.position.set(0, camY, 0.72);
-        camera.lookAt(0, camY, 0);
-        scene.add(root);
-        ready = true;
-      }, undefined, (err) => { console.warn("avatar load failed", err); canvas.style.display = "none"; });
-
-      let lastW = 0;
-      function resize() {
-        const w = canvas.clientWidth, h = canvas.clientHeight;
-        if (!w || !h) return;
-        renderer.setSize(w, h, false);
-        camera.aspect = w / h; camera.updateProjectionMatrix(); lastW = w;
       }
-      window.addEventListener("resize", resize); resize();
-
-      let blink = 0, nextBlink = 1600, lvl = 0, last = performance.now();
-      function loop(t) {
-        const dt = t - last; last = t;
-        if (canvas.clientWidth && canvas.clientWidth !== lastW) resize();
-        if (ready) {
-          let bl = 0;
-          if (botAnalyser && (currentBotSource || audioQueue.length)) {
-            botAnalyser.getByteTimeDomainData(botData);
-            let s = 0; for (let i = 0; i < botData.length; i++) { const d = (botData[i] - 128) / 128; s += d * d; }
-            bl = Math.sqrt(s / botData.length);
-          }
-          lvl += (Math.min(1, bl * 3.6) - lvl) * 0.4;
-          // lip-sync: open the jaw + blend an open-vowel viseme
-          setMorph("jawOpen", lvl * 0.72);
-          setMorph("mouthOpen", lvl * 0.5);
-          setMorph("viseme_aa", lvl * 0.55);
-          setMorph("viseme_O", lvl * 0.2);
-          setMorph("mouthSmile", 0.12 + (userTalking ? 0.08 : 0));
-          // blink
-          nextBlink -= dt;
-          if (nextBlink <= 0) { blink = 1; nextBlink = 1400 + Math.random() * 3400; }
-          blink = Math.max(0, blink - dt * 0.012);
-          setMorph("eyeBlinkLeft", Math.min(1, blink));
-          setMorph("eyeBlinkRight", Math.min(1, blink));
-          // subtle idle head motion
-          if (headBone) {
-            headBone.rotation.y = Math.sin(t * 0.0005) * 0.12 + (lvl > 0.05 ? Math.sin(t * 0.006) * 0.02 : 0);
-            headBone.rotation.x = Math.sin(t * 0.0007) * 0.05 + lvl * 0.03;
-          }
-          rim.intensity = userTalking ? 0.6 : 1.4;
-          fill.intensity = userTalking ? 1.2 : 0.4;
+      // Fallback: loop the bundled sample expression while speaking (placeholder
+      // until server-side A2E is wired), else neutral.
+      const bs = window.LAMAvatar && window.LAMAvatar.bsData;
+      if (speaking && bs) {
+        const dt = 1 / 30, n = bs.frames.length;
+        const idx = Math.floor((performance.now() / 1000 % (n * dt)) / dt);
+        const out = {};
+        bs.names.forEach((nm, i) => { out[nm] = bs.frames[idx].weights[i]; });
+        return out;
+      }
+      return NEUTRAL;
+    }
+    (function initLAMAvatar() {
+      const div = document.getElementById("lamAvatar");
+      if (!div) return;
+      let tries = 0;
+      (function tryCreate() {
+        if (!(window.LAMAvatar && window.LAMAvatar.create)) {
+          if (tries++ < 120) return setTimeout(tryCreate, 100);
+          div.style.display = "none"; return;
         }
-        renderer.render(scene, camera);
-        requestAnimationFrame(loop);
-      }
-      requestAnimationFrame(loop);
+        window.LAMAvatar.create(div, "./avatar-sample.zip", {
+          getChatState: lamState,
+          getExpressionData: lamExpr,
+          backgroundColor: "0x0b0d17",
+          alpha: 1.0,
+        }).catch((e) => { console.warn("LAM avatar failed", e); div.style.display = "none"; });
+      })();
     })();
 
     // ---------- websocket ----------
