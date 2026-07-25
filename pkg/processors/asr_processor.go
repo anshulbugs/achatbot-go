@@ -2,6 +2,7 @@ package processors
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/weedge/pipeline-go/pkg/frames"
 	"github.com/weedge/pipeline-go/pkg/logger"
@@ -10,6 +11,35 @@ import (
 	"achatbot/pkg/common"
 	achatbot_frames "achatbot/pkg/types/frames"
 )
+
+// fillerWords are hesitation tokens that, when a transcript contains nothing
+// else, mean the caller merely paused to think — not a turn to answer.
+var fillerWords = map[string]bool{
+	"uh": true, "uhh": true, "um": true, "umm": true, "hmm": true, "hm": true,
+	"mm": true, "mmm": true, "er": true, "err": true, "ah": true, "eh": true, "huh": true,
+}
+
+// fillerOnly reports whether text carries no real content — punctuation only or
+// only hesitation tokens. These come from mid-thought pauses that the VAD ends
+// as a turn; answering them chops the caller's sentence into fragments.
+func fillerOnly(text string) bool {
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' {
+			b.WriteRune(r)
+		}
+	}
+	words := strings.Fields(b.String())
+	if len(words) == 0 {
+		return true
+	}
+	for _, w := range words {
+		if !fillerWords[w] {
+			return false
+		}
+	}
+	return true
+}
 
 type ASRProcessor struct {
 	*processors.AsyncFrameProcessor
@@ -44,7 +74,7 @@ func (p *ASRProcessor) WithOnTranscript(fn func(text string)) *ASRProcessor {
 func (p *ASRProcessor) emit(audio []byte) {
 	text := strings.TrimSpace(p.provider.Transcribe(audio))
 	logger.Infof("ASR result (%d audio bytes -> %d chars): %q", len(audio), len(text), text)
-	if text == "" {
+	if text == "" || fillerOnly(text) {
 		return
 	}
 	if p.onTranscript != nil {
