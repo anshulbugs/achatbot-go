@@ -215,7 +215,7 @@ func handleTTSPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ttsPool.Put(info)
-	provider := info.GetInstance().(*tts.SherpaOnnxProvider)
+	provider := info.GetInstance().(tts.VoiceProvider)
 	provider.SetVoice(voiceID, float32(speed))
 	pcm := provider.Synthesize(text)
 	rate, _, _ := provider.GetSampleInfo()
@@ -304,17 +304,29 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 		log.Fatal(err)
 	}
 
-	// tts
-	ttsPoolType := reflect.TypeOf(&tts.SherpaOnnxProvider{})
-	common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
-		ttsConfig := tts.NewDefaultSherpaOnnxOfflineTtsConfig()
-		ttsConfig.Model.NumThreads = cfg.TTS.NumThreads
-		sherpaOnnxProvider := tts.NewSherpaOnnxProvider(ttsConfig, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
-		if sherpaOnnxProvider == nil {
-			return nil, fmt.Errorf("failed to create TTS provider for model %q (model files downloaded?)", cfg.TTS.Model)
-		}
-		return sherpaOnnxProvider, nil
-	})
+	// tts: local sherpa (CPU) or an HTTP GPU service (kokoro_http).
+	var ttsPoolType reflect.Type
+	if cfg.TTS.Model == "kokoro_http" {
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewHTTPTTSProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach TTS service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
+	} else {
+		ttsPoolType = reflect.TypeOf(&tts.SherpaOnnxProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			ttsConfig := tts.NewDefaultSherpaOnnxOfflineTtsConfig()
+			ttsConfig.Model.NumThreads = cfg.TTS.NumThreads
+			sherpaOnnxProvider := tts.NewSherpaOnnxProvider(ttsConfig, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Model+"TTS")
+			if sherpaOnnxProvider == nil {
+				return nil, fmt.Errorf("failed to create TTS provider for model %q (model files downloaded?)", cfg.TTS.Model)
+			}
+			return sherpaOnnxProvider, nil
+		})
+	}
 	ttsPool := common.NewModuleProviderPool(cfg.TTS.PoolSize, ttsPoolType)
 	err = ttsPool.Initialize()
 	if err != nil {
@@ -531,7 +543,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		return
 	}
 	defer ttsPool.Put(ttsPoolInstanceInfo)
-	ttsProvider := ttsPoolInstanceInfo.GetInstance().(*tts.SherpaOnnxProvider)
+	ttsProvider := ttsPoolInstanceInfo.GetInstance().(tts.VoiceProvider)
 	// Pool instances keep the previous session's voice: reset to config
 	// defaults first, then apply overrides (no-ops when unset).
 	ttsProvider.SetVoice(cfg.TTS.SpeakerID, cfg.TTS.Speed)

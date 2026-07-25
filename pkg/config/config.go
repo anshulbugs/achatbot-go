@@ -30,7 +30,7 @@ const envPrefix = "ACHATBOT"
 var (
 	ValidVADModels    = []string{"silero", "ten"}
 	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc"}
-	ValidTTSModels    = []string{"kokoro"}
+	ValidTTSModels    = []string{"kokoro", "kokoro_http"}
 	ValidLLMProviders = []string{"openai_api", "ollama_api"}
 	ValidThinking     = []string{"", "low", "medium", "high"}
 )
@@ -126,6 +126,9 @@ type TTSConfig struct {
 	// NumThreads is the onnxruntime intra-op thread count per instance;
 	// raising it shortens synthesis latency (the dominant per-reply cost).
 	NumThreads int `mapstructure:"num_threads"`
+	// HTTPURL is the base URL of a GPU TTS service (used when Model is
+	// "kokoro_http"), e.g. http://127.0.0.1:8880.
+	HTTPURL string `mapstructure:"http_url"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.
@@ -220,6 +223,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tts.speed", 1.0)
 	v.SetDefault("tts.pool_size", 1)
 	v.SetDefault("tts.num_threads", 1)
+	v.SetDefault("tts.http_url", "http://127.0.0.1:8880")
 
 	v.SetDefault("llm.provider", "openai_api")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:11434/v1")
