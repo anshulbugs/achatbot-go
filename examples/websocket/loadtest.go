@@ -160,6 +160,13 @@ func runLoadSession(idx int, clips [][]string, deadline time.Time, stats *loadSt
 	done := make(chan struct{})
 	go func() { runVoiceSession(conn, ser, sc); close(done) }()
 
+	// Desynchronize sessions: spread each session's first turn across a full
+	// ~10 s turn cycle so caller utterances (and thus LLM/TTS requests) arrive
+	// at a steady rate instead of phase-locked bursts. Real calls are not
+	// synchronized; without this the LLM sees periodic spikes that poison the
+	// latency tail regardless of average load.
+	time.Sleep(time.Duration((idx%50)*200) * time.Millisecond)
+
 	silence := mediaMsg(silenceB64)
 	send := func(msg []byte) bool {
 		select {
