@@ -457,11 +457,32 @@ Your goal:
       try { avatarFrame && avatarFrame.contentWindow && avatarFrame.contentWindow.postMessage(msg, "*"); } catch (e) {}
     }
     setInterval(() => postAvatar({ type: "state", state: avatarState() }), 100);
-    // Real A2E lip-sync frames for the current reply (set by the WS handler).
-    window.__setAvatarExpr = function (payload) {
-      if (!payload || !payload.frames || !payload.frames.length) return;
-      postAvatar({ type: "expr", fps: payload.fps || 30, names: payload.names, frames: payload.frames });
-    };
+    // Real A2E lip-sync: accumulate the reply's PCM, debounce-POST it to the
+    // A2E service, and forward the ARKit frames to the avatar iframe anchored to
+    // how long ago the reply's audio started (elapsedMs) so it stays in sync.
+    let a2ePCM = [], a2eSR = 24000, a2eStartWall = 0, a2eTimer = null, a2eBusy = false;
+    function scheduleA2E() {
+      if (!avatarFrame) return;
+      if (a2eTimer) clearTimeout(a2eTimer);
+      a2eTimer = setTimeout(runA2E, 220);
+    }
+    async function runA2E() {
+      if (a2eBusy || !a2ePCM.length) return;
+      a2eBusy = true;
+      try {
+        let total = 0; for (const c of a2ePCM) total += c.length;
+        const i16 = new Int16Array(total); let o = 0;
+        for (const c of a2ePCM) for (let i = 0; i < c.length; i++) { const v = Math.max(-1, Math.min(1, c[i])); i16[o++] = v < 0 ? v * 32768 : v * 32767; }
+        const r = await fetch(apiBase() + "/api/a2e?sr=" + Math.round(a2eSR), {
+          method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: i16.buffer,
+        });
+        const j = await r.json();
+        if (j && j.frames && j.frames.length) {
+          postAvatar({ type: "expr", fps: j.fps || 30, names: j.names, frames: j.frames, elapsedMs: performance.now() - a2eStartWall });
+        }
+      } catch (e) {}
+      a2eBusy = false;
+    }
 
     // ---------- websocket ----------
     function buildWsUrl() {
@@ -491,7 +512,11 @@ Your goal:
       if (!p?.audio) return;
       awaitingReply = false;
       const diff = audioContext.currentTime - (handleWsMessage._last || 0);
-      if (playTime === 0 || diff > 1.0) playTime = audioContext.currentTime;
+      if (playTime === 0 || diff > 1.0) {
+        playTime = audioContext.currentTime;
+        // new reply: reset the A2E accumulator, anchor to now (audio starts ~now)
+        a2ePCM = []; a2eStartWall = performance.now();
+      }
       handleWsMessage._last = audioContext.currentTime;
       audioQueue.push(p.audio);
       if (!isAudioProcessing) processAudioQueue();
@@ -507,6 +532,8 @@ Your goal:
         const src = new AudioBufferSourceNode(audioContext);
         src.buffer = buffer; src.connect(botGain); src.start(playTime);
         playTime += buffer.duration; currentBotSource = src; refreshStatus();
+        // accumulate decoded PCM for A2E lip-sync, then (debounced) request coefficients
+        try { a2ePCM.push(buffer.getChannelData(0).slice(0)); a2eSR = buffer.sampleRate; scheduleA2E(); } catch (e) {}
         src.onended = () => { if (currentBotSource === src) currentBotSource = null; processAudioQueue(); refreshStatus(); };
       }, () => processAudioQueue());
     }

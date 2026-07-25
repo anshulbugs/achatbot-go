@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -185,6 +186,32 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 			"speed":      cfg.TTS.Speed,
 		},
 	})
+}
+
+// handleA2E proxies raw PCM16 audio to the LAM_Audio2Expression service and
+// returns its ARKit blendshape frames, so the browser avatar can lip-sync to
+// the bot's speech without reaching the internal service directly.
+func handleA2E(w http.ResponseWriter, r *http.Request) {
+	writeCORS(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
+	url := os.Getenv("A2E_URL")
+	if url == "" {
+		url = "http://127.0.0.1:8897"
+	}
+	sr := r.URL.Query().Get("sr")
+	if sr == "" {
+		sr = "24000"
+	}
+	resp, err := http.Post(url+"/a2e?sr="+sr, "application/octet-stream", io.LimitReader(r.Body, 12<<20))
+	if err != nil {
+		http.Error(w, "a2e service unreachable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
 }
 
 // handleTTSPreview synthesizes a short sample with the requested voice/speed
@@ -829,6 +856,7 @@ func main() {
 	http.HandleFunc("/api/options", handleOptions)
 	http.HandleFunc("/api/tts-preview", handleTTSPreview)
 	http.HandleFunc("/api/loadtest", handleLoadTest)
+	http.HandleFunc("/api/a2e", handleA2E)
 
 	// Telephony (optional): enabled when TELNYX_API_KEY is set.
 	telnyxClient = telnyx.NewClientFromEnv()
