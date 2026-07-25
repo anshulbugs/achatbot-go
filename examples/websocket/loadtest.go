@@ -144,6 +144,7 @@ func runLoadSession(idx int, clips [][]string, deadline time.Time, stats *loadSt
 	ser := telnyx.NewSerializer(consts.DefaultRate)
 	ser.SetLatencyHook(func(d time.Duration) { stats.add(d) })
 
+	stop := make(chan struct{})
 	sc := sessionConfig{
 		clientID:           fmt.Sprintf("load_%d", idx),
 		systemPrompt:       cfg.Server.SystemPrompt,
@@ -154,6 +155,7 @@ func runLoadSession(idx int, clips [][]string, deadline time.Time, stats *loadSt
 		hello:              "",
 		allowInterruptions: true,
 		audioOutFrameMS:    40,
+		stop:               stop,
 	}
 	done := make(chan struct{})
 	go func() { runVoiceSession(conn, ser, sc); close(done) }()
@@ -187,8 +189,12 @@ func runLoadSession(idx int, clips [][]string, deadline time.Time, stats *loadSt
 		sendSilence(190) // ~3.8 s: endpoint + let the bot reply before next turn
 		turn++
 	}
-	conn.Close()
-	<-done
+	close(stop)  // cancel the pipeline task so it returns and releases pool instances
+	conn.Close() // unblock the input read loop
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+	}
 }
 
 // handleLoadTest runs a synthetic concurrency test: POST/GET /api/loadtest?n=100&secs=60.

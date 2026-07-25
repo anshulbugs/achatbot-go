@@ -424,13 +424,14 @@ type sessionConfig struct {
 	voiceID            int
 	speed              float32
 	llmModel           string
-	addWavHeader       bool    // true for the browser; false for raw telephony audio
-	hello              string  // optional greeting synthesized and played on connect
-	allowInterruptions bool    // browser: barge-in; telephony: false (half-duplex, echo-safe)
-	idlePrompt         string  // spoken after idleSecs of silence ("" disables)
-	idleSecs           float64 // silence threshold before idlePrompt fires
-	audioOutFrameMS    int     // outbound audio framing; small = lower first-audio latency
-	demoVoices         []int   // if set, play a sample in each voice then converse in voiceID
+	addWavHeader       bool            // true for the browser; false for raw telephony audio
+	hello              string          // optional greeting synthesized and played on connect
+	allowInterruptions bool            // browser: barge-in; telephony: false (half-duplex, echo-safe)
+	idlePrompt         string          // spoken after idleSecs of silence ("" disables)
+	idleSecs           float64         // silence threshold before idlePrompt fires
+	audioOutFrameMS    int             // outbound audio framing; small = lower first-audio latency
+	demoVoices         []int           // if set, play a sample in each voice then converse in voiceID
+	stop               <-chan struct{} // when closed, cancels the pipeline task (used by the load test)
 }
 
 // voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
@@ -724,6 +725,15 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		delete(activeTasks, task)
 		serverMu.Unlock()
 	}()
+
+	// External stop (load test): cancel the task so task.Run() returns and the
+	// pool-release defers fire, instead of blocking forever on a closed conn.
+	if sc.stop != nil {
+		go func() {
+			<-sc.stop
+			task.Cancel()
+		}()
+	}
 
 	task.Run()
 }
