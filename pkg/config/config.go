@@ -30,7 +30,7 @@ const envPrefix = "ACHATBOT"
 var (
 	ValidVADModels    = []string{"silero", "ten"}
 	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc", "parakeet_http"}
-	ValidTTSModels    = []string{"kokoro", "kokoro_http", "voxtral_http", "kani_http"}
+	ValidTTSModels    = []string{"kokoro", "kokoro_http", "voxtral_http", "kani_http", "dots_http"}
 	ValidLLMProviders = []string{"openai_api", "ollama_api"}
 	ValidThinking     = []string{"", "low", "medium", "high"}
 )

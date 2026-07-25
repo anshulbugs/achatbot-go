@@ -333,6 +333,15 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			}
 			return p, nil
 		})
+	} else if cfg.TTS.Model == "dots_http" {
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewContractProvider(cfg.TTS.HTTPURL, "", "dotsHTTP", cfg.TTS.Speed, cfg.TTS.Gain, 48000)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach dots.tts service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
 	} else if cfg.TTS.Model == "kani_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {

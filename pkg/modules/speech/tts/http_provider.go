@@ -154,29 +154,39 @@ func (p *HTTPTTSProvider) SetGain(gain float32) {
 	}
 }
 
-// NewKaniProvider builds a provider for a KaniTTS service exposing the Kokoro
-// /tts contract but outputting 22.05 kHz. languageTag (e.g. "en_us") is sent as
-// the "voice" field. Returns nil if the service is unreachable at startup.
-func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSProvider {
+// NewContractProvider builds a provider for any GPU TTS service exposing the
+// Kokoro /tts contract ({input,voice,speed} -> raw PCM16) at the given output
+// sample rate. voice is sent verbatim as the "voice" field (a fixed voice or a
+// language tag; empty falls back to the speaker-id mapping). Returns nil if the
+// service is unreachable at startup.
+func NewContractProvider(baseURL, voice, name string, speed, gain float32, rate int) *HTTPTTSProvider {
 	if gain <= 0 {
 		gain = 1.0
+	}
+	if rate <= 0 {
+		rate = httpTTSRate
 	}
 	p := &HTTPTTSProvider{
 		baseURL:   baseURL,
 		speed:     speed,
 		gain:      gain,
-		rate:      22050,
+		rate:      rate,
 		client:    &http.Client{Timeout: 90 * time.Second},
-		name:      "kaniHTTP",
-		voiceName: languageTag,
+		name:      name,
+		voiceName: voice,
 	}
 	resp, err := p.client.Get(baseURL + "/health")
 	if err != nil {
-		logger.Error("Kani TTS health check failed", "url", baseURL, "err", err)
+		logger.Error("HTTP TTS health check failed", "url", baseURL, "name", name, "err", err)
 		return nil
 	}
 	resp.Body.Close()
 	return p
+}
+
+// NewKaniProvider is a KaniTTS service (22.05 kHz, language-tag voice).
+func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSProvider {
+	return NewContractProvider(baseURL, languageTag, "kaniHTTP", speed, gain, 22050)
 }
 
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
