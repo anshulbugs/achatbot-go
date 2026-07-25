@@ -30,7 +30,7 @@ const envPrefix = "ACHATBOT"
 var (
 	ValidVADModels    = []string{"silero", "ten"}
 	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc", "parakeet_http"}
-	ValidTTSModels    = []string{"kokoro", "kokoro_http"}
+	ValidTTSModels    = []string{"kokoro", "kokoro_http", "voxtral_http"}
 	ValidLLMProviders = []string{"openai_api", "ollama_api"}
 	ValidThinking     = []string{"", "low", "medium", "high"}
 )
@@ -135,6 +135,9 @@ type TTSConfig struct {
 	// Gain scales output loudness (1.0 = unchanged). Clipped to int16; keep
 	// modest (<=1.6) to avoid distortion on the telephone codec.
 	Gain float32 `mapstructure:"gain"`
+	// HTTPVoice is the voice name for OpenAI-speech-style GPU TTS services
+	// (used when Model is "voxtral_http"), e.g. "casual_female".
+	HTTPVoice string `mapstructure:"http_voice"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.
@@ -232,6 +235,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tts.num_threads", 1)
 	v.SetDefault("tts.http_url", "http://127.0.0.1:8880")
 	v.SetDefault("tts.gain", 1.0)
+	v.SetDefault("tts.http_voice", "casual_female")
 
 	v.SetDefault("llm.provider", "openai_api")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:11434/v1")

@@ -322,9 +322,18 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 		log.Fatal(err)
 	}
 
-	// tts: local sherpa (CPU) or an HTTP GPU service (kokoro_http).
+	// tts: local sherpa (CPU) or an HTTP GPU service (kokoro_http / voxtral_http).
 	var ttsPoolType reflect.Type
-	if cfg.TTS.Model == "kokoro_http" {
+	if cfg.TTS.Model == "voxtral_http" {
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewOpenAISpeechProvider(cfg.TTS.HTTPURL, "mistralai/Voxtral-4B-TTS-2603", cfg.TTS.HTTPVoice, cfg.TTS.Speed, cfg.TTS.Gain)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach Voxtral TTS service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
+	} else if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
 			p := tts.NewHTTPTTSProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Gain)

@@ -51,6 +51,13 @@ type HTTPTTSProvider struct {
 	gain    float32
 	client  *http.Client
 	name    string
+
+	// OpenAI-speech mode (e.g. Voxtral via vLLM-Omni): POST /v1/audio/speech
+	// with a named voice and response_format "pcm" (24 kHz) instead of the
+	// Kokoro /tts contract.
+	openaiSpeech bool
+	model        string
+	voiceName    string
 }
 
 const httpTTSRate = 24000
@@ -98,6 +105,33 @@ func NewHTTPTTSProvider(baseURL string, sid int, speed, gain float32) *HTTPTTSPr
 	return p
 }
 
+// NewOpenAISpeechProvider builds a provider for an OpenAI-speech-compatible GPU
+// TTS service (Voxtral via vLLM-Omni) at baseURL (e.g. http://127.0.0.1:8091),
+// synthesizing with the given model id and named voice. Returns nil if the
+// service is unreachable at startup.
+func NewOpenAISpeechProvider(baseURL, model, voice string, speed, gain float32) *HTTPTTSProvider {
+	if gain <= 0 {
+		gain = 1.0
+	}
+	p := &HTTPTTSProvider{
+		baseURL:      baseURL,
+		speed:        speed,
+		gain:         gain,
+		client:       &http.Client{Timeout: 60 * time.Second},
+		name:         "voxtralHTTP",
+		openaiSpeech: true,
+		model:        model,
+		voiceName:    voice,
+	}
+	resp, err := p.client.Get(baseURL + "/health")
+	if err != nil {
+		logger.Error("OpenAI-speech TTS health check failed", "url", baseURL, "err", err)
+		return nil
+	}
+	resp.Body.Close()
+	return p
+}
+
 // SetVoice changes the speaker/speed for subsequent syntheses.
 func (p *HTTPTTSProvider) SetVoice(sid int, speed float32) {
 	if sid >= 0 {
@@ -116,6 +150,15 @@ func (p *HTTPTTSProvider) SetGain(gain float32) {
 }
 
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
+	if p.openaiSpeech {
+		body, _ := json.Marshal(map[string]any{
+			"model":           p.model,
+			"input":           text,
+			"voice":           p.voiceName,
+			"response_format": "pcm", // raw PCM16 mono @ 24 kHz
+		})
+		return p.client.Post(p.baseURL+"/v1/audio/speech", "application/json", bytes.NewReader(body))
+	}
 	body, _ := json.Marshal(map[string]any{
 		"input": text,
 		"voice": voiceNameFor(p.sid),
