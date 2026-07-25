@@ -99,6 +99,11 @@ func (p *SherpaOnnxProvider) SetVoice(sid int, speed float32) {
 	}
 }
 
+// SetGain satisfies the VoiceProvider interface. The local sherpa one-shot path
+// does not apply gain (loudness is only adjustable on the GPU HTTP provider);
+// this is a no-op so either provider can back a session.
+func (p *SherpaOnnxProvider) SetGain(float32) {}
+
 func (p *SherpaOnnxProvider) Synthesize(text string) []byte {
 	generateAudio := p.tts.Generate(text, p.sid, float32(math.Max(float64(p.speed), 1e-6)))
 	p.sampleRate = generateAudio.SampleRate

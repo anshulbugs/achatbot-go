@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -43,6 +45,9 @@ import (
 	"achatbot/pkg/types"
 	achatbot_frames "achatbot/pkg/types/frames"
 )
+
+//go:embed ui/index.html ui/protobuf.min.js ui/data_frames.proto
+var uiFS embed.FS
 
 // Upgrader for upgrading HTTP connections to WebSocket connections
 var upgrader = websocket.Upgrader{
@@ -385,8 +390,11 @@ func newLLMProcessor(cfg *config.Config, session *common.Session, model string) 
 type sessionOverrides struct {
 	voiceID  int
 	speed    float32
+	volume   float32
 	llmModel string
 	lang     string // "" | en | zh | ja | ko | yue
+	hello    string // greeting text, synthesized directly to speech on connect
+	prompt   string // full system prompt override
 }
 
 func parseSessionOverrides(r *http.Request) sessionOverrides {
@@ -398,11 +406,20 @@ func parseSessionOverrides(r *http.Request) sessionOverrides {
 	if s, err := strconv.ParseFloat(q.Get("speed"), 32); err == nil && s > 0.2 && s <= 3 {
 		o.speed = float32(s)
 	}
+	if g, err := strconv.ParseFloat(q.Get("volume"), 32); err == nil && g > 0.2 && g <= 3 {
+		o.volume = float32(g)
+	}
 	if m := q.Get("llm"); m != "" && len(m) <= 100 {
 		o.llmModel = m
 	}
 	if l := q.Get("lang"); languageNames[l] != "" {
 		o.lang = l
+	}
+	if h := q.Get("hello"); h != "" && len(h) <= 500 {
+		o.hello = h
+	}
+	if p := q.Get("prompt"); p != "" && len(p) <= 4000 {
+		o.prompt = p
 	}
 	return o
 }
@@ -423,6 +440,7 @@ type sessionConfig struct {
 	systemPrompt       string
 	voiceID            int
 	speed              float32
+	volume             float32
 	llmModel           string
 	addWavHeader       bool            // true for the browser; false for raw telephony audio
 	hello              string          // optional greeting synthesized and played on connect
@@ -458,12 +476,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	prompt := systemPromptFor(overrides.lang)
+	if overrides.prompt != "" {
+		prompt = overrides.prompt
+	}
 	runVoiceSession(&ExampleIWebSocketConn{Conn: conn}, serializers.NewProtobufSerializer(), sessionConfig{
 		clientID:           fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
-		systemPrompt:       systemPromptFor(overrides.lang),
+		systemPrompt:       prompt,
 		voiceID:            overrides.voiceID,
 		speed:              overrides.speed,
+		volume:             overrides.volume,
 		llmModel:           overrides.llmModel,
+		hello:              overrides.hello,
 		addWavHeader:       true,
 		allowInterruptions: cfg.Server.AllowInterruptions,
 	})
@@ -577,6 +601,10 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// defaults first, then apply overrides (no-ops when unset).
 	ttsProvider.SetVoice(cfg.TTS.SpeakerID, cfg.TTS.Speed)
 	ttsProvider.SetVoice(sc.voiceID, sc.speed)
+	ttsProvider.SetGain(cfg.TTS.Gain) // reset to config default, then per-session
+	if sc.volume > 0 {
+		ttsProvider.SetGain(sc.volume)
+	}
 	ttsProcessor := achatbot_processors.NewTTSProcessor(ttsProvider)
 	outRate, outChannels, outSampleWidth := ttsProvider.GetSampleInfo()
 	audioCameraParams.WithAudioOutSampleWidth(outSampleWidth).WithAudioOutSampleRate(outRate).WithAudioOutChannels(outChannels)
@@ -786,7 +814,16 @@ func main() {
 		logger.Info("Telephony disabled (TELNYX_API_KEY not set)")
 	}
 
-	http.Handle("/", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
+	// Browser voice WS moves to /ws so the UI can be served at /.
+	http.Handle("/ws", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
+
+	// Serve the embedded demo UI (index.html, protobuf.min.js, data_frames.proto)
+	// at the root, so the public tunnel URL serves the whole app.
+	uiSub, err := fs.Sub(uiFS, "ui")
+	if err != nil {
+		log.Fatalf("embed ui: %v", err)
+	}
+	http.Handle("/", http.FileServer(http.FS(uiSub)))
 
 	// Channel to listen for interrupt signal
 	sigChan := make(chan os.Signal, 1)

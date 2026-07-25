@@ -24,6 +24,7 @@ type callParams struct {
 	SystemPrompt string  `json:"system_prompt"`
 	VoiceID      int     `json:"voice"`
 	Speed        float32 `json:"speed"`
+	Volume       float32 `json:"volume"`
 	LLMModel     string  `json:"llm"`
 	Demo         bool    `json:"demo"`   // play a curated set of voices, one after another
 	Voices       []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
@@ -101,6 +102,9 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.Speed <= 0.2 || p.Speed > 3 {
 		p.Speed = cfg.TTS.Speed
+	}
+	if p.Volume <= 0.2 || p.Volume > 3 {
+		p.Volume = cfg.TTS.Gain
 	}
 	if p.LLMModel == "" {
 		p.LLMModel = cfg.LLM.Model
@@ -209,6 +213,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,
 		speed:              p.Speed,
+		volume:             p.Volume,
 		llmModel:           p.LLMModel,
 		addWavHeader:       false,
 		hello:              p.Hello,

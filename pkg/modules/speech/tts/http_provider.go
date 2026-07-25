@@ -18,6 +18,7 @@ import (
 type VoiceProvider interface {
 	common.ITTSProvider
 	SetVoice(sid int, speed float32)
+	SetGain(gain float32)
 }
 
 // kokoroSidToName maps our numeric speaker ids to the Kokoro package voice
@@ -104,6 +105,13 @@ func (p *HTTPTTSProvider) SetVoice(sid int, speed float32) {
 	}
 	if speed > 0 {
 		p.speed = speed
+	}
+}
+
+// SetGain changes the output loudness multiplier for subsequent syntheses.
+func (p *HTTPTTSProvider) SetGain(gain float32) {
+	if gain > 0 {
+		p.gain = gain
 	}
 }
 
