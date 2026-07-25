@@ -763,6 +763,7 @@ func main() {
 	rateLimiter := middleware.NewDefaultRateLimiter().WithEnable(cfg.Server.RateLimitEnabled).WithMaxConns(cfg.Server.MaxConns)
 	http.HandleFunc("/api/options", handleOptions)
 	http.HandleFunc("/api/tts-preview", handleTTSPreview)
+	http.HandleFunc("/api/loadtest", handleLoadTest)
 
 	// Telephony (optional): enabled when TELNYX_API_KEY is set.
 	telnyxClient = telnyx.NewClientFromEnv()
