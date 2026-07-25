@@ -91,14 +91,9 @@
     .stage-title { font-size: 15px; font-weight: 600; }
     .stage-hint { font-size: 12.5px; color: var(--dim-2); margin-bottom: 18px; }
 
-    /* meter + avatar */
+    /* meter */
     .meter-wrap { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-    .avatar-stage {
-      width: 100%; height: 360px; border-radius: 12px; overflow: hidden; margin-bottom: 12px;
-      background: radial-gradient(120% 120% at 50% 20%, rgba(124,108,255,0.16), rgba(11,13,23,0) 60%);
-    }
-    .avatar-stage iframe { width: 100%; height: 100%; border: 0; display: block; }
-    #meter { width: 100%; height: 40px; display: block; }
+    #meter { width: 100%; height: 84px; display: block; }
     .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
     #status { font-family: var(--mono); font-size: 13px; color: var(--dim); }
     #status.live { color: var(--live); }
@@ -203,8 +198,7 @@
         <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
         <div class="stage-hint">Uses your mic and speakers — the fastest way to try the agent. Allow microphone access when prompted.</div>
         <div class="meter-wrap">
-          <div class="avatar-stage"><iframe id="avatarFrame" src="/avatar-app.html?asset=/avatar-taj.zip" title="AI avatar"></iframe></div>
-          <canvas id="meter" height="40"></canvas>
+          <canvas id="meter" height="84"></canvas>
           <div class="stage-row">
             <div id="status">Loading…</div>
             <button class="btn btn-accent" id="talkBtn" disabled>Start call</button>
@@ -419,7 +413,7 @@ Your goal:
     // ---------- meter ----------
     const meter = $("meter"), mctx = meter.getContext("2d"), BARS = 40, botData = new Uint8Array(64);
     function drawMeter() {
-      const w = meter.width = meter.clientWidth * devicePixelRatio, h = meter.height = 40 * devicePixelRatio;
+      const w = meter.width = meter.clientWidth * devicePixelRatio, h = meter.height = 84 * devicePixelRatio;
       mctx.clearRect(0, 0, w, h);
       let botLevel = 0;
       if (botAnalyser && (currentBotSource || audioQueue.length)) {
@@ -444,45 +438,6 @@ Your goal:
     }
     requestAnimationFrame(drawMeter);
 
-    // ---------- LAM avatar iframe driver ----------
-    // The Gaussian renderer runs isolated in /avatar-app.html (iframe); we push
-    // call state + real A2E expression frames to it via postMessage.
-    const avatarFrame = document.getElementById("avatarFrame");
-    function avatarState() {
-      if (userTalking) return "Listening";
-      if (currentBotSource || audioQueue.length) return "Responding";
-      return "Idle";
-    }
-    function postAvatar(msg) {
-      try { avatarFrame && avatarFrame.contentWindow && avatarFrame.contentWindow.postMessage(msg, "*"); } catch (e) {}
-    }
-    setInterval(() => postAvatar({ type: "state", state: avatarState() }), 100);
-    // Real A2E lip-sync: accumulate the reply's PCM, debounce-POST it to the
-    // A2E service, and forward the ARKit frames to the avatar iframe anchored to
-    // how long ago the reply's audio started (elapsedMs) so it stays in sync.
-    let a2ePCM = [], a2eSR = 24000, a2eStartWall = 0, a2eTimer = null, a2eBusy = false;
-    function scheduleA2E() {
-      if (!avatarFrame) return;
-      if (a2eTimer) clearTimeout(a2eTimer);
-      a2eTimer = setTimeout(runA2E, 220);
-    }
-    async function runA2E() {
-      if (a2eBusy || !a2ePCM.length) return;
-      a2eBusy = true;
-      try {
-        let total = 0; for (const c of a2ePCM) total += c.length;
-        const i16 = new Int16Array(total); let o = 0;
-        for (const c of a2ePCM) for (let i = 0; i < c.length; i++) { const v = Math.max(-1, Math.min(1, c[i])); i16[o++] = v < 0 ? v * 32768 : v * 32767; }
-        const r = await fetch(apiBase() + "/api/a2e?sr=" + Math.round(a2eSR), {
-          method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: i16.buffer,
-        });
-        const j = await r.json();
-        if (j && j.frames && j.frames.length) {
-          postAvatar({ type: "expr", fps: j.fps || 30, names: j.names, frames: j.frames, elapsedMs: performance.now() - a2eStartWall });
-        }
-      } catch (e) {}
-      a2eBusy = false;
-    }
 
     // ---------- websocket ----------
     function buildWsUrl() {
@@ -512,11 +467,7 @@ Your goal:
       if (!p?.audio) return;
       awaitingReply = false;
       const diff = audioContext.currentTime - (handleWsMessage._last || 0);
-      if (playTime === 0 || diff > 1.0) {
-        playTime = audioContext.currentTime;
-        // new reply: reset the A2E accumulator, anchor to now (audio starts ~now)
-        a2ePCM = []; a2eStartWall = performance.now();
-      }
+      if (playTime === 0 || diff > 1.0) playTime = audioContext.currentTime;
       handleWsMessage._last = audioContext.currentTime;
       audioQueue.push(p.audio);
       if (!isAudioProcessing) processAudioQueue();
@@ -532,8 +483,6 @@ Your goal:
         const src = new AudioBufferSourceNode(audioContext);
         src.buffer = buffer; src.connect(botGain); src.start(playTime);
         playTime += buffer.duration; currentBotSource = src; refreshStatus();
-        // accumulate decoded PCM for A2E lip-sync, then (debounced) request coefficients
-        try { a2ePCM.push(buffer.getChannelData(0).slice(0)); a2eSR = buffer.sampleRate; scheduleA2E(); } catch (e) {}
         src.onended = () => { if (currentBotSource === src) currentBotSource = null; processAudioQueue(); refreshStatus(); };
       }, () => processAudioQueue());
     }

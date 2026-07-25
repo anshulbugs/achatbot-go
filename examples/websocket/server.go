@@ -47,7 +47,7 @@ import (
 	achatbot_frames "achatbot/pkg/types/frames"
 )
 
-//go:embed ui/index.html ui/protobuf.min.js ui/data_frames.proto ui/avatar-app.html ui/avatar-app.js ui/avatar-taj.zip
+//go:embed ui/index.html ui/protobuf.min.js ui/data_frames.proto
 var uiFS embed.FS
 
 // Upgrader for upgrading HTTP connections to WebSocket connections
