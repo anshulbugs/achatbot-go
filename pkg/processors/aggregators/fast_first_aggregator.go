@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/weedge/pipeline-go/pkg"
 	"github.com/weedge/pipeline-go/pkg/frames"
 	"github.com/weedge/pipeline-go/pkg/processors"
 )
@@ -25,11 +24,11 @@ type FastFirstAggregator struct {
 
 // NewFastFirstAggregatorWithEnd builds the aggregator. endFrame marks end of a
 // reply (flush remainder + reset). minFirstWords is how many complete words to
-// accumulate before flushing the opening chunk.
+// accumulate before flushing the opening chunk; <= 0 disables the mid-sentence
+// opening flush entirely (units then align to sentence boundaries only, which
+// avoids audible breaks between separately-synthesized fragments — preferred
+// when TTS is fast, e.g. on GPU).
 func NewFastFirstAggregatorWithEnd(endFrame reflect.Type, minFirstWords int) *FastFirstAggregator {
-	if minFirstWords < 1 {
-		minFirstWords = 4
-	}
 	return &FastFirstAggregator{
 		FrameProcessor: processors.NewFrameProcessor("FastFirstAggregator"),
 		endFrame:       endFrame,
@@ -37,8 +36,19 @@ func NewFastFirstAggregatorWithEnd(endFrame reflect.Type, minFirstWords int) *Fa
 	}
 }
 
+// hasEndOfSentence reports a true sentence boundary only (., !, ? and their CJK
+// forms) — NOT commas/colons. Splitting on commas would synthesize each clause
+// separately and produce audible breaks mid-sentence.
 func (a *FastFirstAggregator) hasEndOfSentence(s string) bool {
-	return pkg.MatchEndOfSentence(strings.TrimSpace(s))
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return false
+	}
+	switch t[len(t)-1] {
+	case '.', '!', '?':
+		return true
+	}
+	return strings.HasSuffix(t, "。") || strings.HasSuffix(t, "！") || strings.HasSuffix(t, "？")
 }
 
 func (a *FastFirstAggregator) ProcessFrame(frame frames.Frame, direction processors.FrameDirection) {
@@ -75,6 +85,9 @@ func (a *FastFirstAggregator) ProcessFrame(frame frames.Frame, direction process
 // (i.e. followed by whitespace), never splitting a word still being streamed.
 // Returns true if it flushed.
 func (a *FastFirstAggregator) flushOpening(direction processors.FrameDirection) bool {
+	if a.minFirstWords <= 0 {
+		return false // opening flush disabled: sentence-boundary units only
+	}
 	fields := strings.Fields(a.aggregation)
 	endsSpace := strings.HasSuffix(a.aggregation, " ") || strings.HasSuffix(a.aggregation, "\n")
 	complete := len(fields)
