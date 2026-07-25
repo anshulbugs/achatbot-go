@@ -113,23 +113,21 @@ func (p *HTTPTTSProvider) SynthesizeStream(text string, onAudio func(pcm []byte)
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, httpTTSRate*2*100/1000) // 100 ms
-	var carry byte
-	haveCarry := false
+	buf := make([]byte, httpTTSRate*2*100/1000) // 100 ms read buffer
+	var pending []byte                          // odd leftover byte between reads
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
-			chunk := buf[:n]
-			if haveCarry {
-				chunk = append([]byte{carry}, chunk...)
-				haveCarry = false
+			// append copies buf[:n] into a fresh backing array, so the chunk
+			// handed to onAudio never aliases the reused read buffer (a frame
+			// may be processed asynchronously after this returns).
+			data := append(pending, buf[:n]...)
+			pending = nil
+			if len(data)%2 == 1 { // keep 16-bit sample alignment
+				pending = []byte{data[len(data)-1]}
+				data = data[:len(data)-1]
 			}
-			if len(chunk)%2 == 1 {
-				carry = chunk[len(chunk)-1]
-				haveCarry = true
-				chunk = chunk[:len(chunk)-1]
-			}
-			if len(chunk) > 0 && !onAudio(chunk) {
+			if len(data) > 0 && !onAudio(data) {
 				return
 			}
 		}
