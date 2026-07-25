@@ -1,0 +1,47 @@
+# Voice-agent server config. Copy to ./config.yaml at the repo root and edit.
+# The server is started with:  ./server-bin -config config.yaml
+
+server:
+  addr: ":4321"              # HTTP + WebSocket listen address
+  max_conns: 1000            # rate-limiter max concurrent browser connections
+  chat_history_size: 6       # turns of context kept per conversation
+  allow_interruptions: true  # barge-in
+  # The greeting/first message is spoken directly via TTS and never sent to the
+  # LLM (zero first-response delay). This prompt drives the *conversation*.
+  system_prompt: "You are a warm, natural voice assistant on a phone call. Speak like a real person in full, complete thoughts, usually two to four sentences. The caller's words come from speech recognition and may contain small errors, so infer intent from context and never mention transcription. No emoji or special characters, since your reply is read aloud."
+  idle_prompt_secs: 6                    # re-prompt after this many seconds of silence
+  idle_prompt_text: "Are you still there?"
+  first_chunk_words: 0                   # 0 = synthesize whole sentences (smoothest);
+                                         # >0 = flush an opening chunk of N words first
+                                         # (lower first-audio latency, only helps on slow TTS)
+  turn_gate_enabled: false               # experimental semantic endpointing (leave off)
+  turn_gate_model: "llama3.2:3b"
+  turn_gate_max_wait_secs: 2.5
+
+vad:
+  model: silero              # runs on CPU; one instance per concurrent call
+  pool_size: 64              # >= expected max concurrent calls (raise for load tests)
+  stop_secs: 0.6             # silence before a turn ends; too low chops mid-sentence pauses
+
+asr:
+  model: parakeet_http       # GPU Parakeet via deploy/asr (see also: sense_voice for CPU)
+  http_url: "http://127.0.0.1:8890"
+  pool_size: 64
+  num_threads: 8             # only used by the CPU sherpa models
+  language: en
+
+tts:
+  model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
+  http_url: "http://127.0.0.1:8880"
+  speaker_id: 3              # 3 = Heart (US female). See UI voice list for ids.
+  speed: 1.2                 # 1.0 = normal
+  gain: 1.4                  # output loudness multiplier (per-call overridable)
+  pool_size: 64
+  num_threads: 12            # only used by the CPU sherpa model
+
+llm:
+  provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)
+  base_url: "http://127.0.0.1:8001/v1"   # SGLang endpoint
+  model: "Qwen/Qwen2.5-3B-Instruct"
+  stream: true
+  tools: []
