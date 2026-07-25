@@ -99,11 +99,18 @@ func (s *Serializer) keepInbound(pcm8 []byte) bool {
 	rms := rms16(pcm8)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	botIdle := time.Now().After(s.playbackEndsAt.Add(echoTail))
 	if rms > bargeAbsFloor { // actual speech: remember it for latency timing
 		s.lastSpeechAt = time.Now()
-		s.awaitingBot = true
+		// Only start a latency measurement on a clean turn (bot not already
+		// speaking). Otherwise the bot's own echo or a barge-in mid-reply
+		// would start a bogus timer that the next outbound frame closes at
+		// ~0 ms, poisoning the median.
+		if botIdle {
+			s.awaitingBot = true
+		}
 	}
-	if time.Now().After(s.playbackEndsAt.Add(echoTail)) {
+	if botIdle {
 		s.echoFloor = 0 // bot silent: pass everything
 		return true
 	}
