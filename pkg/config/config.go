@@ -132,6 +132,9 @@ type TTSConfig struct {
 	// HTTPURL is the base URL of a GPU TTS service (used when Model is
 	// "kokoro_http"), e.g. http://127.0.0.1:8880.
 	HTTPURL string `mapstructure:"http_url"`
+	// Gain scales output loudness (1.0 = unchanged). Clipped to int16; keep
+	// modest (<=1.6) to avoid distortion on the telephone codec.
+	Gain float32 `mapstructure:"gain"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.
@@ -228,6 +231,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tts.pool_size", 1)
 	v.SetDefault("tts.num_threads", 1)
 	v.SetDefault("tts.http_url", "http://127.0.0.1:8880")
+	v.SetDefault("tts.gain", 1.0)
 
 	v.SetDefault("llm.provider", "openai_api")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:11434/v1")

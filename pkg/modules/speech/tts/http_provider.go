@@ -47,19 +47,44 @@ type HTTPTTSProvider struct {
 	baseURL string
 	sid     int
 	speed   float32
+	gain    float32
 	client  *http.Client
 	name    string
 }
 
 const httpTTSRate = 24000
 
+// applyGain scales PCM16 samples in place by gain, clipping to int16. A no-op
+// when gain is 1.0 or non-positive.
+func applyGain(pcm []byte, gain float32) {
+	if gain == 1.0 || gain <= 0 {
+		return
+	}
+	for i := 0; i+1 < len(pcm); i += 2 {
+		v := int32(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+		v = int32(float32(v) * gain)
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		pcm[i] = byte(v)
+		pcm[i+1] = byte(v >> 8)
+	}
+}
+
 // NewHTTPTTSProvider builds a provider pointing at baseURL (e.g.
-// http://127.0.0.1:8880). Returns nil if the service is unreachable at startup.
-func NewHTTPTTSProvider(baseURL string, sid int, speed float32) *HTTPTTSProvider {
+// http://127.0.0.1:8880). gain scales loudness (1.0 = unchanged). Returns nil
+// if the service is unreachable at startup.
+func NewHTTPTTSProvider(baseURL string, sid int, speed, gain float32) *HTTPTTSProvider {
+	if gain <= 0 {
+		gain = 1.0
+	}
 	p := &HTTPTTSProvider{
 		baseURL: baseURL,
 		sid:     sid,
 		speed:   speed,
+		gain:    gain,
 		client:  &http.Client{Timeout: 30 * time.Second},
 		name:    "kokoroHTTP",
 	}
@@ -100,6 +125,7 @@ func (p *HTTPTTSProvider) Synthesize(text string) []byte {
 	}
 	defer resp.Body.Close()
 	pcm, _ := io.ReadAll(resp.Body)
+	applyGain(pcm, p.gain)
 	return pcm
 }
 
@@ -127,6 +153,7 @@ func (p *HTTPTTSProvider) SynthesizeStream(text string, onAudio func(pcm []byte)
 				pending = []byte{data[len(data)-1]}
 				data = data[:len(data)-1]
 			}
+			applyGain(data, p.gain)
 			if len(data) > 0 && !onAudio(data) {
 				return
 			}

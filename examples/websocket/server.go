@@ -322,7 +322,7 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
-			p := tts.NewHTTPTTSProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed)
+			p := tts.NewHTTPTTSProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Gain)
 			if p == nil {
 				return nil, fmt.Errorf("failed to reach TTS service at %s", cfg.TTS.HTTPURL)
 			}
