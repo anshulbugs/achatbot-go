@@ -284,20 +284,33 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 	}
 
 	// asr
-	asrConfig, err := asr.NewOfflineRecognizerConfigForModel(cfg.ASR.Model)
-	if err != nil {
-		log.Fatal(err)
-	}
-	asrConfig.ModelConfig.NumThreads = cfg.ASR.NumThreads
-	asrConfig = asr.WithLanguage(asrConfig, cfg.ASR.Language)
-	asrPoolType := reflect.TypeOf(&asr.SherpaOnnxProvider{})
-	common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
-		sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
-		if sherpaOnnxProvider == nil {
-			return nil, fmt.Errorf("failed to create ASR provider for model %q (model files downloaded?)", cfg.ASR.Model)
+	var asrPoolType reflect.Type
+	if cfg.ASR.Model == "parakeet_http" {
+		// GPU ASR service (Parakeet on NeMo) over HTTP.
+		asrPoolType = reflect.TypeOf(&asr.HTTPASRProvider{})
+		common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
+			p := asr.NewHTTPASRProvider(cfg.ASR.HTTPURL)
+			if p == nil {
+				return nil, fmt.Errorf("failed to create HTTP ASR provider at %s (service up?)", cfg.ASR.HTTPURL)
+			}
+			return p, nil
+		})
+	} else {
+		asrConfig, err := asr.NewOfflineRecognizerConfigForModel(cfg.ASR.Model)
+		if err != nil {
+			log.Fatal(err)
 		}
-		return sherpaOnnxProvider, nil
-	})
+		asrConfig.ModelConfig.NumThreads = cfg.ASR.NumThreads
+		asrConfig = asr.WithLanguage(asrConfig, cfg.ASR.Language)
+		asrPoolType = reflect.TypeOf(&asr.SherpaOnnxProvider{})
+		common.RegisterNewFunc(asrPoolType, func() (common.IPoolInstance, error) {
+			sherpaOnnxProvider := asr.NewSherpaOnnxProvider(asrConfig)
+			if sherpaOnnxProvider == nil {
+				return nil, fmt.Errorf("failed to create ASR provider for model %q (model files downloaded?)", cfg.ASR.Model)
+			}
+			return sherpaOnnxProvider, nil
+		})
+	}
 	asrPool := common.NewModuleProviderPool(cfg.ASR.PoolSize, asrPoolType)
 	err = asrPool.Initialize()
 	if err != nil {
@@ -535,7 +548,7 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		return
 	}
 	defer asrPool.Put(asrPoolInstanceInfo)
-	asrProvider := asrPoolInstanceInfo.GetInstance().(*asr.SherpaOnnxProvider)
+	asrProvider := asrPoolInstanceInfo.GetInstance().(common.IASRProvider)
 	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider).
 		WithOnTranscript(func(text string) {
 			touchUser() // the caller spoke: reset the idle timer

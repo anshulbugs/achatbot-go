@@ -29,7 +29,7 @@ const envPrefix = "ACHATBOT"
 // with the switchable implementations in pkg/modules.
 var (
 	ValidVADModels    = []string{"silero", "ten"}
-	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc"}
+	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc", "parakeet_http"}
 	ValidTTSModels    = []string{"kokoro", "kokoro_http"}
 	ValidLLMProviders = []string{"openai_api", "ollama_api"}
 	ValidThinking     = []string{"", "low", "medium", "high"}
@@ -111,6 +111,9 @@ type ASRConfig struct {
 	// auto-detect. Forcing the expected language avoids mis-detection on
 	// short or noisy utterances.
 	Language string `mapstructure:"language"`
+	// HTTPURL is the base URL of a GPU ASR service (used when Model is
+	// "parakeet_http"), e.g. http://127.0.0.1:8890.
+	HTTPURL string `mapstructure:"http_url"`
 }
 
 // TTSConfig selects the speech-synthesis model, voice, and provider pool.
@@ -217,6 +220,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("asr.pool_size", 1)
 	v.SetDefault("asr.num_threads", 1)
 	v.SetDefault("asr.language", "")
+	v.SetDefault("asr.http_url", "http://127.0.0.1:8890")
 
 	v.SetDefault("tts.model", "kokoro")
 	v.SetDefault("tts.speaker_id", 49) // kokoro zm_yunjian
