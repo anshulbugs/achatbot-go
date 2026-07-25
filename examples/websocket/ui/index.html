@@ -310,14 +310,14 @@ Your goal:
     }
 
     // ---------- persisted settings ----------
-    const saved = JSON.parse(localStorage.getItem("va-demo2") || "{}");
+    const saved = JSON.parse(localStorage.getItem("va-demo3") || "{}");
     ["hello","prompt","serverUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
     if (saved.speed) $("speed").value = saved.speed;
     if (saved.volume) $("volume").value = saved.volume;
     $("speedVal").textContent = Number($("speed").value).toFixed(2) + "×";
     $("volVal").textContent = Number($("volume").value).toFixed(1) + "×";
     function persist() {
-      localStorage.setItem("va-demo2", JSON.stringify({
+      localStorage.setItem("va-demo3", JSON.stringify({
         hello: $("hello").value, prompt: $("prompt").value, serverUrl: $("serverUrl").value,
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value, llm: $("llm").value,
       }));
@@ -332,8 +332,8 @@ Your goal:
         for (const m of o.llm_models) $("llm").add(new Option(m, m, false, m === (saved.llm || o.current.llm_model)));
         $("voice").innerHTML = "";
         const en = o.voices.filter(v => v.lang === "en");
-        let sv = saved.voice !== undefined ? Number(saved.voice) : 3; // default: Heart
-        if (!en.some(v => v.id === sv)) sv = 3;
+        let sv = saved.voice !== undefined ? Number(saved.voice) : 2; // default: Bella (lively)
+        if (!en.some(v => v.id === sv)) sv = 2;
         for (const v of en) $("voice").add(new Option(v.name, v.id, false, v.id === sv));
         $("pipeChips").innerHTML =
           `<span class="chip">STT <b>${o.current.asr_model}</b></span>` +

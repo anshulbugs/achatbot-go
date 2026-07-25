@@ -76,6 +76,9 @@ type ServerConfig struct {
 	// FirstChunkWords is how many opening words of a reply to flush to TTS
 	// immediately (smaller = audio starts sooner, but choppier openings).
 	FirstChunkWords int `mapstructure:"first_chunk_words"`
+	// ClarityFilter enables the outbound telephone voice-enhancement filter
+	// (high-pass + presence boost) on Telnyx calls.
+	ClarityFilter bool `mapstructure:"clarity_filter"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -214,6 +217,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.turn_gate_model", "qwen3:0.6b")
 	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 	v.SetDefault("server.first_chunk_words", 4)
+	v.SetDefault("server.clarity_filter", true)
 
 	v.SetDefault("vad.model", "silero")
 	v.SetDefault("vad.pool_size", 3)

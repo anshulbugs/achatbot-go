@@ -30,6 +30,46 @@ const (
 	echoFloorEMA  = 0.15  // smoothing for the running echo-floor estimate
 )
 
+// biquad is a Direct-Form-I second-order IIR filter used to clean outbound
+// telephone audio. A high-pass removes sub-300 Hz rumble that only muddies the
+// narrow µ-law band, and a presence peak lifts the 2-3 kHz consonant energy that
+// carries intelligibility over a phone line.
+type biquad struct {
+	b0, b1, b2, a1, a2 float64
+	x1, x2, y1, y2     float64
+}
+
+func (f *biquad) process(x float64) float64 {
+	y := f.b0*x + f.b1*f.x1 + f.b2*f.x2 - f.a1*f.y1 - f.a2*f.y2
+	f.x2, f.x1 = f.x1, x
+	f.y2, f.y1 = f.y1, y
+	return y
+}
+
+// newHighpass / newPeaking build RBJ-cookbook biquads normalized by a0.
+func newHighpass(fs, f0, q float64) *biquad {
+	w0 := 2 * math.Pi * f0 / fs
+	c, s := math.Cos(w0), math.Sin(w0)
+	alpha := s / (2 * q)
+	a0 := 1 + alpha
+	return &biquad{
+		b0: (1 + c) / 2 / a0, b1: -(1 + c) / a0, b2: (1 + c) / 2 / a0,
+		a1: -2 * c / a0, a2: (1 - alpha) / a0,
+	}
+}
+
+func newPeaking(fs, f0, q, dBgain float64) *biquad {
+	A := math.Pow(10, dBgain/40)
+	w0 := 2 * math.Pi * f0 / fs
+	c, s := math.Cos(w0), math.Sin(w0)
+	alpha := s / (2 * q)
+	a0 := 1 + alpha/A
+	return &biquad{
+		b0: (1 + alpha*A) / a0, b1: -2 * c / a0, b2: (1 - alpha*A) / a0,
+		a1: -2 * c / a0, a2: (1 - alpha/A) / a0,
+	}
+}
+
 // mediaMessage is the Telnyx bidirectional media-streaming envelope (a subset).
 type mediaMessage struct {
 	Event    string `json:"event"`
@@ -61,6 +101,33 @@ type Serializer struct {
 	lastSpeechAt time.Time
 	awaitingBot  bool
 	onLatency    func(time.Duration)
+
+	// Outbound clarity filtering (telephone voice enhancement).
+	clarity  bool
+	hpf      *biquad
+	presence *biquad
+}
+
+// SetClarity enables/disables the outbound clarity filter.
+func (s *Serializer) SetClarity(on bool) { s.clarity = on }
+
+// applyClarity high-pass filters and presence-boosts the 8 kHz PCM in place.
+func (s *Serializer) applyClarity(pcm8 []byte) {
+	if !s.clarity || s.hpf == nil {
+		return
+	}
+	for i := 0; i+1 < len(pcm8); i += 2 {
+		v := float64(int16(uint16(pcm8[i]) | uint16(pcm8[i+1])<<8))
+		v = s.presence.process(s.hpf.process(v))
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		iv := int16(v)
+		pcm8[i] = byte(iv)
+		pcm8[i+1] = byte(uint16(iv) >> 8)
+	}
 }
 
 // SetLatencyHook registers a callback fired once per turn with the measured
@@ -73,7 +140,13 @@ func NewSerializer(pipelineRate int) *Serializer {
 	if pipelineRate == 0 {
 		pipelineRate = consts.DefaultRate
 	}
-	return &Serializer{pipelineRate: pipelineRate, suppressEcho: true}
+	return &Serializer{
+		pipelineRate: pipelineRate,
+		suppressEcho: true,
+		clarity:      true,
+		hpf:          newHighpass(telnyxRate, 200, 0.707),  // cut sub-200 Hz rumble
+		presence:     newPeaking(telnyxRate, 2600, 0.9, 4), // +4 dB presence at 2.6 kHz
+	}
 }
 
 // rms16 returns the RMS amplitude of little-endian 16-bit PCM.
@@ -207,6 +280,7 @@ func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 			return nil, nil
 		}
 		pcm8 := ResamplePCM16(af.Audio, af.SampleRate, telnyxRate)
+		s.applyClarity(pcm8) // high-pass + presence boost for phone clarity
 		s.noteOutbound(len(pcm8) / 2)
 		mulaw := PCM16ToMuLaw(pcm8)
 		payload := base64.StdEncoding.EncodeToString(mulaw)

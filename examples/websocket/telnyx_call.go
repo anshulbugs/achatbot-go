@@ -190,6 +190,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	log.Printf("telnyx media stream connected call=%s", id)
 
 	ser := telnyx.NewSerializer(consts.DefaultRate)
+	ser.SetClarity(cfg.Server.ClarityFilter)
 	ser.SetLatencyHook(func(d time.Duration) {
 		log.Printf("telnyx response latency ~%dms call=%s", d.Milliseconds(), id)
 	})
