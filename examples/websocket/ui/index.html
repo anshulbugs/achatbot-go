@@ -6,6 +6,7 @@
   <title>Voice Agent — Live Demo</title>
   <script src="./protobuf.min.js"></script>
   <script src="./three.min.js"></script>
+  <script src="./GLTFLoader.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -445,45 +446,45 @@ Your goal:
     }
     requestAnimationFrame(drawMeter);
 
-    // ---------- 3D avatar (three.js) ----------
+    // ---------- realistic 3D avatar (three.js + Ready Player Me GLB) ----------
     (function initAvatar() {
-      if (!window.THREE) return;
+      if (!window.THREE || !THREE.GLTFLoader) return;
       const canvas = $("avatar");
       let renderer;
       try { renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true }); }
       catch (e) { canvas.style.display = "none"; return; }
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.outputEncoding = THREE.sRGBEncoding;
       const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
-      camera.position.set(0, 0.15, 6.2);
+      const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-      const key = new THREE.DirectionalLight(0xffffff, 1.0); key.position.set(3, 5, 6); scene.add(key);
-      const rim = new THREE.PointLight(0x7c6cff, 1.6, 40); rim.position.set(-5, 1, 4); scene.add(rim);
-      const fill = new THREE.PointLight(0x34e2b0, 0.5, 40); fill.position.set(5, -2, 3); scene.add(fill);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 0.9));
+      const key = new THREE.DirectionalLight(0xffffff, 1.7); key.position.set(1.5, 3, 2.5); scene.add(key);
+      const rim = new THREE.PointLight(0x9a8bff, 1.4, 12); rim.position.set(-2.5, 2, 1.5); scene.add(rim);
+      const fill = new THREE.PointLight(0x34e2b0, 0.4, 12); fill.position.set(2.5, 0.5, 2); scene.add(fill);
 
-      const head = new THREE.Group(); scene.add(head);
-      const headGeo = new THREE.SphereGeometry(1.5, 64, 64); headGeo.scale(1, 1.12, 0.95);
-      head.add(new THREE.Mesh(headGeo, new THREE.MeshStandardMaterial({ color: 0xece9ff, roughness: 0.42, metalness: 0.08 })));
+      const morphMeshes = [];
+      let headBone = null, ready = false, camY = 1.6;
+      const setMorph = (name, v) => {
+        for (const m of morphMeshes) {
+          const i = m.morphTargetDictionary[name];
+          if (i !== undefined) m.morphTargetInfluences[i] = v;
+        }
+      };
 
-      const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
-      const pupilMat = new THREE.MeshStandardMaterial({ color: 0x2a2450, roughness: 0.2 });
-      const eyes = [];
-      for (const sx of [-1, 1]) {
-        const g = new THREE.Group();
-        const white = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 32), whiteMat); white.scale.set(1, 1.15, 0.7); g.add(white);
-        const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.15, 24, 24), pupilMat); pupil.position.set(0, 0, 0.22); g.add(pupil);
-        g.position.set(sx * 0.55, 0.35, 1.18); head.add(g); eyes.push(g);
-      }
-      const browMat = new THREE.MeshStandardMaterial({ color: 0x7c6cff, roughness: 0.5 });
-      const brows = [];
-      for (const sx of [-1, 1]) {
-        const brow = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.09, 0.12), browMat);
-        brow.position.set(sx * 0.55, 0.78, 1.22); brow.rotation.z = sx * 0.1; head.add(brow); brows.push(brow);
-      }
-      const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1f4d, roughness: 0.5, emissive: 0x2a1030, emissiveIntensity: 0.2 });
-      const mouth = new THREE.Mesh(new THREE.SphereGeometry(0.5, 32, 24), mouthMat);
-      mouth.position.set(0, -0.55, 1.12); mouth.scale.set(0.7, 0.08, 0.35); head.add(mouth);
+      new THREE.GLTFLoader().load("./avatar.glb", (gltf) => {
+        const root = gltf.scene;
+        root.traverse((o) => {
+          if (o.isMesh && o.morphTargetDictionary) { o.frustumCulled = false; morphMeshes.push(o); }
+          if (o.isBone && /head$/i.test(o.name)) headBone = o;
+        });
+        // Frame the head: use the head bone's world height, else fall back.
+        if (headBone) { const p = new THREE.Vector3(); headBone.getWorldPosition(p); camY = p.y + 0.04; }
+        camera.position.set(0, camY, 0.72);
+        camera.lookAt(0, camY, 0);
+        scene.add(root);
+        ready = true;
+      }, undefined, (err) => { console.warn("avatar load failed", err); canvas.style.display = "none"; });
 
       let lastW = 0;
       function resize() {
@@ -494,35 +495,38 @@ Your goal:
       }
       window.addEventListener("resize", resize); resize();
 
-      let blink = 0, nextBlink = 1600, avatarBot = 0, last = performance.now();
+      let blink = 0, nextBlink = 1600, lvl = 0, last = performance.now();
       function loop(t) {
         const dt = t - last; last = t;
         if (canvas.clientWidth && canvas.clientWidth !== lastW) resize();
-        let bl = 0;
-        if (botAnalyser && (currentBotSource || audioQueue.length)) {
-          botAnalyser.getByteTimeDomainData(botData);
-          let s = 0; for (let i = 0; i < botData.length; i++) { const d = (botData[i] - 128) / 128; s += d * d; }
-          bl = Math.sqrt(s / botData.length);
+        if (ready) {
+          let bl = 0;
+          if (botAnalyser && (currentBotSource || audioQueue.length)) {
+            botAnalyser.getByteTimeDomainData(botData);
+            let s = 0; for (let i = 0; i < botData.length; i++) { const d = (botData[i] - 128) / 128; s += d * d; }
+            bl = Math.sqrt(s / botData.length);
+          }
+          lvl += (Math.min(1, bl * 3.6) - lvl) * 0.4;
+          // lip-sync: open the jaw + blend an open-vowel viseme
+          setMorph("jawOpen", lvl * 0.72);
+          setMorph("mouthOpen", lvl * 0.5);
+          setMorph("viseme_aa", lvl * 0.55);
+          setMorph("viseme_O", lvl * 0.2);
+          setMorph("mouthSmile", 0.12 + (userTalking ? 0.08 : 0));
+          // blink
+          nextBlink -= dt;
+          if (nextBlink <= 0) { blink = 1; nextBlink = 1400 + Math.random() * 3400; }
+          blink = Math.max(0, blink - dt * 0.012);
+          setMorph("eyeBlinkLeft", Math.min(1, blink));
+          setMorph("eyeBlinkRight", Math.min(1, blink));
+          // subtle idle head motion
+          if (headBone) {
+            headBone.rotation.y = Math.sin(t * 0.0005) * 0.12 + (lvl > 0.05 ? Math.sin(t * 0.006) * 0.02 : 0);
+            headBone.rotation.x = Math.sin(t * 0.0007) * 0.05 + lvl * 0.03;
+          }
+          rim.intensity = userTalking ? 0.6 : 1.4;
+          fill.intensity = userTalking ? 1.2 : 0.4;
         }
-        avatarBot += (Math.min(1, bl * 3.4) - avatarBot) * 0.35;
-
-        head.rotation.y = Math.sin(t * 0.0005) * 0.22 + (avatarBot > 0.05 ? Math.sin(t * 0.006) * 0.03 : 0);
-        head.rotation.x = Math.sin(t * 0.0007) * 0.07 + avatarBot * 0.05;
-        head.position.y = Math.sin(t * 0.0011) * 0.05;
-
-        nextBlink -= dt;
-        if (nextBlink <= 0) { blink = 1; nextBlink = 1400 + Math.random() * 3200; }
-        blink = Math.max(0, blink - dt * 0.009);
-        for (const e of eyes) e.scale.y = 1 - Math.min(1, blink) * 0.9;
-        for (const b of brows) b.position.y = 0.78 + (userTalking ? 0.06 : 0) + avatarBot * 0.03;
-
-        mouth.scale.y = 0.08 + avatarBot * 0.6;
-        mouth.scale.x = 0.7 - avatarBot * 0.12;
-        mouthMat.emissiveIntensity = 0.2 + avatarBot * 0.6;
-
-        rim.intensity = userTalking ? 0.7 : 1.6;
-        fill.intensity = userTalking ? 1.5 : 0.5;
-
         renderer.render(scene, camera);
         requestAnimationFrame(loop);
       }
