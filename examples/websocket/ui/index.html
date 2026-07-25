@@ -64,7 +64,7 @@
     .lamp.err .lamp-dot { background: var(--red); box-shadow: 0 0 10px var(--red); }
 
     /* ---------- layout ---------- */
-    .wrap { max-width: 1280px; margin: 0 auto; padding: 8px 28px 48px; display: grid; grid-template-columns: 1fr 380px; gap: 22px; align-items: start; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 8px 28px 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: start; }
     @media (max-width: 940px) { .wrap { grid-template-columns: 1fr; } }
 
     .card {
@@ -133,7 +133,8 @@
     #callStatus.err { color: var(--red); }
 
     /* ---------- config rail ---------- */
-    aside { padding: 22px; }
+    aside { padding: 24px; order: -1; }
+    @media (max-width: 940px) { aside { order: 0; } }
     .rail-h { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; color: var(--dim-2); margin: 2px 0 16px; text-transform: uppercase; }
     .field { margin-bottom: 16px; }
     .field > label { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--dim); margin-bottom: 7px; font-weight: 500; }
@@ -232,13 +233,24 @@
 
       <div class="field">
         <label for="hello">Greeting message <span class="badge">direct to speech</span></label>
-        <input type="text" id="hello" value="Hi! This is your AI assistant. How can I help you today?">
+        <input type="text" id="hello" value="Hey there, thanks so much for taking my call! This is Riley, your AI assistant. I'd love to learn a little about you and answer anything you're curious about. So, how's your day going so far?">
         <div class="note">Spoken instantly via TTS — never sent to the AI, so there's zero first-response delay.</div>
       </div>
 
       <div class="field">
         <label for="prompt">System prompt</label>
-        <textarea id="prompt" rows="5">You are a warm, natural voice assistant on a phone call. Speak like a real person in full, complete thoughts, usually two to four sentences. Give genuinely helpful, specific answers. The caller's words come from speech recognition and may contain small errors, so infer intent from context. No emoji or special characters, since your reply is read aloud.</textarea>
+        <textarea id="prompt" rows="12">You are Riley, a warm and genuinely personable AI voice assistant on a live phone call. You sound like a real person — relaxed, friendly, and curious — not like a script.
+
+How you speak:
+- Reply in natural, complete spoken sentences, usually two to four of them. Add more detail when it's genuinely helpful, and keep it short when a quick answer is best.
+- Be conversational: acknowledge what the person said, react naturally, and ask a follow-up question to keep the dialogue flowing.
+- Never use emoji, markdown, bullet points, or special characters — everything you write is read aloud.
+
+Handling speech recognition:
+- The caller's words reach you through automatic speech recognition, which can mishear names, technical terms, and numbers. If a word looks garbled or unlikely, infer what they most probably meant from the context of the conversation and respond as if you heard it correctly. Never point out a transcription error or mention that you are reading a transcript.
+
+Your goal:
+- Be helpful, build rapport, and make the person feel heard. If you don't know something, say so honestly and offer to help with what you can. Never claim to be human, but don't dwell on being an AI either — just be warm and useful.</textarea>
       </div>
 
       <div class="field">
@@ -250,8 +262,8 @@
       </div>
 
       <div class="field">
-        <label for="speed">Speaking speed <span class="slider-val" id="speedVal">1.10×</span></label>
-        <div class="slider-row"><input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1.1"></div>
+        <label for="speed">Speaking speed <span class="slider-val" id="speedVal">1.20×</span></label>
+        <div class="slider-row"><input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1.2"></div>
       </div>
 
       <div class="field">
@@ -298,14 +310,14 @@
     }
 
     // ---------- persisted settings ----------
-    const saved = JSON.parse(localStorage.getItem("va-demo") || "{}");
+    const saved = JSON.parse(localStorage.getItem("va-demo2") || "{}");
     ["hello","prompt","serverUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
     if (saved.speed) $("speed").value = saved.speed;
     if (saved.volume) $("volume").value = saved.volume;
     $("speedVal").textContent = Number($("speed").value).toFixed(2) + "×";
     $("volVal").textContent = Number($("volume").value).toFixed(1) + "×";
     function persist() {
-      localStorage.setItem("va-demo", JSON.stringify({
+      localStorage.setItem("va-demo2", JSON.stringify({
         hello: $("hello").value, prompt: $("prompt").value, serverUrl: $("serverUrl").value,
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value, llm: $("llm").value,
       }));
@@ -320,8 +332,8 @@
         for (const m of o.llm_models) $("llm").add(new Option(m, m, false, m === (saved.llm || o.current.llm_model)));
         $("voice").innerHTML = "";
         const en = o.voices.filter(v => v.lang === "en");
-        let sv = saved.voice !== undefined ? Number(saved.voice) : o.current.voice;
-        if (!en.some(v => v.id === sv)) sv = 21;
+        let sv = saved.voice !== undefined ? Number(saved.voice) : 3; // default: Heart
+        if (!en.some(v => v.id === sv)) sv = 3;
         for (const v of en) $("voice").add(new Option(v.name, v.id, false, v.id === sv));
         $("pipeChips").innerHTML =
           `<span class="chip">STT <b>${o.current.asr_model}</b></span>` +
