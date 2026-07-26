@@ -18,14 +18,14 @@ const telnyxRate = 8000
 
 // echoTail is how long after the bot's audio finishes playing we keep the
 // echo gate active, to catch the tail of acoustic echo.
-const echoTail = 150 * time.Millisecond
+const echoTail = 100 * time.Millisecond
 
 // Adaptive echo-gate tuning. While the bot is speaking, inbound audio is
 // mostly its own echo at a low, stable level; the caller interrupting is
 // clearly louder. We track the echo floor and let audio through only when it
 // exceeds both an absolute floor and a multiple of that echo level.
 const (
-	bargeAbsFloor = 900.0 // min inbound RMS (int16) to count as speech at all
+	bargeAbsFloor = 550.0 // min inbound RMS (int16) to count as speech at all
 	bargeFactor   = 2.6   // inbound must exceed echoFloor * this to be barge-in
 	echoFloorEMA  = 0.15  // smoothing for the running echo-floor estimate
 )

@@ -532,7 +532,7 @@ Your goal:
     requestAnimationFrame(drawMeter);
 
     // ---------- video-avatar mode (Daily SFU + SoulX-FlashHead) ----------
-    let videoMode = false, avatarWs = null, dailyCall = null, avAttachedKey = "";
+    let videoMode = false, avatarWs = null, dailyCall = null, avAttachedKey = "", avAttachPoll = null;
     function avatarUrl() { return ($("avatarUrl").value.trim()) || "ws://38.65.239.47:8899"; }
     function setAvatarBadge(t) { $("avatarBadge").textContent = t; }
     function setAvMode(v) {
@@ -565,17 +565,37 @@ Your goal:
       try {
         if (dailyCall) { try { await dailyCall.leave(); await dailyCall.destroy(); } catch {} dailyCall = null; }
         avAttachedKey = "";
-        dailyCall = DailyIframe.createCallObject({ subscribeToTracksAutomatically: true });
+        // Receive-only: never touch the user's camera/mic. Daily would otherwise request
+        // both on join, which prompts for camera we don't need and fights the voice
+        // pipeline for the microphone.
+        dailyCall = DailyIframe.createCallObject({
+          subscribeToTracksAutomatically: true,
+          videoSource: false,
+          audioSource: false,
+        });
         dailyCall.on("track-started", attachAvatar);
         dailyCall.on("participant-updated", attachAvatar);
         dailyCall.on("participant-joined", attachAvatar);
         await dailyCall.join({ url, token });
         setAvatarBadge("live"); $("avatarHint").textContent = "avatar connected";
+        // The video track can become playable after join, and a missed event would
+        // otherwise leave the panel stuck on "connecting video". Re-check until it lands.
+        clearInterval(avAttachPoll);
+        let tries = 0;
+        avAttachPoll = setInterval(() => {
+          if (!dailyCall || avAttachedKey.includes("video") || ++tries > 20) { clearInterval(avAttachPoll); return; }
+          attachAvatar();
+        }, 1500);
       } catch (e) { $("avatarHint").textContent = "join failed"; }
     }
     function attachAvatar() {
       if (!dailyCall) return;
       const ps = dailyCall.participants();
+      // Surface the remote track states — if the SDK can't subscribe (e.g. browser
+      // tracking-prevention blocking daily.co storage) this is where it shows.
+      const diag = Object.values(ps).filter(p => !p.local)
+        .map(p => `v:${(p.tracks.video || {}).state || "-"} a:${(p.tracks.audio || {}).state || "-"}`).join(" ");
+      if (diag && !avAttachedKey.includes("video")) $("avatarHint").textContent = "tracks " + diag;
       for (const id in ps) {
         const p = ps[id]; if (p.local) continue;
         const tracks = [], vt = p.tracks.video, at = p.tracks.audio;
@@ -590,6 +610,7 @@ Your goal:
       }
     }
     function closeAvatar() {
+      clearInterval(avAttachPoll);
       if (dailyCall) { try { dailyCall.leave(); dailyCall.destroy(); } catch {} dailyCall = null; }
       if (avatarWs) { try { avatarWs.close(); } catch {} avatarWs = null; }
       avAttachedKey = ""; const v = $("avatarVideo"); if (v) v.srcObject = null;

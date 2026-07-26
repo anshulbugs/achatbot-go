@@ -4,6 +4,11 @@
 server:
   addr: ":4321"              # HTTP + WebSocket listen address
   max_conns: 1000            # rate-limiter max concurrent browser connections
+  max_call_secs: 1200        # hard hangup after N seconds. REQUIRED for agent-to-agent
+                             # load tests: two bots never hang up on each other. 0 disables.
+  record_calls: false        # ask Telnyx to record every answered call (dual channel, mp3).
+                             # Billed and stored by Telnyx — keep off for large runs.
+  inbound_hello: ""          # greeting spoken when the agent answers an inbound call
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the
@@ -21,7 +26,9 @@ server:
 vad:
   model: silero              # runs on CPU; one instance per concurrent call
   pool_size: 64              # >= expected max concurrent calls (raise for load tests)
-  stop_secs: 0.6             # silence before a turn ends; too low chops mid-sentence pauses
+  stop_secs: 0.8             # silence before a turn ends. 0.5 chopped callers mid-sentence
+                             # (ASR saw fragments like "Uh I want to."); 0.8 fixed it at the
+                             # cost of ~300ms before the agent replies.
 
 asr:
   model: parakeet_http       # GPU Parakeet via deploy/asr (see also: sense_voice for CPU)

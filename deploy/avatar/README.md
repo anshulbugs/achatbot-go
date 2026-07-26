@@ -269,6 +269,28 @@ Restart the service to pick it up. Rule of thumb: **seam > 2× mean motion → p
 (one real clip measured seam 17.3 vs motion 1.87 — a visible jump every 3s; ping-pong took it
 to 3.7, and a better clip went 3.04 → **0.82**).
 
+### What does NOT work: idle motion from the model
+
+SoulX only animates the **mouth from audio** — it has no notion of blinking, breathing or
+head movement. Measured frame-to-frame motion (of 255) when driving it to "idle":
+
+| Driving input | Total motion | eye/head | mouth | verdict |
+|---|---|---|---|---|
+| silence / low noise | 1.16–1.48 | 1.3 | 1.0 | effectively a still image |
+| quiet speech ×0.03 | ~2.0 | 2.96 | 3.59 | mouth moves **more** than eyes → looks like mumbling |
+
+So "just stream the model with nothing said" produces a frozen face. Supply a clip (Option A).
+
+A good trick: export a **model-generated** clip (`sample_results/idle_source_for_edit.mp4`)
+and edit *that* with an image-to-video tool to close the mouth. Because the source came from
+the model, identity, framing and lighting already match the speaking frames exactly — which
+external clips never do.
+
+> ⚠️ imageio writes H.264 **High 4:4:4 Predictive**, which many players and AI video tools
+> refuse to decode. Re-encode before handing the clip to anything else:
+> `ffmpeg -i in.mp4 -c:v libx264 -profile:v high -pix_fmt yuv420p -crf 16 -movflags +faststart out.mp4`
+> Some editors also require ≥720px input — upscale with `scale=1024:1024:flags=lanczos`.
+
 ### Option B — synthesized fallback
 
 If `idle_loop.mp4` is absent, `idle_gen.py` synthesizes a loop from the neutral frame:
@@ -292,7 +314,11 @@ Motion ≈0.32 mean delta — alive, but clearly weaker than a real video clip.
 | Last words of a reply appear in the next turn | Partial <0.96s chunk left buffered | Client sends `{"type":"eot"}`; server pads and renders the tail |
 | `eot` fires mid-utterance | Timer keyed to audio **arrival** (faster than realtime) | Key it to the **forward** to the avatar (playback pace) |
 | Video stutters over a tunnel | ~15 Mbps of JPEG through cloudflared | Send video via Daily; tunnel carries only audio + signaling |
-| Avatar frozen between replies | SoulX generates no idle motion | Pre-rendered idle loop (§5) |
+| Avatar frozen between replies | SoulX generates no idle motion (see above) |
+| Viewer sees `tracks v:loading a:playable`, blank avatar | The bot left and rejoined a room. `client.publishing()` reports local intent only — the SFU keeps a stale video track. **Never leave()/join() to hand out fresh rooms**; join once per process. |
+| Frames stop entirely after a rejoin | `client.release()` orphans the virtual camera device, so `write_frame` silently stops. |
+| Viewer prompted for camera access | `daily-js` grabs local mic+camera by default. Join receive-only: `createCallObject({videoSource:false, audioSource:false})` — it also stops fighting the voice pipeline for the mic. |
+| Hard cut between idle and speech | Different sources. The writer crossfades over `XFADE` frames (~400ms) in both directions. | Pre-rendered idle loop (§5) |
 | Idle loop jumps every N seconds | Last frame far from first | Ping-pong the clip |
 | Browser plays unsynced duplicate audio | Raw Go audio playing alongside the Daily stream | Mute `botGain` in video mode; Daily carries the synced audio |
 
