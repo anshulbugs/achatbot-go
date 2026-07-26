@@ -4,7 +4,8 @@ The LLM is the **first thing that saturates** under concurrency — ASR and TTS 
 headroom long after the LLM is pinned. This covers how it's tuned, how to add replicas,
 and what we measured.
 
-Default model: `Qwen/Qwen2.5-3B-Instruct` on SGLang 0.5.16.
+Default model: `RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic` on SGLang 0.5.16 (see §4b for
+why 7B-FP8 rather than 3B).
 
 ---
 
@@ -48,7 +49,7 @@ docker run -d --name sglang \
 | `--cuda-graph-max-bs` | 24 (default) | **256** | Decode batches larger than this fall off the CUDA-graph fast path. At 100 concurrent agents we were far past 24 on every step. |
 | `--attention-backend` | `triton` (explicit) | *(omit)* | SGLang picks **flashinfer** on Blackwell automatically; the explicit `triton` was the slower path. |
 | `--schedule-policy` | `fcfs` | **`lpm`** | Longest-prefix-match scheduling groups requests that share our long system prompt, improving prefix-cache reuse. |
-| `--context-length` | 4096 | **4096** | ⚠️ **Do not lower below your real prompt size.** See the trap below. |
+| `--context-length` | 4096 | **32768** | ⚠️ **Do not lower below your real prompt size.** See the trap below. |
 
 Prefix caching (RadixAttention) is **on by default** (`disable_radix_cache=False`) and matters
 a lot here — every agent shares the same system prompt, so it is prefilled once and reused.
@@ -159,6 +160,53 @@ Rule of thumb from these runs: **~10–15 continuously-talking agents per tuned 
 sub-second turns. Human calls are far lighter — budget by measuring your own traffic.
 
 ---
+
+## 4b. Model choice: why 7B-FP8, not 3B
+
+**Qwen2.5-3B could not hold the instruction set.** With a 1.8k-word conversational prompt it
+collapsed into a fixed template — acknowledge the caller's words, then a stock closing
+question — and violated explicit rules on *every* turn:
+
+| Prompt said | 3B did |
+|---|---|
+| "Never reuse a stock closing line" | "Need to do anything else?" ×5 in one call |
+| "Do not end every turn with a question" | ended every turn with a question |
+| "Never mention transcription" | "Sometimes when I'm processing speech, it can get a bit garbled" |
+
+Four prompt rewrites produced the same failure. That is a capacity ceiling, not a prompt
+problem — stop rewriting the prompt and change the model.
+
+**FP8, not bf16.** Concurrency here is bound by KV cache, and KV cache = VRAM − weights.
+Quantizing the weights buys the capacity straight back:
+
+| Config | KV cache / replica | Warm TTFT | Est. agents (2 replicas) |
+|---|---|---|---|
+| 3B bf16 | 588k | 38 ms | ~60 |
+| 7B bf16 | 220k | 33 ms | ~22 |
+| **7B FP8** | **334k** | **44 ms** | **~60** |
+
+`RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic` — Blackwell (sm_120) has native FP8, so it costs
+essentially no latency. **Quantize weights only**: FP8 *KV cache* has been reported slower on
+SM120 due to extra quantize/shuffle kernels.
+
+**Avoid reasoning / "thinking" models entirely.** Thinking tokens are emitted before the
+answer, and TTFT is the only latency that matters for voice — TTS starts on the first token.
+
+### Prompt length is cheap; prompt *count* is not
+
+| System prompt | Warm TTFT | Concurrency impact |
+|---|---|---|
+| 218 words | 30 ms | baseline |
+| 1,352 words | 35 ms | none measurable |
+| 17,255 words (~23k tok) | 87 ms | ~25 agents instead of ~60 |
+
+Prefix caching makes a long prompt nearly free *within* a call: it is prefilled once and
+reused every turn. But caching is per-identical-prefix, so if every caller supplies their own
+long prompt there is no sharing *across* calls, and each call's prompt occupies KV cache for
+its whole duration. Long prompts cost concurrency, not latency.
+
+⚠️ `--context-length` must exceed system prompt + history + max_tokens, or SGLang rejects
+**every** request with HTTP 400 while `/v1/models` still returns 200. See the trap in §2.
 
 ## 5. Further levers (not yet applied)
 

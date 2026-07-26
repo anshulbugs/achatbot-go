@@ -716,6 +716,12 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 						if pe := tser.PlaybackEnd(); pe.After(ref) {
 							ref = pe
 						}
+						// Live speech counts as activity, not just finished
+						// transcripts: a caller mid-sentence has no transcript yet
+						// and would otherwise be interrupted by the re-prompt.
+						if ls := tser.LastSpeechAt(); ls.After(ref) {
+							ref = ls
+						}
 						if time.Since(ref) >= idleDur && np < 2 && time.Since(lastPrompt) >= idleDur {
 							sendAudioChunks(transportWriter, idlePCM, outRate)
 							lastPrompt = time.Now()

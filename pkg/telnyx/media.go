@@ -26,7 +26,7 @@ const echoTail = 100 * time.Millisecond
 // exceeds both an absolute floor and a multiple of that echo level.
 const (
 	bargeAbsFloor = 550.0 // min inbound RMS (int16) to count as speech at all
-	bargeFactor   = 2.6   // inbound must exceed echoFloor * this to be barge-in
+	bargeFactor   = 2.0   // inbound must exceed echoFloor * this to be barge-in
 	echoFloorEMA  = 0.15  // smoothing for the running echo-floor estimate
 )
 
@@ -240,6 +240,16 @@ func (s *Serializer) PlaybackEnd() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.playbackEndsAt
+}
+
+// LastSpeechAt returns when inbound audio last reached speech level. The idle
+// re-prompt needs this: a transcript only lands once the caller pauses, so a
+// caller mid-sentence looks idle if you only watch transcripts, and the bot
+// talks over them asking "are you still there?".
+func (s *Serializer) LastSpeechAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSpeechAt
 }
 
 // Deserialize turns an inbound Telnyx "media" message into an AudioRawFrame at

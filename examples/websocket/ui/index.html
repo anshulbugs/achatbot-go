@@ -117,6 +117,22 @@
     .meter-wrap { background: var(--cream); border: 3px solid var(--ink); border-radius: 12px; padding: 16px; }
     #meter { width: 100%; height: 84px; display: block; }
     .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+    .status-wrap { display: flex; align-items: center; gap: 9px; }
+    .spinner {
+      width: 15px; height: 15px; flex-shrink: 0; border-radius: 50%;
+      border: 3px solid var(--ink); border-top-color: var(--vermilion);
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* connecting overlay on the avatar, so video mode shows the wait too */
+    .avatar-wait {
+      position: absolute; inset: 0; display: none; place-items: center; gap: 10px;
+      background: rgba(30,42,71,.72); border-radius: 16px; z-index: 2;
+      font-family: var(--mono); font-size: 12px; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--cream); flex-direction: column;
+    }
+    .avatar-wait.show { display: flex; }
+    .avatar-wait .spinner { width: 26px; height: 26px; border-width: 4px; border-color: var(--cream); border-top-color: var(--gold); }
     #status { font-family: var(--mono); font-size: 12.5px; color: var(--pool); }
     #status.live { color: var(--sage-deep); }
     #status.bot { color: var(--vermilion); }
@@ -264,6 +280,7 @@
             <div class="avatar-frame">
               <video id="avatarVideo" autoplay playsinline></video>
               <div class="avatar-badge"><span class="dot"></span><span id="avatarBadge">idle</span></div>
+              <div class="avatar-wait" id="avatarWait"><span class="spinner"></span><span>connecting…</span></div>
             </div>
             <div class="avatar-hint" id="avatarHint">The avatar streams from the GPU while the agent speaks.</div>
           </div>
@@ -272,7 +289,10 @@
           <div class="meter-wrap">
             <canvas id="meter" height="84"></canvas>
             <div class="stage-row">
-              <div id="status">Loading…</div>
+              <div class="status-wrap">
+                <span class="spinner" id="spinner" hidden></span>
+                <span id="status">Loading…</span>
+              </div>
               <button class="btn btn-accent" id="talkBtn" disabled>Start call</button>
             </div>
           </div>
@@ -477,7 +497,18 @@ Your goal:
       currentBotEntry.querySelector(".what").textContent += t; logEl.scrollTop = logEl.scrollHeight;
     }
     function setStatus(t, c) { statusEl.textContent = t; statusEl.className = c || ""; }
+    // Connecting state: held from the moment Start is pressed until the agent's
+    // first audio actually arrives, so the caller isn't staring at a silent screen
+    // while the socket opens and the greeting is synthesized.
+    let connecting = false;
+    function setConnecting(on) {
+      connecting = on;
+      $("spinner").hidden = !on;
+      $("avatarWait").classList.toggle("show", on && videoMode);
+      if (on) setStatus("Connecting — the agent will speak first…", "think");
+    }
     function refreshStatus() {
+      if (connecting) return;
       if (!ws) { setStatus(Frame ? "Ready — start the call." : "Loading…", ""); return; }
       if (userTalking) setStatus("You're speaking…", "live");
       else if (currentBotSource || audioQueue.length) setStatus("Agent speaking…", "bot");
@@ -657,6 +688,7 @@ Your goal:
         refreshStatus(); return;
       }
       if (!p?.audio) return;
+      if (connecting) setConnecting(false);   // agent has started speaking
       awaitingReply = false;
       const diff = audioContext.currentTime - (handleWsMessage._last || 0);
       if (playTime === 0 || diff > 1.0) playTime = audioContext.currentTime;
@@ -690,7 +722,7 @@ Your goal:
       botGain = audioContext.createGain(); botAnalyser = audioContext.createAnalyser(); botAnalyser.fftSize = 64;
       botGain.connect(botAnalyser); botGain.connect(audioContext.destination);
       if (videoMode) botGain.gain.value = 0; // video mode: Daily plays the synced audio, not the raw Go stream
-      isPlaying = true; currentBotEntry = null; initWebSocket();
+      isPlaying = true; currentBotEntry = null; setConnecting(true); initWebSocket();
       // Hard cap so a forgotten tab can't hold a session (and its GPU pool slots) open.
       clearTimeout(sessionCapTimer);
       sessionCapTimer = setTimeout(() => {
@@ -723,7 +755,7 @@ Your goal:
         }).catch(() => { $("talkBtn").disabled = false; setStatus("Microphone permission denied.", ""); });
     }
     function stopAudio(closeWs = true) {
-      clearTimeout(sessionCapTimer); clearTimeout(eotTimer);
+      clearTimeout(sessionCapTimer); clearTimeout(eotTimer); setConnecting(false);
       playTime = 0; isPlaying = false; audioQueue = []; isAudioProcessing = false; userTalking = false; awaitingReply = false;
       if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; }
       if (ws && closeWs) ws.close(); ws = null;

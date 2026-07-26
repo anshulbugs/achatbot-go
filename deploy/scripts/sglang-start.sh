@@ -4,10 +4,19 @@
 # The flags below are the tuned set — see deploy/llm/README.md for the measurements
 # behind them (+34–51% throughput vs the stock config on the same GPU).
 #
+# Default model is 7B quantized to FP8. Qwen2.5-3B could not hold a long instruction set:
+# it collapsed into a fixed "acknowledge + stock question" template and ignored explicit
+# rules on every turn, no matter how the prompt was written. 7B follows them.
+#
+# FP8 (not bf16) because capacity here is bound by KV cache = VRAM - weights. FP8 halves the
+# weights, taking KV cache from 220k to 334k tokens per replica, which restores the
+# concurrency that bf16 7B gave away. Blackwell has native FP8, so it costs no latency:
+# measured warm TTFT 44ms vs 33ms bf16 vs 38ms for the 3B.
+#
 # Env overrides: LLM_GPU (default 0), LLM_MODEL, HF_CACHE, NAME, PORT.
 set -euo pipefail
 LLM_GPU="${LLM_GPU:-0}"
-LLM_MODEL="${LLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}"
+LLM_MODEL="${LLM_MODEL:-RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic}"
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"

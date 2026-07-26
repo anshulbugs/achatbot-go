@@ -13,6 +13,10 @@ server:
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the
   # LLM (zero first-response delay). This prompt drives the *conversation*.
+  # A full conversational prompt lives in deploy/prompts/conversational_agent.txt.
+  # Prompt length is nearly free: measured warm TTFT was 30ms at 218 words, 35ms at 1352,
+  # and 87ms at 17k words. What long prompts cost is concurrency, not latency, since each
+  # call's prompt sits in the KV cache: ~60 agents at 1.5k words, ~25 at 10k.
   system_prompt: "You are a warm, natural voice assistant on a phone call. Speak like a real person in full, complete thoughts, usually two to four sentences. The caller's words come from speech recognition and may contain small errors, so infer intent from context and never mention transcription. No emoji or special characters, since your reply is read aloud."
   idle_prompt_secs: 6                    # re-prompt after this many seconds of silence
   idle_prompt_text: "Are you still there?"
@@ -26,9 +30,10 @@ server:
 vad:
   model: silero              # runs on CPU; one instance per concurrent call
   pool_size: 64              # >= expected max concurrent calls (raise for load tests)
-  stop_secs: 0.8             # silence before a turn ends. 0.5 chopped callers mid-sentence
-                             # (ASR saw fragments like "Uh I want to."); 0.8 fixed it at the
-                             # cost of ~300ms before the agent replies.
+  stop_secs: 0.6             # silence before a turn ends. This is the single biggest
+                             # contributor to measured turn latency: latency is timed from the
+                             # caller's last speech, so stop_secs is paid on every turn.
+                             # 0.5 chops mid-sentence pauses, 0.8 costs ~200ms more per turn.
 
 asr:
   model: parakeet_http       # GPU Parakeet via deploy/asr (see also: sense_voice for CPU)
@@ -49,6 +54,6 @@ tts:
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)
   base_url: "http://127.0.0.1:8001/v1"   # SGLang endpoint
-  model: "Qwen/Qwen2.5-3B-Instruct"
+  model: "RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic"
   stream: true
   tools: []
