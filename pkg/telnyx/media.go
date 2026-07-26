@@ -16,9 +16,14 @@ import (
 // Telnyx media streaming audio is G.711 µ-law at 8 kHz.
 const telnyxRate = 8000
 
-// echoTail is how long after the bot's audio finishes playing we keep the
-// echo gate active, to catch the tail of acoustic echo.
-const echoTail = 100 * time.Millisecond
+// echoTail is how long after the bot's audio finishes playing we keep the echo
+// gate active, to catch the tail of acoustic echo. playbackEndsAt is only an
+// estimate, and a phone line's reverb outlives the audio that caused it: at
+// 100ms the bot's own tail was reaching ASR and coming back as short spurious
+// transcripts ("Hello." answered with a greeting, which then echoed again).
+// 250ms covers the tail without eating the start of a real barge-in, which has
+// to clear bargeAbsFloor anyway.
+const echoTail = 250 * time.Millisecond
 
 // Adaptive echo-gate tuning. While the bot is speaking, inbound audio is
 // mostly its own echo at a low, stable level; the caller interrupting is
