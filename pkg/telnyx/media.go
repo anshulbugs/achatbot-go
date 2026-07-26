@@ -25,6 +25,19 @@ const telnyxRate = 8000
 // to clear bargeAbsFloor anyway.
 const echoTail = 250 * time.Millisecond
 
+// preRoll is how much recently-gated inbound audio is replayed into the
+// pipeline when a barge-in is detected. The echo gate can only recognise speech
+// once it is loud enough to clear the echo floor, but a word ramps up over
+// ~50-150ms, so by then its onset has already been dropped and ASR receives a
+// truncated utterance — "Whereabouts do you live?" arrived as "When way do you
+// leave?". Replaying the audio immediately before the trigger restores the
+// missing onset. It may carry a little echo with it, which ASR tolerates far
+// better than a missing first syllable.
+const preRoll = 240 * time.Millisecond
+
+// preRollBytes is preRoll as a byte count of 8 kHz 16-bit mono PCM.
+const preRollBytes = int(preRoll/time.Millisecond) * telnyxRate / 1000 * 2
+
 // interruptMute is how long outbound audio is dropped after an interruption, to
 // swallow the interrupted turn's tail still draining through the pipeline.
 // Measured reply latency on this path is ~950ms at best, so a new turn's audio
@@ -106,6 +119,7 @@ type Serializer struct {
 	playbackEndsAt time.Time
 	suppressEcho   bool
 	echoFloor      float64 // running estimate of inbound echo RMS during bot speech
+	preRollBuf     []byte  // recently gated inbound audio, replayed on barge-in
 
 	// Wire-level response-latency measurement: time from the caller's last
 	// speech frame to the bot's first reply audio.
@@ -199,7 +213,10 @@ func rms16(pcm []byte) float64 {
 // speaking, only audio clearly louder than the tracked echo floor passes (the
 // caller barging in); the quiet, steady echo is dropped and used to update the
 // floor. This keeps barge-in working without the bot hearing itself.
-func (s *Serializer) keepInbound(pcm8 []byte) bool {
+// It returns the audio to feed the pipeline: nil when the chunk is gated, and
+// otherwise the chunk itself, prefixed by any gated audio held in the pre-roll
+// buffer so a barge-in keeps its word onset.
+func (s *Serializer) keepInbound(pcm8 []byte) []byte {
 	rms := rms16(pcm8)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,16 +233,29 @@ func (s *Serializer) keepInbound(pcm8 []byte) bool {
 	}
 	if botIdle {
 		s.echoFloor = 0 // bot silent: pass everything
-		return true
+		s.preRollBuf = s.preRollBuf[:0]
+		return pcm8
 	}
 	if s.echoFloor == 0 {
 		s.echoFloor = rms
 	}
 	if rms > bargeAbsFloor && rms > s.echoFloor*bargeFactor {
-		return true // clearly louder than the echo: real barge-in
+		// Real barge-in. Hand back the onset we gated on the way here.
+		if len(s.preRollBuf) == 0 {
+			return pcm8
+		}
+		out := make([]byte, 0, len(s.preRollBuf)+len(pcm8))
+		out = append(out, s.preRollBuf...)
+		out = append(out, pcm8...)
+		s.preRollBuf = s.preRollBuf[:0]
+		return out
 	}
 	s.echoFloor = (1-echoFloorEMA)*s.echoFloor + echoFloorEMA*rms
-	return false
+	s.preRollBuf = append(s.preRollBuf, pcm8...)
+	if n := len(s.preRollBuf) - preRollBytes; n > 0 {
+		s.preRollBuf = append(s.preRollBuf[:0], s.preRollBuf[n:]...)
+	}
+	return nil
 }
 
 // noteOutbound advances the estimated playback-end clock by the duration of a
@@ -299,8 +329,10 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 		return nil, nil
 	}
 	pcm8 := MuLawToPCM16(mulaw)
-	if s.suppressEcho && !s.keepInbound(pcm8) {
-		return nil, nil // steady echo while the bot speaks: drop it
+	if s.suppressEcho {
+		if pcm8 = s.keepInbound(pcm8); pcm8 == nil {
+			return nil, nil // steady echo while the bot speaks: drop it
+		}
 	}
 	pcm := ResamplePCM16(pcm8, telnyxRate, s.pipelineRate)
 	return frames.NewAudioRawFrame(pcm, s.pipelineRate, 1, 2), nil
