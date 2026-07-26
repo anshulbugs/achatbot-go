@@ -174,7 +174,39 @@ of the *next* turn (audible as "the last few words show up late"). The browser s
 
 ---
 
-## 4. Operating
+## 4. Room lifecycle: one call per process
+
+Daily bills **participant-minutes**, so a bot that sits in a room between calls bills all
+day for nothing. But `daily-python` only publishes reliably from the client that owned the
+virtual camera at process start — three attempts at reusing one process across rooms all
+failed:
+
+| Attempt | What broke |
+|---|---|
+| `leave()` then `join()` a new room | SFU keeps a stale track; viewers see `v:loading a:playable` |
+| `client.release()` and rebuild | orphans the virtual camera — `frames_written` drops to 0 |
+| unique camera/mic device per session | `write_frame` blocks; 0 frames published |
+
+So the lifecycle is **one call per process**:
+
+1. Idle — process is warm, listening on `:8899`, **in no room**. Zero Daily billing.
+2. Viewer connects on `/ws` → create a room (`exp` = 1 h), join, publish.
+3. Viewer disconnects → `leave()`, `DELETE /v1/rooms/<name>`, `os._exit(0)`.
+4. `run_avatar.sh` restarts a fresh process.
+
+**Tradeoff: ~45–60 s re-warm between calls** (7 s model load + 3 s avatar prep + ~35 s
+`torch.compile`). A call started inside that window gets connection-refused on `:8899`. One
+process serves one concurrent viewer; run more processes on more GPUs for more.
+
+> ⚠️ The watchdog **must** skip its health check while `ROOM["url"]` is unset. It probes
+> `participant_counts()`, which fails when the bot is deliberately in no room — without the
+> guard it hits 3 strikes and kills the process every ~90 s, forever.
+
+Rooms are cheap but not free of clutter: every process start under the old always-join
+design created one. Ours accumulated ~20 k. They do not bill, but most were created without
+`exp` and stay joinable, so prune them periodically via `GET/DELETE /v1/rooms`.
+
+## 5. Operating
 
 ```bash
 # logs
@@ -207,7 +239,7 @@ ffmpeg -y -f s16le -ar 24000 -ac 1 -i kokoro.pcm -ar 16000 -ac 1 out_16k.wav
 
 ---
 
-## 5. The idle loop (what the avatar does while listening)
+## 6. The idle loop (what the avatar does while listening)
 
 Without this the avatar freezes on a still frame between replies, which reads as broken.
 
@@ -299,7 +331,7 @@ Motion ≈0.32 mean delta — alive, but clearly weaker than a real video clip.
 
 ---
 
-## 6. Errors hit & fixes
+## 7. Errors hit & fixes
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -324,7 +356,7 @@ Motion ≈0.32 mean delta — alive, but clearly weaker than a real video clip.
 
 ---
 
-## 7. Files
+## 8. Files
 
 | File | Purpose |
 |---|---|

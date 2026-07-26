@@ -1,4 +1,4 @@
-import asyncio, json, time, threading, queue
+import asyncio, json, os, time, threading, queue
 import numpy as np, torch, requests, daily
 from collections import deque
 from aiohttp import web, WSMsgType
@@ -66,21 +66,23 @@ client.update_inputs({"camera":{"isEnabled":True,"settings":{"deviceId":"cam"}},
 ROOM={"url":None,"name":None,"exp":0}
 def _new_room():
     # Daily deletes a room at its exp, so give it a day and refresh before it lapses.
-    exp=int(time.time())+86400   # room lives a day; sessions are capped client-side
+    exp=int(time.time())+3600    # one call; the room is created per call and torn down after
     r=requests.post("https://api.daily.co/v1/rooms",headers=HDR,
                     json={"properties":{"exp":exp,"enable_prejoin_ui":False}}).json()
     tok=requests.post("https://api.daily.co/v1/meeting-tokens",headers=HDR,
                       json={"properties":{"room_name":r["name"],"is_owner":True,"user_name":"avatar"}}).json()["token"]
     return r,tok,exp
 def ensure_room(force=False):
-    """Join ONE room for the process lifetime.
+    """Join a room on demand, exactly once in this process's life.
 
-    Do not leave()/join() or rebuild the client to hand out fresh rooms: rejoining leaves
-    the SFU with a stale video track (viewers see tracks v:loading a:playable), and
-    client.release() orphans the virtual camera so write_frame stops entirely. Session
-    isolation is enforced on the client side instead (it leaves when the call ends).
+    Daily bills participant-minutes, so the bot must not sit in a room between calls.
+    But daily-python only publishes reliably from the client that owned the virtual
+    camera at process start: rejoining leaves the SFU with a stale video track, and
+    release() or a second camera device makes write_frame block. So the lifecycle is
+    one call per process: join when a viewer connects, then exit when they leave and
+    let the supervisor bring up a fresh, already-warm process for the next call.
     """
-    if ROOM["url"] and time.time() < ROOM["exp"]-300:
+    if ROOM["url"]:
         return
     r,tok,exp=_new_room()
     client.update_inputs({"camera":{"isEnabled":True,"settings":{"deviceId":"cam"}},
@@ -91,7 +93,6 @@ def ensure_room(force=False):
     print("[daily] bot joined room", r["url"],
           "| camera:", (pub.get("camera") or {}).get("isPublishing"),
           "| mic:", (pub.get("microphone") or {}).get("isPublishing"), flush=True)
-ensure_room()
 
 pair_q=queue.Queue(maxsize=400); audio_in=queue.Queue()
 def _emit(frames, sl):
@@ -152,6 +153,36 @@ def writer_loop():
         nxt+=per; d=nxt-time.time()
         if d>0: time.sleep(d)
         else: nxt=time.time()
+# Watchdog: the Daily transport can die (network blip, SFU timeout) and daily-python
+# only logs "Error reconnecting send transport: timeout" forever. Frames keep being
+# written into a socket nobody is reading, so viewers see nothing. Rejoining a live
+# client leaves a stale video track, so the only reliable recovery is a fresh process:
+# exit non-zero and let the supervising loop restart us.
+def watchdog():
+    fails = 0
+    while True:
+        time.sleep(20)
+        # Join-on-demand: between calls the bot is deliberately in no room, so there is
+        # no transport to health-check. Probing anyway fails every time and would restart
+        # the process forever, which is exactly what it did before this guard.
+        if not ROOM["url"]:
+            fails = 0
+            continue
+        try:
+            counts = client.participant_counts() or {}
+            ok = (counts.get("present", 0) or 0) >= 1
+        except Exception as e:
+            ok = False
+            print("[wd] participant_counts failed:", e, flush=True)
+        if ok:
+            fails = 0
+            continue
+        fails += 1
+        print("[wd] daily transport unhealthy (%d/3)"%fails, flush=True)
+        if fails >= 3:
+            print("[wd] restarting process to rebuild the Daily connection", flush=True)
+            os._exit(1)
+threading.Thread(target=watchdog, daemon=True).start()
 threading.Thread(target=gen_worker,daemon=True).start()
 threading.Thread(target=writer_loop,daemon=True).start()
 
@@ -168,6 +199,19 @@ async def ws_handler(req):
             t=json.loads(m.data).get("type")
             if t=="flush": audio_in.put(("flush",None))
             elif t=="eot": audio_in.put(("eot",None))
+    # Viewer gone: leave the room so Daily stops billing, then exit. The supervisor
+    # restarts us and the next call gets a fresh room and a clean first join.
+    print("[daily] viewer disconnected: leaving room and recycling process", flush=True)
+    try:
+        client.leave(); time.sleep(1.0)
+    except Exception as e:
+        print("[daily] leave failed:", e, flush=True)
+    try:
+        if ROOM["name"]:
+            requests.delete("https://api.daily.co/v1/rooms/"+ROOM["name"], headers=HDR, timeout=10)
+    except Exception as e:
+        print("[daily] room delete failed:", e, flush=True)
+    threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True).start()
     return ws
 app=web.Application(); app.router.add_post("/session",session); app.router.add_options("/session",opts); app.router.add_get("/",ws_handler); app.router.add_get("/ws",ws_handler)
 print("[daily] serving on :%d"%PORT, flush=True); web.run_app(app, host="0.0.0.0", port=PORT)
