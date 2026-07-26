@@ -38,6 +38,11 @@ const preRoll = 240 * time.Millisecond
 // preRollBytes is preRoll as a byte count of 8 kHz 16-bit mono PCM.
 const preRollBytes = int(preRoll/time.Millisecond) * telnyxRate / 1000 * 2
 
+// gateHold is how long the echo gate stays fully open after speech, once the
+// caller has barged in. It must exceed the pauses inside a normal sentence, so
+// it tracks vad.stop_secs rather than being tuned separately.
+const gateHold = 800 * time.Millisecond
+
 // interruptMute is how long outbound audio is dropped after an interruption, to
 // swallow the interrupted turn's tail still draining through the pipeline.
 // Measured reply latency on this path is ~950ms at best, so a new turn's audio
@@ -118,8 +123,9 @@ type Serializer struct {
 	mu             sync.Mutex
 	playbackEndsAt time.Time
 	suppressEcho   bool
-	echoFloor      float64 // running estimate of inbound echo RMS during bot speech
-	preRollBuf     []byte  // recently gated inbound audio, replayed on barge-in
+	echoFloor      float64   // running estimate of inbound echo RMS during bot speech
+	preRollBuf     []byte    // recently gated inbound audio, replayed on barge-in
+	gateOpenUntil  time.Time // while set, the caller is mid-sentence: pass everything
 
 	// Wire-level response-latency measurement: time from the caller's last
 	// speech frame to the bot's first reply audio.
@@ -208,6 +214,19 @@ func rms16(pcm []byte) float64 {
 	return math.Sqrt(sum / float64(n))
 }
 
+// flushPreRoll returns pcm8 prefixed by any gated audio held back, and empties
+// the buffer. Callers must hold s.mu.
+func (s *Serializer) flushPreRoll(pcm8 []byte) []byte {
+	if len(s.preRollBuf) == 0 {
+		return pcm8
+	}
+	out := make([]byte, 0, len(s.preRollBuf)+len(pcm8))
+	out = append(out, s.preRollBuf...)
+	out = append(out, pcm8...)
+	s.preRollBuf = s.preRollBuf[:0]
+	return out
+}
+
 // keepInbound decides whether an inbound 8 kHz PCM chunk should be fed to the
 // pipeline. When the bot is not speaking, everything passes. While the bot is
 // speaking, only audio clearly louder than the tracked echo floor passes (the
@@ -234,21 +253,28 @@ func (s *Serializer) keepInbound(pcm8 []byte) []byte {
 	if botIdle {
 		s.echoFloor = 0 // bot silent: pass everything
 		s.preRollBuf = s.preRollBuf[:0]
+		s.gateOpenUntil = time.Time{}
 		return pcm8
 	}
 	if s.echoFloor == 0 {
 		s.echoFloor = rms
 	}
-	if rms > bargeAbsFloor && rms > s.echoFloor*bargeFactor {
-		// Real barge-in. Hand back the onset we gated on the way here.
-		if len(s.preRollBuf) == 0 {
-			return pcm8
+	// Once the caller has barged in, the gate stays open for the rest of their
+	// sentence. Filtering frame by frame instead punches holes through the
+	// middle of it: ordinary speech dips below the echo floor between words and
+	// on unvoiced consonants, and those frames were being discarded, so ASR
+	// received the sentence with pieces missing. Keeping it open costs nothing,
+	// because the barge-in has already told the bot to stop talking.
+	now := time.Now()
+	if now.Before(s.gateOpenUntil) {
+		if rms > bargeAbsFloor {
+			s.gateOpenUntil = now.Add(gateHold) // still talking: hold it open
 		}
-		out := make([]byte, 0, len(s.preRollBuf)+len(pcm8))
-		out = append(out, s.preRollBuf...)
-		out = append(out, pcm8...)
-		s.preRollBuf = s.preRollBuf[:0]
-		return out
+		return s.flushPreRoll(pcm8)
+	}
+	if rms > bargeAbsFloor && rms > s.echoFloor*bargeFactor {
+		s.gateOpenUntil = now.Add(gateHold)
+		return s.flushPreRoll(pcm8)
 	}
 	s.echoFloor = (1-echoFloorEMA)*s.echoFloor + echoFloorEMA*rms
 	s.preRollBuf = append(s.preRollBuf, pcm8...)

@@ -96,3 +96,32 @@ func TestBargeInKeepsWordOnset(t *testing.T) {
 		t.Fatalf("barge-in dropped the word onset: got %d bytes, want the trigger chunk plus preceding audio", len(got))
 	}
 }
+
+// Once the caller has barged in, the whole sentence must reach ASR. Normal
+// speech dips below the echo floor between words and on unvoiced consonants;
+// filtering frame by frame punched holes through the middle of the utterance,
+// so overlapping speech came back as nonsense ("They did not feel the same for
+// you.") while sentences begun in silence transcribed correctly.
+func TestGateStaysOpenThroughMidSentenceDips(t *testing.T) {
+	s := NewSerializer(consts.DefaultRate)
+	const chunk = 160
+
+	s.noteOutbound(16000) // bot speaking for 2s
+	for i := 0; i < 5; i++ {
+		s.keepInbound(tone(200, chunk)) // establish echo floor
+	}
+	if got := s.keepInbound(tone(4000, chunk)); got == nil {
+		t.Fatal("barge-in must open the gate")
+	}
+	// A dip between words: quiet enough to look like echo, but the caller is
+	// still mid-sentence and these samples carry the consonants.
+	for i := 0; i < 6; i++ {
+		if got := s.keepInbound(tone(180, chunk)); got == nil {
+			t.Fatalf("frame %d of a mid-sentence dip was dropped: the utterance reaches ASR with holes", i)
+		}
+	}
+	// Loud again, same sentence continuing.
+	if got := s.keepInbound(tone(3500, chunk)); got == nil {
+		t.Fatal("continued speech must pass")
+	}
+}
