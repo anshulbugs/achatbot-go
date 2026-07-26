@@ -3,243 +3,315 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voice Agent — Live Demo</title>
+  <title>Answer Destiny's Call — Voice Agent</title>
   <script src="./protobuf.min.js"></script>
+  <script src="https://unpkg.com/@daily-co/daily-js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@400;500;600;700&family=Lobster&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0b0d17;
-      --bg-2: #0f1220;
-      --panel: #151827;
-      --panel-2: #1b1f30;
-      --line: #262b41;
-      --line-2: #323853;
-      --text: #eef1f8;
-      --dim: #9aa2c0;
-      --dim-2: #6b7291;
-      --accent: #7c6cff;
-      --accent-2: #a78bfa;
-      --accent-soft: rgba(124, 108, 255, 0.15);
-      --live: #34e2b0;
-      --live-soft: rgba(52, 226, 176, 0.13);
-      --amber: #ffb454;
-      --red: #ff6b6b;
-      --radius: 14px;
-      --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
-      --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --ink: #1E2A47;
+      --cream: #F1E7D2;
+      --paper: #F8F0DE;
+      --vermilion: #E4572E;
+      --gold: #F2B33D;
+      --gold-deep: #B87B14;
+      --sage: #8B9D6B;
+      --sage-deep: #566B3E;
+      --pool: #3B5B92;
+      --pool-deep: #2C4470;
+      --display: "Anton", Impact, sans-serif;
+      --script: "Lobster", cursive;
+      --body: "Archivo", system-ui, sans-serif;
+      --mono: "Space Mono", ui-monospace, Consolas, monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { min-height: 100%; }
     body {
-      background:
-        radial-gradient(1200px 600px at 15% -10%, rgba(124,108,255,0.14), transparent 55%),
-        radial-gradient(1000px 500px at 110% 10%, rgba(52,226,176,0.08), transparent 50%),
-        var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
+      background: var(--pool);
+      color: var(--ink);
+      font-family: var(--body);
       font-size: 15px;
       line-height: 1.55;
       -webkit-font-smoothing: antialiased;
+      padding: 22px 18px 40px;
     }
 
-    /* ---------- header ---------- */
-    header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 18px 28px; max-width: 1280px; margin: 0 auto;
+    /* ---------- print texture: halftone dots + noise, over everything ---------- */
+    .grain {
+      position: fixed; inset: 0; pointer-events: none; z-index: 90;
+      background-image:
+        radial-gradient(circle at 50% 50%, rgba(30,42,71,.5) 0.6px, transparent 0.7px),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.42'/%3E%3C/svg%3E");
+      background-size: 4px 4px, 140px 140px;
+      opacity: .16; mix-blend-mode: multiply;
     }
-    .brand { display: flex; align-items: center; gap: 12px; }
-    .logo {
-      width: 34px; height: 34px; border-radius: 9px;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      display: grid; place-items: center; font-weight: 700; color: #fff;
-      box-shadow: 0 6px 20px rgba(124,108,255,0.4);
+
+    /* ---------- scattered zigzag bolts ---------- */
+    .bolts { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+    .bolt { position: absolute; opacity: .9; animation: drift 9s ease-in-out infinite; }
+    .bolt:nth-child(2n) { animation-duration: 12s; animation-delay: -3s; }
+    .bolt:nth-child(3n) { animation-duration: 15s; animation-delay: -6s; }
+    @keyframes drift { 0%,100% { transform: translate3d(0,0,0) rotate(var(--r,0deg)); } 50% { transform: translate3d(0,-14px,0) rotate(var(--r,0deg)); } }
+
+    /* ---------- the poster frame ---------- */
+    .poster {
+      position: relative; z-index: 1;
+      max-width: 1240px; margin: 0 auto;
+      background: var(--cream);
+      border: 7px solid var(--vermilion);
+      border-radius: 30px;
+      box-shadow: inset 0 0 0 5px var(--cream), inset 0 0 0 12px var(--gold), 0 18px 0 rgba(30,42,71,.28);
+      padding: 26px 30px 0;
     }
-    .brand h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
-    .brand .sub { font-size: 12px; color: var(--dim-2); font-family: var(--mono); }
-    .lamp { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); font-family: var(--mono); }
-    .lamp-dot { width: 9px; height: 9px; border-radius: 50%; background: #3a4060; transition: all .3s; }
-    .lamp.on .lamp-dot { background: var(--live); box-shadow: 0 0 10px var(--live); }
-    .lamp.err .lamp-dot { background: var(--red); box-shadow: 0 0 10px var(--red); }
+    @media (max-width: 640px) { .poster { padding: 18px 16px 0; border-radius: 22px; } }
+
+    /* ---------- masthead ---------- */
+    .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; padding: 6px 0 20px; }
+    .title { line-height: .84; }
+    .eyebrow { font-family: var(--mono); font-size: 10.5px; letter-spacing: .22em; color: var(--pool); text-transform: uppercase; margin-bottom: 10px; }
+    .title h1 {
+      font-family: var(--display); font-size: clamp(38px, 6.4vw, 74px); font-weight: 400;
+      text-transform: uppercase; letter-spacing: .012em; color: var(--cream);
+      -webkit-text-stroke: 2.5px var(--ink); text-shadow: 5px 5px 0 var(--ink);
+      display: flex; align-items: baseline; gap: .28em; flex-wrap: wrap;
+    }
+    .title .script {
+      font-family: var(--script); font-size: 1.02em; color: var(--gold); text-transform: none;
+      -webkit-text-stroke: 0; text-shadow: 4px 4px 0 var(--pool-deep);
+      transform: rotate(-4deg); display: inline-block; padding-right: .1em;
+    }
+    .lamp { display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--ink); background: var(--paper); border: 2.5px solid var(--ink); border-radius: 999px; padding: 7px 14px; box-shadow: 3px 3px 0 var(--ink); }
+    .lamp-dot { width: 10px; height: 10px; border-radius: 50%; background: #A7A091; border: 2px solid var(--ink); }
+    .lamp.on .lamp-dot { background: var(--sage); }
+    .lamp.err .lamp-dot { background: var(--vermilion); }
 
     /* ---------- layout ---------- */
-    .wrap { max-width: 1280px; margin: 0 auto; padding: 8px 28px 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: start; }
-    @media (max-width: 940px) { .wrap { grid-template-columns: 1fr; } }
+    .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; align-items: start; padding-bottom: 26px; }
+    @media (max-width: 980px) { .wrap { grid-template-columns: 1fr; } }
 
-    .card {
-      background: linear-gradient(180deg, var(--panel), var(--bg-2));
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      box-shadow: 0 12px 40px rgba(0,0,0,0.35);
-    }
+    .card { background: var(--paper); border: 3px solid var(--ink); border-radius: 16px; box-shadow: 6px 6px 0 var(--ink); }
 
-    /* ---------- mode toggle ---------- */
-    .modes { display: flex; gap: 6px; padding: 6px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 18px; }
-    .mode-btn {
-      flex: 1; padding: 11px 14px; border: none; border-radius: 8px; cursor: pointer;
-      background: transparent; color: var(--dim); font-family: var(--sans); font-weight: 600; font-size: 14px;
-      display: flex; align-items: center; justify-content: center; gap: 8px; transition: all .18s;
+    /* ---------- tabs (ticket stubs) ---------- */
+    .modes, .av-toggle { display: flex; gap: 10px; margin-bottom: 16px; }
+    .mode-btn, .av-btn {
+      flex: 1; padding: 11px 12px; cursor: pointer; font-family: var(--display); font-size: 15px;
+      text-transform: uppercase; letter-spacing: .07em; color: var(--ink);
+      background: var(--paper); border: 3px solid var(--ink); border-radius: 12px;
+      box-shadow: 4px 4px 0 var(--ink); transition: transform .08s, box-shadow .08s, background .12s, color .12s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
     }
-    .mode-btn:hover { color: var(--text); }
-    .mode-btn.active { background: var(--accent-soft); color: var(--accent-2); box-shadow: inset 0 0 0 1px rgba(124,108,255,0.35); }
+    .mode-btn:hover, .av-btn:hover { background: #FFF7E6; }
+    .mode-btn:active, .av-btn:active { transform: translate(4px,4px); box-shadow: 0 0 0 var(--ink); }
+    .mode-btn.active { background: var(--vermilion); color: var(--cream); }
+    .av-btn.active { background: var(--gold); color: var(--ink); }
     .mode-btn svg { width: 17px; height: 17px; }
 
     /* ---------- stage ---------- */
-    .stage { padding: 24px; min-height: 460px; display: flex; flex-direction: column; }
-    .stage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-    .stage-title { font-size: 15px; font-weight: 600; }
-    .stage-hint { font-size: 12.5px; color: var(--dim-2); margin-bottom: 18px; }
+    .stage { padding: 22px; min-height: 440px; display: flex; flex-direction: column; }
+    .stage-head { display: flex; align-items: center; justify-content: space-between; }
+    .stage-title { font-family: var(--display); font-size: 21px; text-transform: uppercase; letter-spacing: .04em; }
+    .stage-hint { font-size: 13px; color: var(--pool); margin: 4px 0 16px; }
 
-    /* meter */
-    .meter-wrap { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+    .meter-wrap { background: var(--cream); border: 3px solid var(--ink); border-radius: 12px; padding: 16px; }
     #meter { width: 100%; height: 84px; display: block; }
-    .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
-    #status { font-family: var(--mono); font-size: 13px; color: var(--dim); }
-    #status.live { color: var(--live); }
-    #status.bot { color: var(--accent-2); }
-    #status.think { color: var(--amber); }
+    .stage-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+    #status { font-family: var(--mono); font-size: 12.5px; color: var(--pool); }
+    #status.live { color: var(--sage-deep); }
+    #status.bot { color: var(--vermilion); }
+    #status.think { color: var(--gold-deep); }
 
     .btn {
-      font-family: var(--sans); font-weight: 600; font-size: 15px; letter-spacing: .01em;
-      padding: 13px 30px; border-radius: 11px; border: none; cursor: pointer; transition: transform .08s, filter .2s, background .2s;
-      color: #fff; display: inline-flex; align-items: center; gap: 9px;
+      font-family: var(--display); font-size: 17px; text-transform: uppercase; letter-spacing: .06em;
+      padding: 13px 30px; border-radius: 12px; border: 3px solid var(--ink); cursor: pointer;
+      background: var(--gold); color: var(--ink); box-shadow: 5px 5px 0 var(--ink);
+      transition: transform .08s, box-shadow .08s, filter .15s;
+      display: inline-flex; align-items: center; gap: 9px;
     }
-    .btn:hover { transform: translateY(-1px); filter: brightness(1.08); }
-    .btn:active { transform: translateY(0); }
-    .btn:disabled { opacity: .55; cursor: wait; transform: none; }
-    .btn-accent { background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 8px 24px rgba(124,108,255,0.35); }
-    .btn-live { background: linear-gradient(135deg, #ff5b7f, var(--red)); box-shadow: 0 8px 24px rgba(255,107,107,0.32); }
-    .btn-go { background: linear-gradient(135deg, #2fd39a, var(--live)); color: #05231a; box-shadow: 0 8px 24px rgba(52,226,176,0.3); }
+    .btn:hover { filter: brightness(1.05); }
+    .btn:active { transform: translate(5px,5px); box-shadow: 0 0 0 var(--ink); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: 5px 5px 0 var(--ink); }
+    .btn-accent { background: var(--gold); color: var(--ink); }
+    .btn-live { background: var(--vermilion); color: var(--cream); }
+    .btn-go { background: var(--sage); color: var(--ink); }
     .btn-block { width: 100%; justify-content: center; }
 
-    /* transcript */
-    .log { flex: 1; overflow-y: auto; margin-top: 20px; min-height: 120px; max-height: 300px; padding-right: 4px; }
-    .log:empty::after { content: "Start the call and say hello — the conversation appears here."; display: block; padding: 40px 12px; text-align: center; color: var(--dim-2); font-size: 13.5px; }
-    .entry { display: grid; grid-template-columns: 46px 1fr; gap: 12px; padding: 11px 2px; border-bottom: 1px solid rgba(38,43,65,0.6); animation: rise .18s ease-out; }
-    @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
-    .who { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; padding-top: 3px; }
-    .entry.bot .who { color: var(--accent-2); }
-    .entry.you .who { color: var(--live); }
-    .what { color: var(--text); font-size: 14.5px; }
+    /* ---------- transcript ---------- */
+    .log { flex: 1; overflow-y: auto; margin-top: 18px; min-height: 110px; max-height: 290px; padding-right: 4px; }
+    .log:empty::after { content: "Start the call and say hello — the conversation appears here."; display: block; padding: 34px 12px; text-align: center; color: var(--pool); font-size: 13.5px; }
+    .entry { display: grid; grid-template-columns: 52px 1fr; gap: 12px; padding: 10px 2px; border-bottom: 2px dashed rgba(30,42,71,.22); }
+    .who { font-family: var(--mono); font-weight: 700; font-size: 10px; letter-spacing: .1em; padding-top: 3px; }
+    .entry.bot .who { color: var(--vermilion); }
+    .entry.you .who { color: var(--sage-deep); }
+    .what { font-size: 14.5px; }
 
-    /* phone panel */
-    .phone-stage { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 22px; text-align: center; padding: 20px; }
-    .phone-glyph { width: 76px; height: 76px; border-radius: 20px; background: var(--accent-soft); display: grid; place-items: center; }
-    .phone-glyph svg { width: 36px; height: 36px; stroke: var(--accent-2); }
+    /* ---------- avatar ---------- */
+    .avatar-wrap { display: none; margin-bottom: 16px; }
+    .avatar-wrap.show { display: block; }
+    .avatar-frame { position: relative; width: 100%; max-width: 380px; margin: 0 auto; }
+    #avatarVideo {
+      width: 100%; aspect-ratio: 1/1; display: block; object-fit: cover; background: var(--pool-deep);
+      border: 4px solid var(--ink); border-radius: 16px;
+      box-shadow: inset 0 0 0 4px var(--gold), 6px 6px 0 var(--ink);
+    }
+    .avatar-badge { position: absolute; top: 12px; left: 12px; font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: .12em; color: var(--ink); background: var(--gold); border: 2px solid var(--ink); padding: 3px 9px; border-radius: 999px; display: flex; align-items: center; gap: 6px; }
+    .avatar-badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vermilion); border: 1.5px solid var(--ink); }
+    .avatar-hint { font-family: var(--mono); font-size: 10.5px; color: var(--pool); margin-top: 9px; text-align: center; }
+    /* video mode: avatar leads, chrome recedes */
+    .stage.vmode { padding: 18px; }
+    .stage.vmode .avatar-frame { max-width: 100%; }
+    .stage.vmode #avatarVideo { aspect-ratio: 1/1; }
+    .stage.vmode .stage-head, .stage.vmode .stage-hint, .stage.vmode #meter, .stage.vmode .log { display: none; }
+    .stage.vmode .meter-wrap { background: transparent; border: none; padding: 0; }
+    .stage.vmode .stage-row { margin-top: 0; }
+
+    /* ---------- phone panel ---------- */
+    .phone-stage { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 20px; text-align: center; padding: 16px; }
+    .phone-glyph { width: 74px; height: 74px; border-radius: 50%; background: var(--vermilion); border: 3px solid var(--ink); box-shadow: 5px 5px 0 var(--ink); display: grid; place-items: center; }
+    .phone-glyph svg { width: 34px; height: 34px; stroke: var(--cream); fill: none; }
     .phone-input { width: 100%; max-width: 340px; }
-    #callStatus { font-family: var(--mono); font-size: 13px; color: var(--dim); min-height: 20px; }
-    #callStatus.ok { color: var(--live); }
-    #callStatus.err { color: var(--red); }
+    #callStatus { font-family: var(--mono); font-size: 12.5px; color: var(--pool); min-height: 20px; }
+    #callStatus.ok { color: var(--sage-deep); }
+    #callStatus.err { color: var(--vermilion); }
 
     /* ---------- config rail ---------- */
-    aside { padding: 24px; order: -1; }
-    @media (max-width: 940px) { aside { order: 0; } }
-    .rail-h { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; color: var(--dim-2); margin: 2px 0 16px; text-transform: uppercase; }
-    .field { margin-bottom: 16px; }
-    .field > label { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--dim); margin-bottom: 7px; font-weight: 500; }
-    .field .badge { font-family: var(--mono); font-size: 10px; color: var(--accent-2); background: var(--accent-soft); padding: 2px 7px; border-radius: 5px; }
+    aside { padding: 22px; order: -1; }
+    @media (max-width: 980px) { aside { order: 0; } }
+    .rail-h { font-family: var(--display); font-size: 19px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 3px solid var(--ink); }
+    .field { margin-bottom: 15px; }
+    .field > label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--pool); margin-bottom: 7px; }
+    .field .badge { font-family: var(--mono); font-size: 9px; color: var(--ink); background: var(--gold); border: 1.5px solid var(--ink); padding: 2px 7px; border-radius: 999px; letter-spacing: .06em; }
     input[type="text"], textarea, select {
-      width: 100%; background: var(--bg-2); color: var(--text); border: 1px solid var(--line);
-      border-radius: 9px; padding: 10px 12px; font-family: var(--sans); font-size: 14px; transition: border-color .15s;
+      width: 100%; background: var(--cream); color: var(--ink); border: 2.5px solid var(--ink);
+      border-radius: 10px; padding: 10px 12px; font-family: var(--body); font-size: 14px;
     }
     textarea { resize: vertical; line-height: 1.5; }
-    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-    .voice-row { display: flex; gap: 8px; }
+    input:focus, textarea:focus, select:focus { outline: none; box-shadow: 0 0 0 4px var(--gold); }
+    .voice-row { display: flex; gap: 9px; }
     .voice-row select { flex: 1; }
-    .icon-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--dim); border-radius: 9px; width: 42px; flex-shrink: 0; cursor: pointer; font-size: 14px; transition: all .15s; }
-    .icon-btn:hover { border-color: var(--accent); color: var(--accent-2); }
+    .icon-btn { background: var(--sage); border: 2.5px solid var(--ink); color: var(--ink); border-radius: 10px; width: 46px; flex-shrink: 0; cursor: pointer; font-size: 15px; box-shadow: 3px 3px 0 var(--ink); transition: transform .08s, box-shadow .08s; }
+    .icon-btn:active { transform: translate(3px,3px); box-shadow: 0 0 0 var(--ink); }
     .slider-row { display: flex; align-items: center; gap: 12px; }
-    input[type="range"] { flex: 1; -webkit-appearance: none; appearance: none; height: 5px; border-radius: 4px; background: var(--line-2); outline: none; }
-    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17px; height: 17px; border-radius: 50%; background: var(--accent-2); cursor: pointer; box-shadow: 0 0 0 4px var(--accent-soft); }
-    input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border: none; border-radius: 50%; background: var(--accent-2); cursor: pointer; }
-    .slider-val { font-family: var(--mono); font-size: 12.5px; color: var(--text); width: 46px; text-align: right; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { font-family: var(--mono); font-size: 10.5px; color: var(--dim); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; }
-    .chip b { color: var(--text); font-weight: 500; }
-    .divider { height: 1px; background: var(--line); margin: 20px 0; }
-    details summary { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; color: var(--dim-2); cursor: pointer; text-transform: uppercase; list-style: none; }
+    input[type="range"] { flex: 1; -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; background: var(--ink); outline: none; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--vermilion); border: 3px solid var(--ink); cursor: pointer; }
+    input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--vermilion); border: 3px solid var(--ink); cursor: pointer; }
+    .slider-val { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--ink); }
+    .note { font-size: 11.5px; color: var(--pool); margin-top: 6px; line-height: 1.45; }
+    .applies { font-family: var(--mono); font-size: 11px; color: var(--vermilion); min-height: 16px; margin-top: 4px; }
+    .divider { height: 3px; background: var(--ink); margin: 18px 0; border-radius: 2px; }
+    details summary { font-family: var(--display); font-size: 14px; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; list-style: none; color: var(--pool); }
     details summary::-webkit-details-marker { display: none; }
     details summary::before { content: "▸ "; }
     details[open] summary::before { content: "▾ "; }
     details .field { margin-top: 14px; }
-    .note { font-size: 11.5px; color: var(--dim-2); margin-top: 6px; line-height: 1.5; }
-    .applies { font-family: var(--mono); font-size: 11px; color: var(--amber); min-height: 15px; margin-top: 4px; }
+
+    /* ---------- footer banner ---------- */
+    .poster-foot {
+      margin: 0 -30px; padding: 18px 30px 20px; border-top: 4px solid var(--ink);
+      background: var(--vermilion); border-radius: 0 0 22px 22px;
+      display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+    }
+    @media (max-width: 640px) { .poster-foot { margin: 0 -16px; padding: 16px; } }
+    .foot-tag { font-family: var(--display); font-size: clamp(18px, 3vw, 30px); text-transform: uppercase; letter-spacing: .05em; color: var(--cream); text-shadow: 3px 3px 0 var(--ink); }
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+    .chip { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink); background: var(--cream); border: 2px solid var(--ink); border-radius: 999px; padding: 4px 10px; }
+    .chip b { font-weight: 700; }
+
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+    :focus-visible { outline: 3px solid var(--pool); outline-offset: 2px; }
   </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <div class="logo">◈</div>
-      <div>
-        <h1>Voice Agent</h1>
-        <div class="sub">live demo console</div>
+  <div class="grain"></div>
+  <div class="bolts" aria-hidden="true">
+    <svg class="bolt" style="--r:8deg; top:7%; left:4%;" width="70" height="26" viewBox="0 0 70 26"><polyline points="2,20 18,6 34,20 50,6 66,20" fill="none" stroke="#F2B33D" stroke-width="7" stroke-linecap="round"/></svg>
+    <svg class="bolt" style="--r:-14deg; top:22%; right:5%;" width="60" height="24" viewBox="0 0 70 26"><polyline points="2,20 18,6 34,20 50,6 66,20" fill="none" stroke="#F1E7D2" stroke-width="7" stroke-linecap="round"/></svg>
+    <svg class="bolt" style="--r:20deg; bottom:16%; left:6%;" width="56" height="22" viewBox="0 0 70 26"><polyline points="2,20 18,6 34,20 50,6 66,20" fill="none" stroke="#E4572E" stroke-width="7" stroke-linecap="round"/></svg>
+    <svg class="bolt" style="--r:-6deg; bottom:9%; right:8%;" width="64" height="25" viewBox="0 0 70 26"><polyline points="2,20 18,6 34,20 50,6 66,20" fill="none" stroke="#8B9D6B" stroke-width="7" stroke-linecap="round"/></svg>
+  </div>
+
+  <div class="poster">
+    <div class="masthead">
+      <div class="title">
+        <div class="eyebrow">Live voice agent · demo console</div>
+        <h1>Answer Destiny's <span class="script">Call</span></h1>
       </div>
+      <div class="lamp" id="connLamp"><span class="lamp-dot"></span><span id="connText">idle</span></div>
     </div>
-    <div class="lamp" id="connLamp"><span class="lamp-dot"></span><span id="connText">idle</span></div>
-  </header>
 
-  <div class="wrap">
-    <!-- ===== STAGE ===== -->
-    <section>
-      <div class="modes" role="tablist">
-        <button class="mode-btn active" id="modeBrowser" role="tab">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
-          Browser Call
-        </button>
-        <button class="mode-btn" id="modePhone" role="tab">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2z"/></svg>
-          Phone Call
-        </button>
-      </div>
+    <div class="wrap">
+      <!-- ===== STAGE ===== -->
+      <section>
+        <div class="modes" role="tablist">
+          <button class="mode-btn active" id="modeBrowser" role="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+            Browser
+          </button>
+          <button class="mode-btn" id="modePhone" role="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2z"/></svg>
+            Phone
+          </button>
+        </div>
 
-      <!-- BROWSER -->
-      <div class="card stage" id="browserStage">
-        <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
-        <div class="stage-hint">Uses your mic and speakers — the fastest way to try the agent. Allow microphone access when prompted.</div>
-        <div class="meter-wrap">
-          <canvas id="meter" height="84"></canvas>
-          <div class="stage-row">
-            <div id="status">Loading…</div>
-            <button class="btn btn-accent" id="talkBtn" disabled>Start call</button>
+        <!-- BROWSER -->
+        <div class="card stage" id="browserStage">
+          <div class="av-toggle" role="tablist">
+            <button class="av-btn active" id="modeAudio" role="tab">🎧 Audio</button>
+            <button class="av-btn" id="modeVideo" role="tab">🎥 Video avatar</button>
+          </div>
+          <div class="avatar-wrap" id="avatarWrap">
+            <div class="avatar-frame">
+              <video id="avatarVideo" autoplay playsinline></video>
+              <div class="avatar-badge"><span class="dot"></span><span id="avatarBadge">idle</span></div>
+            </div>
+            <div class="avatar-hint" id="avatarHint">The avatar streams from the GPU while the agent speaks.</div>
+          </div>
+          <div class="stage-head"><div class="stage-title">Talk in your browser</div></div>
+          <div class="stage-hint">Uses your mic and speakers. Allow microphone access when prompted.</div>
+          <div class="meter-wrap">
+            <canvas id="meter" height="84"></canvas>
+            <div class="stage-row">
+              <div id="status">Loading…</div>
+              <button class="btn btn-accent" id="talkBtn" disabled>Start call</button>
+            </div>
+          </div>
+          <div class="log" id="log" aria-live="polite"></div>
+        </div>
+
+        <!-- PHONE -->
+        <div class="card stage" id="phoneStage" style="display:none;">
+          <div class="phone-stage">
+            <div class="phone-glyph">
+              <svg viewBox="0 0 24 24" stroke-width="2"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2z"/></svg>
+            </div>
+            <div>
+              <div class="stage-title" style="margin-bottom:6px;">Call a real phone</div>
+              <div class="stage-hint" style="margin:0;">The agent dials your number and speaks the greeting instantly.</div>
+            </div>
+            <div class="phone-input field" style="margin:0;">
+              <label for="toNumber">Phone number (E.164)</label>
+              <input type="text" id="toNumber" placeholder="+15551234567" inputmode="tel">
+            </div>
+            <button class="btn btn-go btn-block phone-input" id="callBtn" style="max-width:340px;">Place call</button>
+            <div id="callStatus"></div>
           </div>
         </div>
-        <div class="log" id="log" aria-live="polite"></div>
-      </div>
+      </section>
 
-      <!-- PHONE -->
-      <div class="card stage" id="phoneStage" style="display:none;">
-        <div class="phone-stage">
-          <div class="phone-glyph">
-            <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.5 2.8.6a2 2 0 0 1 1.7 2z"/></svg>
-          </div>
-          <div>
-            <div class="stage-title" style="margin-bottom:4px;">Call a real phone</div>
-            <div class="stage-hint" style="margin:0;">The agent dials your number over Telnyx and speaks the greeting instantly.</div>
-          </div>
-          <div class="phone-input field" style="margin:0;">
-            <label for="toNumber">Phone number (E.164)</label>
-            <input type="text" id="toNumber" placeholder="+15551234567" inputmode="tel">
-          </div>
-          <button class="btn btn-go btn-block phone-input" id="callBtn" style="max-width:340px;">Place call</button>
-          <div id="callStatus"></div>
+      <!-- ===== CONFIG RAIL ===== -->
+      <aside class="card">
+        <div class="rail-h">Agent setup</div>
+
+        <div class="field">
+          <label for="hello">Greeting <span class="badge">straight to speech</span></label>
+          <input type="text" id="hello" value="Hey there, thanks so much for taking my call! This is Riley, your AI assistant. I'd love to learn a little about you and answer anything you're curious about. So, how's your day going so far?">
+          <div class="note">Spoken instantly via TTS — never sent to the model, so there's no first-response delay.</div>
         </div>
-      </div>
-    </section>
 
-    <!-- ===== CONFIG RAIL ===== -->
-    <aside class="card">
-      <div class="rail-h">Agent configuration</div>
-
-      <div class="field">
-        <label for="hello">Greeting message <span class="badge">direct to speech</span></label>
-        <input type="text" id="hello" value="Hey there, thanks so much for taking my call! This is Riley, your AI assistant. I'd love to learn a little about you and answer anything you're curious about. So, how's your day going so far?">
-        <div class="note">Spoken instantly via TTS — never sent to the AI, so there's zero first-response delay.</div>
-      </div>
-
-      <div class="field">
-        <label for="prompt">System prompt</label>
-        <textarea id="prompt" rows="12">You are Riley, a warm and genuinely personable AI voice assistant on a live phone call. You sound like a real person — relaxed, friendly, and curious — not like a script.
+        <div class="field">
+          <label for="prompt">System prompt</label>
+          <textarea id="prompt" rows="11">You are Riley, a warm and genuinely personable AI voice assistant on a live phone call. You sound like a real person — relaxed, friendly, and curious — not like a script.
 
 How you speak:
 - Reply in natural, complete spoken sentences, usually two to four of them. Add more detail when it's genuinely helpful, and keep it short when a quick answer is best.
@@ -251,47 +323,58 @@ Handling speech recognition:
 
 Your goal:
 - Be helpful, build rapport, and make the person feel heard. If you don't know something, say so honestly and offer to help with what you can. Never claim to be human, but don't dwell on being an AI either — just be warm and useful.</textarea>
-      </div>
-
-      <div class="field">
-        <label for="voice">Voice</label>
-        <div class="voice-row">
-          <select id="voice"></select>
-          <button class="icon-btn" id="previewBtn" title="Preview voice">▶</button>
         </div>
-      </div>
 
-      <div class="field">
-        <label for="speed">Speaking speed <span class="slider-val" id="speedVal">1.20×</span></label>
-        <div class="slider-row"><input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1.2"></div>
-      </div>
-
-      <div class="field">
-        <label for="volume">Volume <span class="slider-val" id="volVal">1.4×</span></label>
-        <div class="slider-row"><input type="range" id="volume" min="0.6" max="2.0" step="0.1" value="1.4"></div>
-      </div>
-
-      <div class="applies" id="applies"></div>
-      <div class="divider"></div>
-
-      <div class="field">
-        <label>Server pipeline</label>
-        <div class="chips" id="pipeChips"><span class="chip">loading…</span></div>
-      </div>
-
-      <details>
-        <summary>Advanced</summary>
         <div class="field">
-          <label for="llm">Language model</label>
-          <select id="llm"></select>
+          <label for="voice">Voice</label>
+          <div class="voice-row">
+            <select id="voice"></select>
+            <button class="icon-btn" id="previewBtn" title="Preview voice">▶</button>
+          </div>
         </div>
+
         <div class="field">
-          <label for="serverUrl">Server URL</label>
-          <input type="text" id="serverUrl" placeholder="(same origin)">
-          <div class="note">Leave blank to use this page's origin. Set only for local dev against a remote server.</div>
+          <label for="speed">Speaking speed <span class="slider-val" id="speedVal">1.20×</span></label>
+          <div class="slider-row"><input type="range" id="speed" min="0.7" max="1.5" step="0.05" value="1.2"></div>
         </div>
-      </details>
-    </aside>
+
+        <div class="field">
+          <label for="volume">Volume <span class="slider-val" id="volVal">1.4×</span></label>
+          <div class="slider-row"><input type="range" id="volume" min="0.6" max="2.0" step="0.1" value="1.4"></div>
+        </div>
+
+        <div class="applies" id="applies"></div>
+        <div class="divider"></div>
+
+        <details>
+          <summary>Advanced</summary>
+          <div class="field">
+            <label for="llm">Language model</label>
+            <select id="llm"></select>
+          </div>
+          <div class="field">
+            <label for="serverUrl">Server URL</label>
+            <input type="text" id="serverUrl" placeholder="(same origin)">
+            <div class="note">Leave blank to use this page's origin. Set only for local dev against a remote server.</div>
+          </div>
+          <div class="field">
+            <label for="avatarUrl">Avatar service</label>
+            <input type="text" id="avatarUrl" placeholder="ws://38.65.239.47:8899">
+            <div class="note">WebSocket to the avatar service. Use <b>wss://</b> when this page is served over HTTPS.</div>
+          </div>
+          <div class="field">
+            <label for="videoDelay">Video sync delay <span class="slider-val" id="vdVal">2.2s</span></label>
+            <div class="slider-row"><input type="range" id="videoDelay" min="0.8" max="4.0" step="0.1" value="2.2"></div>
+            <div class="note">How long audio is held back so the generated video stays lip-synced. Lower is snappier but riskier.</div>
+          </div>
+        </details>
+      </aside>
+    </div>
+
+    <div class="poster-foot">
+      <div class="foot-tag">Leave fear behind</div>
+      <div class="chips" id="pipeChips"><span class="chip">loading…</span></div>
+    </div>
   </div>
 
   <script>
@@ -311,15 +394,19 @@ Your goal:
 
     // ---------- persisted settings ----------
     const saved = JSON.parse(localStorage.getItem("va-demo4") || "{}");
-    ["hello","prompt","serverUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
+    ["hello","prompt","serverUrl","avatarUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
     if (saved.speed) $("speed").value = saved.speed;
     if (saved.volume) $("volume").value = saved.volume;
+    if (saved.videoDelay) $("videoDelay").value = saved.videoDelay;
     $("speedVal").textContent = Number($("speed").value).toFixed(2) + "×";
     $("volVal").textContent = Number($("volume").value).toFixed(1) + "×";
+    $("vdVal").textContent = Number($("videoDelay").value).toFixed(1) + "s";
     function persist() {
       localStorage.setItem("va-demo4", JSON.stringify({
         hello: $("hello").value, prompt: $("prompt").value, serverUrl: $("serverUrl").value,
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value, llm: $("llm").value,
+        avatarUrl: $("avatarUrl").value, videoDelay: $("videoDelay").value,
+        videoMode: (typeof videoMode !== "undefined" && videoMode),
       }));
     }
 
@@ -332,8 +419,9 @@ Your goal:
         for (const m of o.llm_models) $("llm").add(new Option(m, m, false, m === (saved.llm || o.current.llm_model)));
         $("voice").innerHTML = "";
         const en = o.voices.filter(v => v.lang === "en");
-        let sv = saved.voice !== undefined ? Number(saved.voice) : 3; // default: Heart
-        if (!en.some(v => v.id === sv)) sv = 3;
+        const heart = en.find(v => v.name.toLowerCase().startsWith("heart")); // default: Heart
+        let sv = Number(saved.voice);
+        if (!Number.isFinite(sv) || saved.voice === "" || saved.voice === undefined || !en.some(v => v.id === sv)) sv = heart ? heart.id : (en[0] && en[0].id);
         for (const v of en) $("voice").add(new Option(v.name, v.id, false, v.id === sv));
         $("pipeChips").innerHTML =
           `<span class="chip">STT <b>${o.current.asr_model}</b></span>` +
@@ -362,6 +450,8 @@ Your goal:
     $("serverUrl").addEventListener("change", () => { persist(); loadOptions(); });
     $("speed").addEventListener("input", () => { $("speedVal").textContent = Number($("speed").value).toFixed(2) + "×"; settingsChanged(); });
     $("volume").addEventListener("input", () => { $("volVal").textContent = Number($("volume").value).toFixed(1) + "×"; settingsChanged(); });
+    $("videoDelay").addEventListener("input", () => { $("vdVal").textContent = Number($("videoDelay").value).toFixed(1) + "s"; persist(); });
+    $("avatarUrl").addEventListener("change", persist);
 
     // ---------- voice preview ----------
     let previewAudio = null;
@@ -430,13 +520,91 @@ Your goal:
         let amp = Math.min(1, active * (1.2 - cd) * wob * 3);
         if (!ws) amp = 0.04 + 0.02 * Math.sin(i * 0.6 + performance.now() / 500);
         const bh = Math.max(3 * devicePixelRatio, amp * h * 0.92);
-        mctx.fillStyle = amp > 0.06 ? (isBot ? "#a78bfa" : "#34e2b0") : "rgba(120,128,170,0.22)";
+        mctx.fillStyle = amp > 0.06 ? (isBot ? "#E4572E" : "#566B3E") : "rgba(30,42,71,0.2)";
         const bw = Math.max(2 * devicePixelRatio, gap * 0.42);
         mctx.fillRect(i * gap + (gap - bw) / 2, (h - bh) / 2, bw, bh);
       }
       requestAnimationFrame(drawMeter);
     }
     requestAnimationFrame(drawMeter);
+
+    // ---------- video-avatar mode (Daily SFU + SoulX-FlashHead) ----------
+    let videoMode = false, avatarWs = null, dailyCall = null, avAttachedKey = "";
+    function avatarUrl() { return ($("avatarUrl").value.trim()) || "ws://38.65.239.47:8899"; }
+    function setAvatarBadge(t) { $("avatarBadge").textContent = t; }
+    function setAvMode(v) {
+      videoMode = v;
+      $("modeAudio").classList.toggle("active", !v);
+      $("modeVideo").classList.toggle("active", v);
+      $("avatarWrap").classList.toggle("show", v);
+      $("browserStage").classList.toggle("vmode", v);
+      persist();
+      if (ws) stopAudio(true); // audio & video are separate sessions — switching modes ends the current call
+    }
+    $("modeAudio").onclick = () => setAvMode(false);
+    $("modeVideo").onclick = () => setAvMode(true);
+
+    function connectAvatar() {
+      if (avatarWs && (avatarWs.readyState === 0 || avatarWs.readyState === 1)) return;
+      setAvatarBadge("connecting"); $("avatarHint").textContent = "connecting to avatar…";
+      try { avatarWs = new WebSocket(avatarUrl()); } catch { setAvatarBadge("bad url"); return; }
+      avatarWs.binaryType = "arraybuffer";
+      avatarWs.onopen = () => setAvatarBadge("starting");
+      avatarWs.onmessage = async (ev) => {
+        if (typeof ev.data !== "string") return;
+        try { const m = JSON.parse(ev.data); if (m.type === "room") await joinDaily(m.url, m.token); } catch {}
+      };
+      avatarWs.onclose = () => { avatarWs = null; };
+      avatarWs.onerror = () => { setAvatarBadge("unreachable"); $("avatarHint").textContent = "avatar service unreachable"; };
+    }
+    async function joinDaily(url, token) {
+      if (!window.DailyIframe) { $("avatarHint").textContent = "Daily SDK not loaded"; return; }
+      try {
+        if (dailyCall) { try { await dailyCall.leave(); await dailyCall.destroy(); } catch {} dailyCall = null; }
+        avAttachedKey = "";
+        dailyCall = DailyIframe.createCallObject({ subscribeToTracksAutomatically: true });
+        dailyCall.on("track-started", attachAvatar);
+        dailyCall.on("participant-updated", attachAvatar);
+        dailyCall.on("participant-joined", attachAvatar);
+        await dailyCall.join({ url, token });
+        setAvatarBadge("live"); $("avatarHint").textContent = "avatar connected";
+      } catch (e) { $("avatarHint").textContent = "join failed"; }
+    }
+    function attachAvatar() {
+      if (!dailyCall) return;
+      const ps = dailyCall.participants();
+      for (const id in ps) {
+        const p = ps[id]; if (p.local) continue;
+        const tracks = [], vt = p.tracks.video, at = p.tracks.audio;
+        if (vt && vt.state === "playable" && vt.persistentTrack) tracks.push(vt.persistentTrack);
+        if (at && at.state === "playable" && at.persistentTrack) tracks.push(at.persistentTrack);
+        const key = tracks.map(t => t.kind).sort().join("+");
+        if (tracks.length && key !== avAttachedKey) {
+          avAttachedKey = key;
+          const v = $("avatarVideo"); v.srcObject = new MediaStream(tracks); v.play().catch(() => {});
+          $("avatarHint").textContent = key.includes("video") ? "" : "connecting video…";
+        }
+      }
+    }
+    function closeAvatar() {
+      if (dailyCall) { try { dailyCall.leave(); dailyCall.destroy(); } catch {} dailyCall = null; }
+      if (avatarWs) { try { avatarWs.close(); } catch {} avatarWs = null; }
+      avAttachedKey = ""; const v = $("avatarVideo"); if (v) v.srcObject = null;
+      if (botGain) botGain.gain.value = 1;
+    }
+    function avatarReset() { clearTimeout(eotTimer); if (avatarWs && avatarWs.readyState === 1) avatarWs.send(JSON.stringify({ type: "flush" })); }
+    // End of turn: the agent stopped sending audio, so tell the avatar to render the
+    // remaining partial chunk — otherwise its tail would spill into the next turn.
+    let eotTimer = null;
+    function avatarEOT() { if (avatarWs && avatarWs.readyState === 1) avatarWs.send(JSON.stringify({ type: "eot" })); }
+    function scheduleEOT() { clearTimeout(eotTimer); eotTimer = setTimeout(avatarEOT, 450); }
+    function avatarSendPCM(buffer) {
+      if (!videoMode || !avatarWs || avatarWs.readyState !== 1) return;
+      const f = buffer.getChannelData(0), i16 = new Int16Array(f.length);
+      for (let i = 0; i < f.length; i++) { const c = Math.max(-1, Math.min(1, f[i])); i16[i] = c < 0 ? c * 32768 : c * 32767; }
+      avatarWs.send(i16.buffer);
+    }
+    if (saved.videoMode) setAvMode(true);
 
 
     // ---------- websocket ----------
@@ -480,6 +648,9 @@ Your goal:
       if (d === undefined) { isAudioProcessing = false; return; }
       const arr = new Uint8Array(Array.from(d.audio));
       audioContext.decodeAudioData(arr.buffer, (buffer) => {
+        // Audio reaches us faster than realtime but is forwarded at playback pace, so the
+        // end-of-turn timer has to run off the forward, not the arrival.
+        if (videoMode) { avatarSendPCM(buffer); scheduleEOT(); }
         const src = new AudioBufferSourceNode(audioContext);
         src.buffer = buffer; src.connect(botGain); src.start(playTime);
         playTime += buffer.duration; currentBotSource = src; refreshStatus();
@@ -494,7 +665,9 @@ Your goal:
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
       botGain = audioContext.createGain(); botAnalyser = audioContext.createAnalyser(); botAnalyser.fftSize = 64;
       botGain.connect(botAnalyser); botGain.connect(audioContext.destination);
+      if (videoMode) botGain.gain.value = 0; // video mode: Daily plays the synced audio, not the raw Go stream
       isPlaying = true; currentBotEntry = null; initWebSocket();
+      if (videoMode) connectAvatar();
       navigator.mediaDevices.getUserMedia({ audio: { sampleRate: SAMPLE_RATE, channelCount: 1, autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
         .then((stream) => {
           microphoneStream = stream;
@@ -511,6 +684,7 @@ Your goal:
             bargeInFrames = micLevel > BARGE_RMS ? bargeInFrames + 1 : 0;
             if (bargeInFrames >= BARGE_MIN && (audioQueue.length > 0 || currentBotSource)) {
               audioQueue = []; if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; } playTime = 0;
+              if (videoMode) avatarReset();
             }
             const pcm = toS16(a);
             const frame = Frame.create({ audio: { audio: Array.from(new Uint8Array(pcm.buffer)), sampleRate: SAMPLE_RATE, numChannels: 1, sampleWidth: 2 } });
@@ -523,6 +697,7 @@ Your goal:
       playTime = 0; isPlaying = false; audioQueue = []; isAudioProcessing = false; userTalking = false; awaitingReply = false;
       if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; }
       if (ws && closeWs) ws.close(); ws = null;
+      closeAvatar();
       if (scriptProcessor) scriptProcessor.disconnect();
       if (micSource) micSource.disconnect();
       if (microphoneStream) microphoneStream.getTracks().forEach(t => t.stop());

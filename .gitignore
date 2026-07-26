@@ -53,3 +53,12 @@ resources/
 TODO.md
 # telnyx secrets
 telnyx.env
+
+# secrets — never commit real keys
+daily.env
+telnyx.env
+
+# avatar assets (large / identity-specific)
+deploy/avatar/*.mp4
+deploy/avatar/*.png
+deploy/avatar/*.jpg

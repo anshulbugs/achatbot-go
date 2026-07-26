@@ -39,6 +39,23 @@ Why HTTP microservices for ASR/TTS/LLM? The Go binary stays light (no torch),
 each model scales independently, and one GPU per service serves hundreds of
 concurrent calls.
 
+### Optional: photoreal video avatar
+
+The browser call can also show a **photoreal talking-head avatar** driven by the
+agent's own TTS audio. It runs as a separate GPU service and needs **no change to
+the Go pipeline** — the browser forwards the bot audio it already receives, and the
+avatar service republishes synchronized audio+video over WebRTC (Daily SFU).
+
+```
+   Go server ──audio──► Browser ──ws :8899──► SoulX-FlashHead (GPU)
+                            ▲                        │
+                            └────── Daily SFU ◄──────┘  (synced A/V, WebRTC)
+```
+
+~4 concurrent streams per GPU and ~1.4s added latency, so it's a **demo/premium
+feature**, not the mass phone-call path. Full setup, commands, the idle-loop
+recipe, and the errors we hit: **[deploy/avatar/README.md](deploy/avatar/README.md)**.
+
 ---
 
 ## 2. Prerequisites
@@ -85,6 +102,7 @@ gcc --version
 | TTS (Kokoro)   | `kokoro-tts`        | `127.0.0.1:8880` | `TTS_GPU=1` | `GET /health` |
 | ASR (Parakeet) | `parakeet`          | `127.0.0.1:8890` | `ASR_GPU=2` | `GET /health` |
 | Public tunnel  | `cloudflared`       | → 4321         | —             | `tunnel-url.txt` |
+| Video avatar (optional) | `soulx`    | `8899`         | own GPU       | WS `/` returns a room |
 
 GPU services bind to `127.0.0.1` only — they're reached by the Go server on the
 same host. Only port 4321 is exposed publicly (via the tunnel).
