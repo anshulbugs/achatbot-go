@@ -140,9 +140,59 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Printf("telnyx event: %s call=%s", ev.Data.EventType, id)
 
 	switch ev.Data.EventType {
+	case "call.initiated":
+		// Inbound leg (someone dialed one of our numbers). Register it with the
+		// server defaults and answer it, so the agent picks up. Outbound legs are
+		// already registered by handleCall and are ignored here.
+		if ev.Data.Payload.Direction != "incoming" || calls.get(id) != nil {
+			return
+		}
+		p := &callParams{
+			To:           ev.Data.Payload.From,
+			Hello:        cfg.Server.InboundHello,
+			SystemPrompt: cfg.Server.SystemPrompt,
+			VoiceID:      cfg.TTS.SpeakerID,
+			Speed:        cfg.TTS.Speed,
+			Volume:       cfg.TTS.Gain,
+			LLMModel:     cfg.LLM.Model,
+		}
+		if p.Hello == "" {
+			p.Hello = "Hello! Thanks for calling. How can I help you today?"
+		}
+		calls.put(id, p)
+		log.Printf("telnyx: inbound call from %s call_control_id=%s", ev.Data.Payload.From, id)
+		go func() {
+			if err := telnyxClient.Answer(context.Background(), id); err != nil {
+				log.Printf("telnyx answer err: %v", err)
+				calls.del(id)
+			}
+		}()
+
 	case "call.answered":
 		if calls.get(id) == nil {
 			return
+		}
+		if cfg.Server.RecordCalls {
+			go func() {
+				if err := telnyxClient.RecordStart(context.Background(), id); err != nil {
+					log.Printf("telnyx record_start err: %v", err)
+				} else {
+					log.Printf("telnyx: recording started call=%s", id)
+				}
+			}()
+		}
+		// Safety net: two agents talking to each other never hang up on their own,
+		// so bound every call. 0 disables.
+		if secs := cfg.Server.MaxCallSecs; secs > 0 {
+			go func() {
+				time.Sleep(time.Duration(secs) * time.Second)
+				if calls.get(id) != nil {
+					log.Printf("telnyx: max duration %ds reached, hanging up call=%s", secs, id)
+					if err := telnyxClient.Hangup(context.Background(), id); err != nil {
+						log.Printf("telnyx hangup err: %v", err)
+					}
+				}
+			}()
 		}
 		// Fork the call's audio to our media bridge (wss on the public tunnel).
 		streamURL := wsURL(telnyxClient.PublicURL()) + "/telnyx/media?cc=" + id

@@ -15,6 +15,8 @@ type WebhookEnvelope struct {
 			From          string `json:"from"`
 			To            string `json:"to"`
 			HangupCause   string `json:"hangup_cause"`
+			// Direction is "incoming" for calls dialed *to* one of our numbers.
+			Direction string `json:"direction"`
 		} `json:"payload"`
 	} `json:"data"`
 }

@@ -76,6 +76,15 @@ type ServerConfig struct {
 	// FirstChunkWords is how many opening words of a reply to flush to TTS
 	// immediately (smaller = audio starts sooner, but choppier openings).
 	FirstChunkWords int `mapstructure:"first_chunk_words"`
+	// InboundHello is the greeting spoken when the agent answers an inbound call.
+	// Falls back to a generic greeting when empty.
+	InboundHello string `mapstructure:"inbound_hello"`
+	// MaxCallSecs hangs a call up after this many seconds. Needed for agent-to-agent
+	// load tests, where neither side ever hangs up. 0 disables the cap.
+	MaxCallSecs int `mapstructure:"max_call_secs"`
+	// RecordCalls asks Telnyx to record every answered call (dual channel, mp3).
+	// Recordings are billed and stored by Telnyx — keep this off for large runs.
+	RecordCalls bool `mapstructure:"record_calls"`
 	// ClarityFilter enables the outbound telephone voice-enhancement filter
 	// (high-pass + presence boost) on Telnyx calls.
 	ClarityFilter bool `mapstructure:"clarity_filter"`

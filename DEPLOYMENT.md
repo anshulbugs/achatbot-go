@@ -234,11 +234,51 @@ curl -s -X POST http://127.0.0.1:4321/api/call \
 
 ## 8. Scaling & capacity (measured)
 
-All numbers from load tests on **one RTX 5090 per service**; see `/api/loadtest`
-and `deploy` benchmark notes.
+> **Superseded numbers.** An earlier revision of this section estimated 500–600 concurrent
+> calls from the in-process synthetic harness (`/api/loadtest`). Testing with **real
+> agent-to-agent phone calls** produced a far lower figure. The synthetic harness never
+> exercised the ASR/TTS HTTP services under real concurrency, so it missed the fact that both
+> were serialising. Trust the phone-call numbers below.
 
-**LLM burst (the key number).** Firing N *simultaneous* requests at one 5090
-(Qwen2.5-3B via SGLang):
+### Measured on 4 GPUs (2× LLM, 1× ASR, 1× TTS), all RTX 5090
+
+| Concurrent agent sessions | p50 | p90 | p95 | audio-send errors | verdict |
+|---|---|---|---|---|---|
+| 30 | 965 ms | 1168 ms | 1218 ms | 2 | ✅ excellent |
+| **60** | **1032 ms** | **1350 ms** | **1628 ms** | **0** | ✅ **safe operating point** |
+| 80 | 1008 ms | 2924 ms | 4348 ms | 2 | ⚠️ tail degrading |
+| 100 | 1112 ms | 4686 ms | 6244 ms | 234 | ❌ breaks |
+
+**~60 concurrent agent sessions on 4 GPUs.** The median is flat across the entire range —
+**judge capacity on p90/p95, never p50**. At 100 agents the median still read ~1.1 s while
+callers heard multi-second hangs.
+
+Because the test is agent-to-agent (no dead air, ~1 turn per 12.4 s per agent) it is roughly
+**1.2–2× heavier** than a human call, so 60 agent sessions ≈ **75–120 concurrent human
+calls** — an extrapolation from turn rate, not a measurement.
+
+At 60 agents every tier is already **77–96% utilised**, which is why 80 collapses: no tier has
+slack to absorb a burst. Budget **~1.5–2× of every tier** for 100 (≈3–4 LLM GPUs, 2 ASR, 2 TTS).
+
+Full methodology, per-component benchmarks, and the bottleneck list:
+**[deploy/loadtest/README.md](deploy/loadtest/README.md)**.
+
+### The bottlenecks were serialisation, not hardware
+
+| Bottleneck | Symptom | Fix | Gain |
+|---|---|---|---|
+| TTS single worker | Delayed *greeting* (greeting is pure TTS). 8 req/s flat; p50 61 ms → 5252 ms @50 conc, GPU only 12–16% busy | `uvicorn --workers 8` | 8 → **25.7 req/s** |
+| ASR single worker | `async def` endpoint calling `transcribe()` synchronously — blocks the event loop | `uvicorn --workers 4` | 14 → **26–36 req/s** |
+| LLM under-configured | GPU at 99% with 11.6 GB VRAM unused; decode off the CUDA-graph path | tuned flags | **+34–51%** |
+| LLM single replica | One GPU pinned, others idle | 2nd replica + nginx LB | send errors **40 233 → 489** |
+
+A flat req/s that doesn't rise with concurrency is the signature of serialisation — look there
+before buying GPUs. Note **more workers is not always better**: ASR at 8 workers was *worse*
+than at 4 (contention).
+
+### LLM burst capacity (still valid)
+
+Firing N *simultaneous* requests at one 5090 (Qwen2.5-3B, SGLang):
 
 | Simultaneous LLM requests | TTFT p50 / p90 | Full reply p50 | Fails |
 |---|---|---|---|
@@ -247,43 +287,23 @@ and `deploy` benchmark notes.
 | 150 | 138 / 193 ms | 1028 ms | 0 |
 | 200 | 663 / 926 ms | 1251 ms | 0 |
 
-One 5090 absorbs **~150 simultaneous requests under 200 ms TTFT**; the knee is
-~200 (SGLang queues, never drops). **Two LLM 5090s ≈ ~300 simultaneous.**
+One 5090 absorbs ~150 simultaneous requests under 200 ms TTFT. This matters when a dialer
+launches many calls in the same second — throttle CPS to avoid the knee.
 
-**Concurrent calls ≠ simultaneous LLM requests.** Each call hits the LLM only
-once per turn (~every 8–10 s). So **600–800 concurrent calls generate only
-~60–100 in-flight LLM requests** at any instant when naturally desynced — easy
-for one GPU, trivial for two. The burst limit only matters if you *launch* many
-outbound calls in the same second (throttle your dialer's CPS to avoid it).
+### CPU
 
-**Per-subsystem util at 100 concurrent calls (1 GPU each):**
+| Metric | Value |
+|---|---|
+| Go server at 60 agents | **~5–6 cores** (VAD + µ-law transcode + WS fan-out) |
+| Box load at 100 agents | **26** of 255 cores (~10%) |
 
-| Subsystem | Util @100 calls | Realistic ceiling |
-|---|---|---|
-| LLM (SGLang 3B) | 79% peak | ~600–800 steady (2 GPUs) |
-| ASR (Parakeet)  | 7%       | 1000+ |
-| TTS (Kokoro)    | ~20%     | ~500–600 (first ceiling) |
-| VAD/CPU         | 16% of 255 vCPU | host-dependent |
-
-**Bottom line for 2 LLM + 1 STT + 1 TTS (all 5090):** ~**500–600 concurrent
-calls comfortably**. The **TTS GPU** is the first limiter (~500–600), not the LLM.
-For a solid 800, add a 2nd TTS GPU (or move VAD to GPU if CPU-bound on a smaller host).
+CPU was never the constraint. There is ample headroom for post-call work (voicemail, webhook
+senders, transcript jobs) — run it off the audio path on a queue + worker pool. **Function
+calling is not free**: it adds an LLM round-trip per invocation, spending GPU budget.
 
 ### WebSocket / connection scaling
 "WebSockets don't scale" is a myth at this scale. Each call is **one** WS
 carrying 8 kHz µ-law (~64 kbps each way). Go handles **tens of thousands** of
-concurrent goroutine-backed connections; 500–600 is nothing. The bottleneck is
-**GPU compute, not the socket layer.** Practical notes:
-- Raise `ulimit -n` (done in `server-start.sh`) so FDs don't cap you.
-- WS is inherently **sticky** — a call's media stays on the instance that owns
-  it. That's fine: pipeline state is per-connection anyway.
-- **Scale horizontally by GPU capacity, not connection count.** When one box is
-  GPU-bound, run more server instances (each with its own GPU services) and split
-  calls across them; Telnyx can route per number, or put a WS-aware load balancer
-  in front. No shared state between calls means this is straightforward.
-
----
-
 ## 9. Errors we hit & fixes
 
 | # | Symptom | Cause | Fix |

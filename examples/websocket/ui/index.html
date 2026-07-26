@@ -435,6 +435,7 @@ Your goal:
     // ---------- mode toggle ----------
     let mode = "browser";
     function setMode(m) {
+      if (m !== mode && typeof ws !== "undefined" && ws) stopAudio(true); // leaving the browser tab ends the call
       mode = m;
       $("modeBrowser").classList.toggle("active", m === "browser");
       $("modePhone").classList.toggle("active", m === "phone");
@@ -493,6 +494,8 @@ Your goal:
     let playTime = 0, isPlaying = false, audioQueue = [], isAudioProcessing = false, currentBotSource = null;
     let botAnalyser = null, botGain = null, micLevel = 0, userTalking = false, userTalkFrames = 0, awaitingReply = false, bargeInFrames = 0;
     const BARGE_RMS = 0.04, BARGE_MIN = 4;
+    const MAX_SESSION_MS = 20 * 60 * 1000; // browser calls are capped at 20 minutes
+    let sessionCapTimer = null;
 
     protobuf.load("./data_frames.proto", (err, root) => {
       if (err) { setStatus("Failed to load protocol.", ""); return; }
@@ -667,6 +670,11 @@ Your goal:
       botGain.connect(botAnalyser); botGain.connect(audioContext.destination);
       if (videoMode) botGain.gain.value = 0; // video mode: Daily plays the synced audio, not the raw Go stream
       isPlaying = true; currentBotEntry = null; initWebSocket();
+      // Hard cap so a forgotten tab can't hold a session (and its GPU pool slots) open.
+      clearTimeout(sessionCapTimer);
+      sessionCapTimer = setTimeout(() => {
+        if (ws) { stopAudio(true); setStatus("Call ended — 20 minute limit reached.", ""); }
+      }, MAX_SESSION_MS);
       if (videoMode) connectAvatar();
       navigator.mediaDevices.getUserMedia({ audio: { sampleRate: SAMPLE_RATE, channelCount: 1, autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
         .then((stream) => {
@@ -694,6 +702,7 @@ Your goal:
         }).catch(() => { $("talkBtn").disabled = false; setStatus("Microphone permission denied.", ""); });
     }
     function stopAudio(closeWs = true) {
+      clearTimeout(sessionCapTimer); clearTimeout(eotTimer);
       playTime = 0; isPlaying = false; audioQueue = []; isAudioProcessing = false; userTalking = false; awaitingReply = false;
       if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; }
       if (ws && closeWs) ws.close(); ws = null;

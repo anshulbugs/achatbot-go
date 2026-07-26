@@ -140,3 +140,11 @@ func (c *Client) Answer(ctx context.Context, callControlID string) error {
 func (c *Client) Hangup(ctx context.Context, callControlID string) error {
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/hangup", nil, nil)
 }
+
+// RecordStart begins a dual-channel recording of the call. Telnyx stores the
+// file and exposes it via GET /recordings; "dual" keeps each side on its own
+// channel, which is what makes an agent-to-agent call reviewable.
+func (c *Client) RecordStart(ctx context.Context, callControlID string) error {
+	body := map[string]any{"format": "mp3", "channels": "dual"}
+	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/record_start", body, nil)
+}

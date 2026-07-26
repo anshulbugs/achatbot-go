@@ -56,11 +56,29 @@ cam=daily.Daily.create_camera_device("cam", width=512, height=512, color_format=
 mic=daily.Daily.create_microphone_device("mic", sample_rate=SR, channels=1)
 client=daily.CallClient()
 client.update_inputs({"camera":{"isEnabled":True,"settings":{"deviceId":"cam"}},"microphone":{"isEnabled":True,"settings":{"deviceId":"mic"}}})
-ROOM={"url":None,"name":None}
-r=requests.post("https://api.daily.co/v1/rooms",headers=HDR,json={"properties":{"exp":int(time.time())+21600,"enable_prejoin_ui":False}}).json()
-bot_tok=requests.post("https://api.daily.co/v1/meeting-tokens",headers=HDR,json={"properties":{"room_name":r["name"],"is_owner":True,"user_name":"avatar"}}).json()["token"]
-client.join(r["url"], bot_tok); time.sleep(2); ROOM["url"]=r["url"]; ROOM["name"]=r["name"]
-print("[daily] bot joined room", r["url"], flush=True)
+ROOM={"url":None,"name":None,"exp":0}
+def _new_room():
+    # Daily deletes a room at its exp, so give it a day and refresh before it lapses.
+    exp=int(time.time())+600   # 10-minute session cap
+    r=requests.post("https://api.daily.co/v1/rooms",headers=HDR,
+                    json={"properties":{"exp":exp,"enable_prejoin_ui":False}}).json()
+    tok=requests.post("https://api.daily.co/v1/meeting-tokens",headers=HDR,
+                      json={"properties":{"room_name":r["name"],"is_owner":True,"user_name":"avatar"}}).json()["token"]
+    return r,tok,exp
+def ensure_room(force=False):
+    """Join a fresh room. Called on every client connect so each session is isolated
+    and short-lived; Daily deletes the room at exp (10 min)."""
+    if not force and ROOM["url"] and time.time() < ROOM["exp"]-60:
+        return
+    r,tok,exp=_new_room()
+    try:
+        client.leave(); time.sleep(1)
+    except Exception:
+        pass
+    client.join(r["url"], tok); time.sleep(2)
+    ROOM.update(url=r["url"], name=r["name"], exp=exp)
+    print("[daily] bot joined room", r["url"], flush=True)
+ensure_room()
 
 pair_q=queue.Queue(maxsize=400); audio_in=queue.Queue()
 def _emit(frames, sl):
@@ -106,6 +124,7 @@ async def session(req): return web.json_response({"roomUrl":ROOM["url"],"token":
 async def opts(req): return web.Response(headers={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"POST,OPTIONS","Access-Control-Allow-Headers":"*"})
 async def ws_handler(req):
     ws=web.WebSocketResponse(max_msg_size=0); await ws.prepare(req); print("[daily] ws connected", flush=True)
+    ensure_room(force=True)
     await ws.send_str(json.dumps({"type":"room","url":ROOM["url"],"token":ctoken()}))
     async for m in ws:
         if m.type==WSMsgType.BINARY: audio_in.put(("pcm", np.frombuffer(m.data,dtype=np.int16).astype(np.float32)/32768.0))

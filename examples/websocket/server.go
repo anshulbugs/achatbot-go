@@ -539,10 +539,40 @@ func sendAudioChunks(tw *achatbot_processors.WebsocketTransportWriter, pcm []byt
 	}
 }
 
+// hangupConn wraps a websocket connection and closes done on the first read
+// error, which is how a hangup reaches us. runVoiceSession uses that signal to
+// cancel the pipeline task so the session's pool instances are released.
+type hangupConn struct {
+	common.IWebSocketConn
+	once sync.Once
+	done chan struct{}
+}
+
+func (c *hangupConn) ReadMessage() (consts.MessageType, []byte, error) {
+	mt, p, err := c.IWebSocketConn.ReadMessage()
+	if err != nil {
+		c.once.Do(func() { close(c.done) })
+	}
+	return mt, p, err
+}
+
+func (c *hangupConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return c.IWebSocketConn.Close()
+}
+
 // runVoiceSession builds and runs the VAD->ASR->LLM->TTS pipeline over the
 // given connection and serializer. The browser and telephony transports differ
 // only in the serializer, WAV framing, and greeting; everything else is shared.
 func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serializer, sc sessionConfig) {
+	// A real client hanging up only surfaces as a read error on the socket. Without
+	// this, task.Run() below blocks forever, the pool-release defers never fire, and
+	// every finished call permanently leaks its VAD/ASR/TTS slots.
+	if sc.stop == nil {
+		hung := &hangupConn{IWebSocketConn: wsConn, done: make(chan struct{})}
+		wsConn, sc.stop = hung, hung.done
+	}
+
 	chatHistorySize := cfg.Server.ChatHistorySize
 	session := common.NewSession(sc.clientID, &chatHistorySize)
 	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
