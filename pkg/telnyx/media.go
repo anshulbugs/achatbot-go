@@ -25,6 +25,12 @@ const telnyxRate = 8000
 // to clear bargeAbsFloor anyway.
 const echoTail = 250 * time.Millisecond
 
+// interruptMute is how long outbound audio is dropped after an interruption, to
+// swallow the interrupted turn's tail still draining through the pipeline.
+// Measured reply latency on this path is ~950ms at best, so a new turn's audio
+// lands well after this window and is never clipped.
+const interruptMute = 400 * time.Millisecond
+
 // Adaptive echo-gate tuning. While the bot is speaking, inbound audio is
 // mostly its own echo at a low, stable level; the caller interrupting is
 // clearly louder. We track the echo floor and let audio through only when it
@@ -112,9 +118,15 @@ type Serializer struct {
 	// that is still draining through the pipeline behind us. Cancellation is
 	// asynchronous, so those frames keep arriving here for a while and Telnyx
 	// happily plays them — the caller interrupts and then hears the tail of the
-	// reply they just cut off. Once interrupted we drop outbound audio until the
-	// next turn actually starts (TTSStartedFrame), so only fresh audio goes out.
-	muted bool
+	// reply they just cut off.
+	//
+	// The fence is a deadline, never a flag. Gating it on a "new turn has begun"
+	// frame is what a first attempt did, and it silenced the call completely: no
+	// such frame is ever emitted in this pipeline, so the mute latched on the
+	// first interruption and never lifted. A deadline degrades safely — worst
+	// case a little tail leaks through, which is the bug we started with rather
+	// than a dead call.
+	mutedUntil time.Time
 
 	// Outbound clarity filtering (telephone voice enhancement).
 	clarity  bool
@@ -126,15 +138,6 @@ type Serializer struct {
 // the wire (as Telnyx's "clear" event), so callers should hand it the frame
 // rather than fall back to a client-side control message.
 func (s *Serializer) SupportsInterruption() bool { return true }
-
-// BeginTurn lifts the post-interruption mute. The output processor calls this
-// when TTS starts a new turn, which is the first point at which outbound audio
-// is known to belong to the new reply rather than the interrupted one.
-func (s *Serializer) BeginTurn() {
-	s.mu.Lock()
-	s.muted = false
-	s.mu.Unlock()
-}
 
 // SetClarity enables/disables the outbound clarity filter.
 func (s *Serializer) SetClarity(on bool) { s.clarity = on }
@@ -313,7 +316,7 @@ func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 	case *frames.StartInterruptionFrame:
 		s.resetPlayback()
 		s.mu.Lock()
-		s.muted = true
+		s.mutedUntil = time.Now().Add(interruptMute)
 		s.mu.Unlock()
 		return json.Marshal(map[string]string{"event": "clear"})
 	case *frames.AudioRawFrame:
@@ -321,7 +324,7 @@ func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 			return nil, nil
 		}
 		s.mu.Lock()
-		muted := s.muted
+		muted := time.Now().Before(s.mutedUntil)
 		s.mu.Unlock()
 		if muted {
 			return nil, nil // tail of the turn the caller just interrupted

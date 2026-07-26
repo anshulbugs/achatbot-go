@@ -17,13 +17,6 @@ type interruptionSerializer interface {
 	SupportsInterruption() bool
 }
 
-// turnStarter is implemented by serializers that need to know when a new bot
-// turn begins, so they can stop discarding audio left over from an interrupted
-// one. See telnyx.Serializer.BeginTurn.
-type turnStarter interface {
-	BeginTurn()
-}
-
 // InterruptControlName tags the TextFrame sent to clients whose wire format has
 // no interruption frame. The browser treats it as "stop playback and drop
 // everything buffered"; without it the server interrupts the pipeline while the
@@ -58,12 +51,6 @@ func (p *WebsocketServerOutputProcessor) ProcessFrame(frame frames.Frame, direct
 	switch f := frame.(type) {
 	case *achatbot_frames.VADStateAudioRawFrame:
 		p.handleAudio(f.AudioRawFrame)
-	case *achatbot_frames.TTSStartedFrame:
-		// A new reply is starting, so outbound audio is no longer the tail of an
-		// interrupted one.
-		if ts, ok := p.params.Serializer.(turnStarter); ok {
-			ts.BeginTurn()
-		}
 	case *frames.StartInterruptionFrame:
 		p.sendInterruption(f)
 	}
