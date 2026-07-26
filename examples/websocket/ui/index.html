@@ -522,7 +522,7 @@ Your goal:
 
     // ---------- protobuf / audio engine ----------
     let Frame = null, ws = null, audioContext = null, micSource = null, microphoneStream = null, scriptProcessor = null;
-    let playTime = 0, isPlaying = false, audioQueue = [], isAudioProcessing = false, currentBotSource = null;
+    let playTime = 0, isPlaying = false, audioQueue = [], isAudioProcessing = false, currentBotSource = null, audioGen = 0;
     let botAnalyser = null, botGain = null, micLevel = 0, userTalking = false, userTalkFrames = 0, awaitingReply = false, bargeInFrames = 0;
     const BARGE_RMS = 0.04, BARGE_MIN = 4;
     const MAX_SESSION_MS = 20 * 60 * 1000; // browser calls are capped at 20 minutes
@@ -683,6 +683,9 @@ Your goal:
       const p = Frame.decode(new Uint8Array(buf));
       if (p?.text) {
         const name = p.text.name || "", text = p.text.text ?? "";
+        // The server's VAD is authoritative and fires well before the local RMS
+        // heuristic below, so honour its interruption immediately.
+        if (name.startsWith("interrupt")) { flushPlayback(); refreshStatus(); return; }
         if (name.startsWith("user_transcript")) { currentBotEntry = null; addEntry("you", "YOU", text); }
         else { awaitingReply = false; appendBotText(text); }
         refreshStatus(); return;
@@ -697,13 +700,26 @@ Your goal:
       if (!isAudioProcessing) processAudioQueue();
       refreshStatus();
     }
+    // Emptying the queue is not enough to stop the bot: decodeAudioData is async, so a
+    // chunk already being decoded when the user interrupts would still schedule itself
+    // afterwards and play over them. Bumping a generation counter lets those stale
+    // callbacks recognise they belong to an abandoned turn and drop their audio.
+    function flushPlayback() {
+      audioGen++;
+      audioQueue = [];
+      if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; }
+      playTime = 0;
+      if (videoMode) avatarReset();
+    }
     function processAudioQueue() {
       if (audioQueue.length === 0) { isAudioProcessing = false; refreshStatus(); return; }
       isAudioProcessing = true;
       const d = audioQueue.shift();
       if (d === undefined) { isAudioProcessing = false; return; }
       const arr = new Uint8Array(Array.from(d.audio));
+      const gen = audioGen;
       audioContext.decodeAudioData(arr.buffer, (buffer) => {
+        if (gen !== audioGen) { isAudioProcessing = false; return; }
         // Audio reaches us faster than realtime but is forwarded at playback pace, so the
         // end-of-turn timer has to run off the forward, not the arrival.
         if (videoMode) { avatarSendPCM(buffer); scheduleEOT(); }
@@ -743,10 +759,7 @@ Your goal:
             if (micLevel > BARGE_RMS) userTalkFrames++; else { userTalkFrames = 0; if (userTalking) { userTalking = false; awaitingReply = true; refreshStatus(); } }
             if (!userTalking && userTalkFrames >= BARGE_MIN) { userTalking = true; refreshStatus(); }
             bargeInFrames = micLevel > BARGE_RMS ? bargeInFrames + 1 : 0;
-            if (bargeInFrames >= BARGE_MIN && (audioQueue.length > 0 || currentBotSource)) {
-              audioQueue = []; if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; } playTime = 0;
-              if (videoMode) avatarReset();
-            }
+            if (bargeInFrames >= BARGE_MIN && (audioQueue.length > 0 || currentBotSource)) flushPlayback();
             const pcm = toS16(a);
             const frame = Frame.create({ audio: { audio: Array.from(new Uint8Array(pcm.buffer)), sampleRate: SAMPLE_RATE, numChannels: 1, sampleWidth: 2 } });
             const enc = new Uint8Array(Frame.encode(frame).finish());

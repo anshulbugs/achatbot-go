@@ -102,10 +102,33 @@ type Serializer struct {
 	awaitingBot  bool
 	onLatency    func(time.Duration)
 
+	// Post-interruption fence. Sending Telnyx a "clear" flushes only what it has
+	// already buffered; it does nothing about TTS audio for the interrupted turn
+	// that is still draining through the pipeline behind us. Cancellation is
+	// asynchronous, so those frames keep arriving here for a while and Telnyx
+	// happily plays them — the caller interrupts and then hears the tail of the
+	// reply they just cut off. Once interrupted we drop outbound audio until the
+	// next turn actually starts (TTSStartedFrame), so only fresh audio goes out.
+	muted bool
+
 	// Outbound clarity filtering (telephone voice enhancement).
 	clarity  bool
 	hpf      *biquad
 	presence *biquad
+}
+
+// SupportsInterruption reports that this serializer encodes an interruption on
+// the wire (as Telnyx's "clear" event), so callers should hand it the frame
+// rather than fall back to a client-side control message.
+func (s *Serializer) SupportsInterruption() bool { return true }
+
+// BeginTurn lifts the post-interruption mute. The output processor calls this
+// when TTS starts a new turn, which is the first point at which outbound audio
+// is known to belong to the new reply rather than the interrupted one.
+func (s *Serializer) BeginTurn() {
+	s.mu.Lock()
+	s.muted = false
+	s.mu.Unlock()
 }
 
 // SetClarity enables/disables the outbound clarity filter.
@@ -284,10 +307,19 @@ func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 	switch af := frame.(type) {
 	case *frames.StartInterruptionFrame:
 		s.resetPlayback()
+		s.mu.Lock()
+		s.muted = true
+		s.mu.Unlock()
 		return json.Marshal(map[string]string{"event": "clear"})
 	case *frames.AudioRawFrame:
 		if len(af.Audio) == 0 {
 			return nil, nil
+		}
+		s.mu.Lock()
+		muted := s.muted
+		s.mu.Unlock()
+		if muted {
+			return nil, nil // tail of the turn the caller just interrupted
 		}
 		pcm8 := ResamplePCM16(af.Audio, af.SampleRate, telnyxRate)
 		s.applyClarity(pcm8) // high-pass + presence boost for phone clarity
