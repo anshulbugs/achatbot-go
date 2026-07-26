@@ -183,6 +183,12 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 			"vad_model":  cfg.VAD.Model,
 			"voice":      cfg.TTS.SpeakerID,
 			"speed":      cfg.TTS.Speed,
+			// The UI posts these back per call, so it must start from what the
+			// server is configured with. Shipping only the models meant the
+			// prompt box kept a hardcoded copy that silently overrode
+			// config.yaml on every phone call.
+			"system_prompt": cfg.Server.SystemPrompt,
+			"hello":         cfg.Server.InboundHello,
 		},
 	})
 }

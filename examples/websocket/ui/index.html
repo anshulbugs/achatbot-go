@@ -413,7 +413,11 @@ Your goal:
     }
 
     // ---------- persisted settings ----------
-    const saved = JSON.parse(localStorage.getItem("va-demo4") || "{}");
+    // Key bumped from va-demo4: that generation persisted the system prompt
+    // unconditionally, so browsers carried a stale copy that overrode the
+    // server's configured prompt on every phone call.
+    const saved = JSON.parse(localStorage.getItem("va-demo5") || "{}");
+    const serverDefaults = { prompt: "", hello: "" };
     ["hello","prompt","serverUrl","avatarUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
     if (saved.speed) $("speed").value = saved.speed;
     if (saved.volume) $("volume").value = saved.volume;
@@ -422,8 +426,13 @@ Your goal:
     $("volVal").textContent = Number($("volume").value).toFixed(1) + "×";
     $("vdVal").textContent = Number($("videoDelay").value).toFixed(1) + "s";
     function persist() {
-      localStorage.setItem("va-demo4", JSON.stringify({
-        hello: $("hello").value, prompt: $("prompt").value, serverUrl: $("serverUrl").value,
+      // Only keep a prompt/greeting the user actually changed. Storing one that
+      // matches the server just freezes today's config into the browser.
+      const p = $("prompt").value, h = $("hello").value;
+      localStorage.setItem("va-demo5", JSON.stringify({
+        hello: h === serverDefaults.hello ? undefined : h,
+        prompt: p === serverDefaults.prompt ? undefined : p,
+        serverUrl: $("serverUrl").value,
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value, llm: $("llm").value,
         avatarUrl: $("avatarUrl").value, videoDelay: $("videoDelay").value,
         videoMode: (typeof videoMode !== "undefined" && videoMode),
@@ -448,6 +457,18 @@ Your goal:
           `<span class="chip">TTS <b>${o.current.tts_engine}</b></span>` +
           `<span class="chip">LLM <b>${o.current.llm_model}</b></span>` +
           `<span class="chip">VAD <b>${o.current.vad_model}</b></span>`;
+        // The prompt and greeting are posted back verbatim when placing a phone
+        // call, so they must start from the server's configuration. Keeping a
+        // copy in the markup meant every call silently used whatever stale text
+        // was sitting in the box instead of config.yaml.
+        if (o.current.system_prompt) {
+          serverDefaults.prompt = o.current.system_prompt;
+          if (!saved.prompt) $("prompt").value = o.current.system_prompt;
+        }
+        if (o.current.hello) {
+          serverDefaults.hello = o.current.hello;
+          if (!saved.hello) $("hello").value = o.current.hello;
+        }
         if (!o.telephony) { $("modePhone").style.opacity = .5; $("modePhone").title = "Telephony not configured on server"; }
       } catch (e) { $("pipeChips").innerHTML = `<span class="chip">server unreachable</span>`; }
     }
