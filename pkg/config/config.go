@@ -169,6 +169,15 @@ type LLMConfig struct {
 	Thinking string `mapstructure:"thinking"`
 	// Tools lists registered function names the LLM may call, e.g. web_search.
 	Tools []string `mapstructure:"tools"`
+	// Temperature controls randomness. Voice agents follow a long instruction
+	// set, so this stays low; raising it is what makes a model start inventing
+	// names and details it cannot account for.
+	Temperature float64 `mapstructure:"temperature"`
+	// MaxTokens caps a single reply. The default of 2048 is far more than
+	// anyone will listen to on a call, and an over-long generation holds a
+	// decode slot for its whole length, which costs concurrency. A spoken
+	// sentence is roughly 15-20 tokens.
+	MaxTokens int64 `mapstructure:"max_tokens"`
 }
 
 // Load reads configuration from the optional explicit YAML path, discovered
@@ -256,6 +265,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.stream", true)
 	v.SetDefault("llm.thinking", "")
 	v.SetDefault("llm.tools", []string{"web_search"})
+	v.SetDefault("llm.temperature", 0.6)
+	v.SetDefault("llm.max_tokens", 160)
 }
 
 func (c *Config) validate() error {

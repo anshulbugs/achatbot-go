@@ -413,10 +413,25 @@ func newLLMProcessor(cfg *config.Config, session *common.Session, model string) 
 		if provider == nil {
 			return nil, fmt.Errorf("failed to create openai_api LLM provider for model %q at %s", model, cfg.LLM.BaseURL)
 		}
-		return llm_processors.NewLLMOpenAIApiProcessor(provider, session, llm_processors.Mode_Chat, cfg.LLM.Stream, *types.NewLMGenerateArgs()), nil
+		return llm_processors.NewLLMOpenAIApiProcessor(provider, session, llm_processors.Mode_Chat, cfg.LLM.Stream, *llmArgs()), nil
 	default:
 		return nil, fmt.Errorf("unknown llm.provider %q", cfg.LLM.Provider)
 	}
+}
+
+// llmArgs builds the sampling arguments from config. The library defaults are
+// reasonable except for max tokens: 2048 is far longer than anyone listens to
+// on a call, and a long generation holds a decode slot for its whole length,
+// so it costs concurrency as well as patience.
+func llmArgs() *types.LMGenerateArgs {
+	a := types.NewLMGenerateArgs()
+	if cfg.LLM.Temperature > 0 {
+		a.LmGenTemperature = cfg.LLM.Temperature
+	}
+	if cfg.LLM.MaxTokens > 0 {
+		a.LmGenMaxTokens = cfg.LLM.MaxTokens
+	}
+	return a
 }
 
 // sessionOverrides holds per-connection settings parsed from ws query params.
