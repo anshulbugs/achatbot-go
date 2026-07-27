@@ -189,6 +189,7 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 			// config.yaml on every phone call.
 			"system_prompt": cfg.Server.SystemPrompt,
 			"hello":         cfg.Server.InboundHello,
+			"avatar_url":    cfg.Server.AvatarURL,
 		},
 	})
 }

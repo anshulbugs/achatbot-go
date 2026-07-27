@@ -417,7 +417,7 @@ Your goal:
     // unconditionally, so browsers carried a stale copy that overrode the
     // server's configured prompt on every phone call.
     const saved = JSON.parse(localStorage.getItem("va-demo5") || "{}");
-    const serverDefaults = { prompt: "", hello: "" };
+    const serverDefaults = { prompt: "", hello: "", avatarUrl: "" };
     ["hello","prompt","serverUrl","avatarUrl"].forEach(k => { if (saved[k] !== undefined && $(k)) $(k).value = saved[k]; });
     if (saved.speed) $("speed").value = saved.speed;
     if (saved.volume) $("volume").value = saved.volume;
@@ -434,7 +434,8 @@ Your goal:
         prompt: p === serverDefaults.prompt ? undefined : p,
         serverUrl: $("serverUrl").value,
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value, llm: $("llm").value,
-        avatarUrl: $("avatarUrl").value, videoDelay: $("videoDelay").value,
+        avatarUrl: $("avatarUrl").value === serverDefaults.avatarUrl ? undefined : $("avatarUrl").value,
+        videoDelay: $("videoDelay").value,
         videoMode: (typeof videoMode !== "undefined" && videoMode),
       }));
     }
@@ -468,6 +469,15 @@ Your goal:
         if (o.current.hello) {
           serverDefaults.hello = o.current.hello;
           if (!saved.hello) $("hello").value = o.current.hello;
+        }
+        // The avatar tunnel hostname changes whenever the tunnel restarts, so the
+        // server is the only thing that knows the current one. A value saved here
+        // from a previous session is almost always a dead host.
+        if (o.current.avatar_url) {
+          serverDefaults.avatarUrl = o.current.avatar_url;
+          if (!saved.avatarUrl || saved.avatarUrl !== o.current.avatar_url) {
+            $("avatarUrl").value = o.current.avatar_url;
+          }
         }
         if (!o.telephony) { $("modePhone").style.opacity = .5; $("modePhone").title = "Telephony not configured on server"; }
       } catch (e) { $("pipeChips").innerHTML = `<span class="chip">server unreachable</span>`; }

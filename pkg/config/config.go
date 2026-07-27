@@ -76,6 +76,13 @@ type ServerConfig struct {
 	// FirstChunkWords is how many opening words of a reply to flush to TTS
 	// immediately (smaller = audio starts sooner, but choppier openings).
 	FirstChunkWords int `mapstructure:"first_chunk_words"`
+	// AvatarURL is the video-avatar service the browser connects to, e.g.
+	// wss://<tunnel-host>. It lives in config rather than the page because the
+	// tunnel hostname changes every time the tunnel restarts, and baking it into
+	// the markup meant a stale address survived in browsers as "bad url".
+	// Must be wss:// when the UI is served over HTTPS; browsers block plain ws://
+	// from a secure page.
+	AvatarURL string `mapstructure:"avatar_url"`
 	// InboundHello is the greeting spoken when the agent answers an inbound call.
 	// Falls back to a generic greeting when empty.
 	InboundHello string `mapstructure:"inbound_hello"`
