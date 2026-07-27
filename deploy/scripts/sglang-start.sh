@@ -4,19 +4,32 @@
 # The flags below are the tuned set — see deploy/llm/README.md for the measurements
 # behind them (+34–51% throughput vs the stock config on the same GPU).
 #
-# Default model is 7B quantized to FP8. Qwen2.5-3B could not hold a long instruction set:
-# it collapsed into a fixed "acknowledge + stock question" template and ignored explicit
-# rules on every turn, no matter how the prompt was written. 7B follows them.
+# Default model is gemma-4-E4B-it (Apache-2.0): 2.3B effective / 5.1B raw via Per-Layer
+# Embeddings. Chosen on measurement, not size. Against Qwen2.5-7B-FP8 on identical warm
+# benchmarks it matched throughput (29.0 vs 29.8 req/s at conc=60, two replicas) while
+# being clearly better on the failures that actually occurred on calls:
 #
-# FP8 (not bf16) because capacity here is bound by KV cache = VRAM - weights. FP8 halves the
-# weights, taking KV cache from 220k to 334k tokens per replica, which restores the
-# concurrency that bf16 7B gave away. Blackwell has native FP8, so it costs no latency:
-# measured warm TTFT 44ms vs 33ms bf16 vs 38ms for the 3B.
+#   - asked to look up an account balance, the 7B answered "Sure thing! I'll need your
+#     account number" -- inventing a capability it does not have. E4B declines and
+#     redirects. That one matters on a customer line.
+#   - given a bare mis-transcribed name ("Riley" heard as "Valley"), the 7B started
+#     addressing the caller by it in 5 of 6 samples. E4B: 0 of 6.
+#
+# Do not assume smaller is worse here. Qwen2.5-3B failed this instruction set outright,
+# and E4B is smaller still, but a generation newer -- it holds the rules the 3B could not.
+#
+# Models rejected after benchmarking, with reasons, so they are not retried:
+#   Qwen3.6-35B-A3B-FP8  5.4 req/s at conc=60 on TWO gpus. Its hybrid attention needs a
+#                        5.36GB SSM state cache per gpu which starves the KV cache
+#                        (max_running_requests capped at 32), and TP=2 has no P2P between
+#                        consumer RTX cards so every all-reduce crosses host memory.
+#   Qwen3-8B-FP8         15% less throughput than the 7B and no quality gain; 2.6x the KV
+#                        per token (36 layers x 8 kv heads vs 28 x 4).
 #
 # Env overrides: LLM_GPU (default 0), LLM_MODEL, HF_CACHE, NAME, PORT.
 set -euo pipefail
 LLM_GPU="${LLM_GPU:-0}"
-LLM_MODEL="${LLM_MODEL:-RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic}"
+LLM_MODEL="${LLM_MODEL:-google/gemma-4-E4B-it}"
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
