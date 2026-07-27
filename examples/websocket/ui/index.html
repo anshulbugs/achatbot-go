@@ -769,7 +769,13 @@ Your goal:
       botGain = audioContext.createGain(); botAnalyser = audioContext.createAnalyser(); botAnalyser.fftSize = 64;
       botGain.connect(botAnalyser); botGain.connect(audioContext.destination);
       if (videoMode) botGain.gain.value = 0; // video mode: Daily plays the synced audio, not the raw Go stream
-      isPlaying = true; currentBotEntry = null; setConnecting(true); initWebSocket();
+      isPlaying = true; currentBotEntry = null; setConnecting(true);
+      // Chrome hands back a suspended AudioContext unless a gesture has resumed it.
+      // The server pushes the greeting ~80ms after connect, so a suspended context
+      // silently swallows it and the call appears to wait for the caller to speak.
+      // Resume first, then connect, so the greeting has somewhere to play.
+      const ready = audioContext.state === "running" ? Promise.resolve() : audioContext.resume().catch(() => {});
+      ready.then(initWebSocket);
       // Hard cap so a forgotten tab can't hold a session (and its GPU pool slots) open.
       clearTimeout(sessionCapTimer);
       sessionCapTimer = setTimeout(() => {
