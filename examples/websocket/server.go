@@ -81,6 +81,29 @@ type kokoroVoice struct {
 	Lang string `json:"lang"` // "en" or "zh"
 }
 
+// premiumVoiceOrder are the voices kokoro itself grades highest in VOICES.md,
+// best first: af_heart (A), af_bella (A-), bf_emma (B-). Every other English
+// voice is graded C+ or below and the gap is audible, so these are served ahead
+// of the rest and grouped separately in the UI. Order is meaningful — the list
+// is emitted in this sequence, so the top entry is the strongest voice.
+var premiumVoiceOrder = []int{3, 2, 21} // Heart, Bella, Emma
+
+func isPremiumVoice(id int) bool {
+	for _, p := range premiumVoiceOrder {
+		if p == id {
+			return true
+		}
+	}
+	return false
+}
+
+// apiVoice is kokoroVoice as served to the UI, tagged with the premium flag.
+// Kept separate so the voice table itself stays a plain positional literal.
+type apiVoice struct {
+	kokoroVoice
+	Premium bool `json:"premium,omitempty"`
+}
+
 var kokoroVoices = []kokoroVoice{
 	{0, "Alloy (US female)", "en"}, {1, "Aoede (US female)", "en"}, {2, "Bella (US female)", "en"},
 	{3, "Heart (US female)", "en"}, {4, "Jessica (US female)", "en"}, {5, "Kore (US female)", "en"},
@@ -172,8 +195,22 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// Premium voices first, in graded order, then everything else as listed.
+	voices := make([]apiVoice, 0, len(kokoroVoices))
+	for _, id := range premiumVoiceOrder {
+		for _, v := range kokoroVoices {
+			if v.ID == id {
+				voices = append(voices, apiVoice{kokoroVoice: v, Premium: true})
+			}
+		}
+	}
+	for _, v := range kokoroVoices {
+		if !isPremiumVoice(v.ID) {
+			voices = append(voices, apiVoice{kokoroVoice: v})
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]any{
-		"voices":     kokoroVoices,
+		"voices":     voices,
 		"llm_models": ollamaModels(),
 		"telephony":  telnyxClient != nil,
 		"current": map[string]any{

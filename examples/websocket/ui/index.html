@@ -206,6 +206,12 @@
     input:focus, textarea:focus, select:focus { outline: none; box-shadow: 0 0 0 4px var(--gold); }
     .voice-row { display: flex; gap: 9px; }
     .voice-row select { flex: 1; }
+    /* the poster theme leaves optgroups looking like plain options; make the
+       premium group read as a heading so the good voices stand out */
+    select optgroup { font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--pool); background: var(--paper); font-weight: 700; }
+    select optgroup option { font-family: var(--body); font-size: 14px; letter-spacing: normal;
+      text-transform: none; color: var(--ink); font-weight: 400; }
     .icon-btn { background: var(--sage); border: 2.5px solid var(--ink); color: var(--ink); border-radius: 10px; width: 46px; flex-shrink: 0; cursor: pointer; font-size: 15px; box-shadow: 3px 3px 0 var(--ink); transition: transform .08s, box-shadow .08s; }
     .icon-btn:active { transform: translate(3px,3px); box-shadow: 0 0 0 var(--ink); }
     .slider-row { display: flex; align-items: center; gap: 12px; }
@@ -452,7 +458,20 @@ Your goal:
         const heart = en.find(v => v.name.toLowerCase().startsWith("heart")); // default: Heart
         let sv = Number(saved.voice);
         if (!Number.isFinite(sv) || saved.voice === "" || saved.voice === undefined || !en.some(v => v.id === sv)) sv = heart ? heart.id : (en[0] && en[0].id);
-        for (const v of en) $("voice").add(new Option(v.name, v.id, false, v.id === sv));
+        // Kokoro grades its voices, and only three clear the bar (A / A- / B-);
+        // the rest are C+ or below. Group those at the top so the good ones are
+        // the obvious pick rather than three entries lost in an A-Z list.
+        const premium = en.filter(v => v.premium), standard = en.filter(v => !v.premium);
+        const group = (label, list) => {
+          if (!list.length) return;
+          const g = document.createElement("optgroup");
+          g.label = label;
+          for (const v of list) g.appendChild(new Option(v.name, v.id, false, v.id === sv));
+          $("voice").appendChild(g);
+        };
+        group("★ Premium", premium);
+        group("Standard", standard);
+        $("voice").value = String(sv);
         $("pipeChips").innerHTML =
           `<span class="chip">STT <b>${o.current.asr_model}</b></span>` +
           `<span class="chip">TTS <b>${o.current.tts_engine}</b></span>` +
