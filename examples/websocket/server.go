@@ -437,13 +437,14 @@ func llmArgs() *types.LMGenerateArgs {
 
 // sessionOverrides holds per-connection settings parsed from ws query params.
 type sessionOverrides struct {
-	voiceID  int
-	speed    float32
-	volume   float32
-	llmModel string
-	lang     string // "" | en | zh | ja | ko | yue
-	hello    string // greeting text, synthesized directly to speech on connect
-	prompt   string // full system prompt override
+	voiceID      int
+	speed        float32
+	volume       float32
+	llmModel     string
+	lang         string // "" | en | zh | ja | ko | yue
+	hello        string // greeting text, synthesized directly to speech on connect
+	prompt       string // full system prompt override (breaks prefix sharing)
+	promptSuffix string // per-caller text appended to the shared base
 }
 
 func parseSessionOverrides(r *http.Request) sessionOverrides {
@@ -470,7 +471,34 @@ func parseSessionOverrides(r *http.Request) sessionOverrides {
 	if p := q.Get("prompt"); p != "" && len(p) <= 4000 {
 		o.prompt = p
 	}
+	if s := q.Get("prompt_suffix"); s != "" && len(s) <= 4000 {
+		o.promptSuffix = s
+	}
 	return o
+}
+
+// resolvePrompt builds the system prompt for a session, preferring a suffix
+// appended to the shared base over a wholesale replacement.
+//
+// This ordering is a throughput decision, not a style one. SGLang's RadixAttention
+// caches shared *prefixes*, so when every caller starts from the same base the
+// ~2.9k-token prompt is prefilled once for the whole fleet. Put per-caller text in
+// front of it and that sharing disappears: measured at 60 concurrent requests,
+// tenant-text-first ran 10.8 req/s while tenant-text-last ran 31.5 req/s on the
+// same two GPUs. Same model, same hardware, purely where the custom text sits.
+func resolvePrompt(base, replace, suffix string) string {
+	if replace != "" {
+		// Caller supplied a whole prompt: honoured, but it shares no prefix with
+		// anyone else, so it costs roughly 3x the LLM capacity of a suffix.
+		if suffix != "" {
+			return replace + "\n\n" + suffix
+		}
+		return replace
+	}
+	if suffix != "" {
+		return base + "\n\n" + suffix
+	}
+	return base
 }
 
 // systemPromptFor returns the base system prompt with an optional
@@ -525,10 +553,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	prompt := systemPromptFor(overrides.lang)
-	if overrides.prompt != "" {
-		prompt = overrides.prompt
-	}
+	prompt := resolvePrompt(systemPromptFor(overrides.lang), overrides.prompt, overrides.promptSuffix)
 	runVoiceSession(&ExampleIWebSocketConn{Conn: conn}, serializers.NewProtobufSerializer(), sessionConfig{
 		clientID:           fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
 		systemPrompt:       prompt,

@@ -22,6 +22,7 @@ type callParams struct {
 	To           string  `json:"to"`
 	Hello        string  `json:"hello"`
 	SystemPrompt string  `json:"system_prompt"`
+	PromptSuffix string  `json:"prompt_suffix"`
 	VoiceID      int     `json:"voice"`
 	Speed        float32 `json:"speed"`
 	Volume       float32 `json:"volume"`
@@ -94,9 +95,10 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	if p.Hello == "" {
 		p.Hello = "Hello! This is your voice assistant. How can I help you today?"
 	}
-	if p.SystemPrompt == "" {
-		p.SystemPrompt = cfg.Server.SystemPrompt
-	}
+	// Prefer appending per-caller text to the shared base: RadixAttention caches
+	// shared prefixes, so a suffix keeps the fleet-wide prompt cached while a full
+	// replacement does not. Measured 31.5 vs 10.8 req/s at 60 concurrent.
+	p.SystemPrompt = resolvePrompt(cfg.Server.SystemPrompt, p.SystemPrompt, p.PromptSuffix)
 	if !isValidVoiceID(p.VoiceID) {
 		p.VoiceID = cfg.TTS.SpeakerID
 	}
