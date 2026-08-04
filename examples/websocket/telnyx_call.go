@@ -414,18 +414,28 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// playAnnouncement streams cached PCM over the media socket at roughly real
-// time, stopping early if stop closes. Pacing matters: blasting the whole
-// message means Telnyx buffers it, and "stop the greeting" then only takes
-// effect after a clear, losing the immediacy the caller hears.
+// playAnnouncement streams cached PCM over the media socket, keeping a lead of
+// buffered audio ahead of real time, and stops early if stop closes.
+//
+// Pacing at exactly real time does not work: sending 100ms of audio every 100ms
+// leaves Telnyx no cushion, so the first scheduling hiccup on our side arrives
+// late, its buffer underruns and the caller hears a hole in the middle of a
+// word. That is what "...learn a little about you [gap] anything you're curious
+// about" was -- the audio was all sent, just not early enough.
+//
+// Blasting the whole message instead would buffer fine but makes stopping it
+// meaningless, since Telnyx would already hold the rest. So we run a lead:
+// send until we are announceLead ahead of the wall clock, then only top up.
+// That absorbs jitter while keeping at most announceLead of audio committed,
+// which is how quickly a machine verdict can still cut the greeting.
+const announceLead = 1500 * time.Millisecond
+
 func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
 	const chunkMS = 100
 	chunk := rate * 2 * chunkMS / 1000
 	if chunk <= 0 || len(pcm) == 0 {
 		return true
 	}
-	tick := time.NewTicker(chunkMS * time.Millisecond)
-	defer tick.Stop()
 	started := time.Now()
 	sent := 0
 	for off := 0; off < len(pcm); off += chunk {
@@ -444,11 +454,16 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 			return false
 		}
 		sent = end
-		select {
-		case <-stop:
-			log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
-			return false
-		case <-tick.C:
+
+		// Wait only while we are further ahead than the lead allows.
+		audioSent := time.Duration(sent/2) * time.Second / time.Duration(rate)
+		if ahead := audioSent - time.Since(started); ahead > announceLead {
+			select {
+			case <-stop:
+				log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
+				return false
+			case <-time.After(ahead - announceLead):
+			}
 		}
 	}
 	log.Printf("announce: completed %d bytes (%.2fs audio) in %v", len(pcm), float64(len(pcm))/2/float64(rate), time.Since(started).Round(time.Millisecond))
