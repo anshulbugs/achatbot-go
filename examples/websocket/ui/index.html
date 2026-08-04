@@ -405,6 +405,11 @@ Your goal:
 
   <script>
     const SAMPLE_RATE = 16000, NUM_CHANNELS = 1, SAMPLE_WIDTH = 2;
+    // Kokoro synthesizes at 24kHz. Playing it through a 16kHz context resampled it
+    // down and threw away everything above 8kHz -- the sibilance and air that make
+    // a voice sound clean. Capture stays at 16kHz because that is what ASR expects,
+    // so playback and capture now use separate contexts.
+    const PLAYBACK_RATE = 24000;
     const $ = (id) => document.getElementById(id);
 
     // ---------- endpoint resolution (same-origin by default) ----------
@@ -571,7 +576,7 @@ Your goal:
     }
 
     // ---------- protobuf / audio engine ----------
-    let Frame = null, ws = null, audioContext = null, micSource = null, microphoneStream = null, scriptProcessor = null;
+    let Frame = null, ws = null, audioContext = null, micContext = null, micSource = null, microphoneStream = null, scriptProcessor = null;
     let playTime = 0, isPlaying = false, audioQueue = [], isAudioProcessing = false, currentBotSource = null, audioGen = 0;
     let botAnalyser = null, botGain = null, micLevel = 0, userTalking = false, userTalkFrames = 0, awaitingReply = false, bargeInFrames = 0;
     const BARGE_RMS = 0.04, BARGE_MIN = 4;
@@ -705,8 +710,19 @@ Your goal:
     function scheduleEOT() { clearTimeout(eotTimer); eotTimer = setTimeout(avatarEOT, 450); }
     function avatarSendPCM(buffer) {
       if (!videoMode || !avatarWs || avatarWs.readyState !== 1) return;
-      const f = buffer.getChannelData(0), i16 = new Int16Array(f.length);
-      for (let i = 0; i < f.length; i++) { const c = Math.max(-1, Math.min(1, f[i])); i16[i] = c < 0 ? c * 32768 : c * 32767; }
+      // The avatar protocol is PCM16 mono at SAMPLE_RATE. Playback now runs at
+      // PLAYBACK_RATE for audio quality, so step the samples down on the way out
+      // -- sending 24kHz frames labelled 16kHz makes the mouth run 1.5x fast.
+      const f = buffer.getChannelData(0);
+      const ratio = buffer.sampleRate / SAMPLE_RATE;
+      const n = Math.floor(f.length / ratio);
+      const i16 = new Int16Array(n);
+      for (let i = 0; i < n; i++) {
+        const t = i * ratio, j = t | 0, frac = t - j;
+        const v = j + 1 < f.length ? f[j] * (1 - frac) + f[j + 1] * frac : f[j];
+        const c = Math.max(-1, Math.min(1, v));
+        i16[i] = c < 0 ? c * 32768 : c * 32767;
+      }
       avatarWs.send(i16.buffer);
     }
     if (saved.videoMode) setAvMode(true);
@@ -784,7 +800,7 @@ Your goal:
     function startAudio() {
       if (!navigator.mediaDevices?.getUserMedia) { setStatus("Microphone not available in this browser.", ""); return; }
       $("talkBtn").disabled = true;
-      audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: PLAYBACK_RATE });
       botGain = audioContext.createGain(); botAnalyser = audioContext.createAnalyser(); botAnalyser.fftSize = 64;
       botGain.connect(botAnalyser); botGain.connect(audioContext.destination);
       if (videoMode) botGain.gain.value = 0; // video mode: Daily plays the synced audio, not the raw Go stream
@@ -804,9 +820,10 @@ Your goal:
       navigator.mediaDevices.getUserMedia({ audio: { sampleRate: SAMPLE_RATE, channelCount: 1, autoGainControl: true, echoCancellation: true, noiseSuppression: true } })
         .then((stream) => {
           microphoneStream = stream;
-          scriptProcessor = audioContext.createScriptProcessor(512, 1, 1);
-          micSource = audioContext.createMediaStreamSource(stream);
-          micSource.connect(scriptProcessor); scriptProcessor.connect(audioContext.destination);
+          micContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
+          scriptProcessor = micContext.createScriptProcessor(512, 1, 1);
+          micSource = micContext.createMediaStreamSource(stream);
+          micSource.connect(scriptProcessor); scriptProcessor.connect(micContext.destination);
           const btn = $("talkBtn"); btn.disabled = false; btn.textContent = "End call"; btn.className = "btn btn-live"; refreshStatus();
           scriptProcessor.onaudioprocess = (e) => {
             if (!ws) return;
@@ -825,6 +842,9 @@ Your goal:
     }
     function stopAudio(closeWs = true) {
       clearTimeout(sessionCapTimer); clearTimeout(eotTimer); setConnecting(false);
+      // Bump the generation so any decodeAudioData still in flight drops its
+      // result instead of touching the context we are about to close.
+      audioGen++;
       playTime = 0; isPlaying = false; audioQueue = []; isAudioProcessing = false; userTalking = false; awaitingReply = false;
       if (currentBotSource) { try { currentBotSource.stop(); } catch {} currentBotSource = null; }
       if (ws && closeWs) ws.close(); ws = null;
@@ -832,6 +852,10 @@ Your goal:
       if (scriptProcessor) scriptProcessor.disconnect();
       if (micSource) micSource.disconnect();
       if (microphoneStream) microphoneStream.getTracks().forEach(t => t.stop());
+      // Browsers cap concurrent AudioContexts, so a start/stop cycle must give
+      // them back or a long-lived tab eventually fails to open a new call.
+      if (micContext) { try { micContext.close(); } catch {} micContext = null; }
+      if (audioContext) { try { audioContext.close(); } catch {} audioContext = null; }
       micLevel = 0;
       const btn = $("talkBtn"); btn.textContent = "Start call"; btn.className = "btn btn-accent"; btn.disabled = !Frame;
       $("applies").textContent = ""; setConn("off"); refreshStatus();
