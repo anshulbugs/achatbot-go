@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,8 +12,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/weedge/pipeline-go/pkg/frames"
 
 	"achatbot/pkg/consts"
+	"achatbot/pkg/modules/speech/tts"
+	"achatbot/pkg/params"
+	achatbot_processors "achatbot/pkg/processors"
 	"achatbot/pkg/telnyx"
 )
 
@@ -26,12 +31,17 @@ type callParams struct {
 	// stopMedia ends the media session for this call, releasing its GPU pool
 	// slots. Set by the media handler, called by answering-machine detection.
 	stopMedia func()
-	VoiceID   int     `json:"voice"`
-	Speed     float32 `json:"speed"`
-	Volume    float32 `json:"volume"`
-	LLMModel  string  `json:"llm"`
-	Demo      bool    `json:"demo"`   // play a curated set of voices, one after another
-	Voices    []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
+	// amdCh carries the answering-machine verdict (human/machine/not_sure) and
+	// beepCh the greeting-ended cue. Detection happens on the webhook goroutine
+	// while the audio is driven from the media handler, so they meet here.
+	amdCh    chan string
+	beepCh   chan string
+	VoiceID  int     `json:"voice"`
+	Speed    float32 `json:"speed"`
+	Volume   float32 `json:"volume"`
+	LLMModel string  `json:"llm"`
+	Demo     bool    `json:"demo"`   // play a curated set of voices, one after another
+	Voices   []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
 }
 
 // demoVoiceSet is the curated shortlist of the best-sounding Kokoro English
@@ -71,6 +81,42 @@ func (r *callRegistry) setStopMedia(id string, stop func()) {
 		p.stopMedia = stop
 	}
 	r.mu.Unlock()
+}
+
+// signalAMD delivers the answering-machine verdict to the media handler. The
+// channel is buffered and the send is non-blocking, so a duplicate or late
+// webhook can never wedge the webhook goroutine.
+func (r *callRegistry) signalAMD(id, result string) {
+	r.mu.Lock()
+	ch := (chan string)(nil)
+	if p := r.m[id]; p != nil {
+		ch = p.amdCh
+	}
+	r.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- result:
+	default:
+	}
+}
+
+// signalBeep delivers the greeting-ended cue to a voicemail call.
+func (r *callRegistry) signalBeep(id, result string) {
+	r.mu.Lock()
+	ch := (chan string)(nil)
+	if p := r.m[id]; p != nil {
+		ch = p.beepCh
+	}
+	r.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- result:
+	default:
+	}
 }
 
 // stopMediaFor ends a call's media session exactly once and reports whether it
@@ -151,6 +197,7 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dial failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	p.amdCh, p.beepCh = make(chan string, 2), make(chan string, 2)
 	calls.put(callControlID, &p)
 	log.Printf("telnyx: dialing %s call_control_id=%s", p.To, callControlID)
 
@@ -193,6 +240,7 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		if p.Hello == "" {
 			p.Hello = "Hello! Thanks for calling. How can I help you today?"
 		}
+		p.amdCh, p.beepCh = make(chan string, 2), make(chan string, 2)
 		calls.put(id, p)
 		log.Printf("telnyx: inbound call from %s call_control_id=%s", ev.Data.Payload.From, id)
 		go func() {
@@ -240,24 +288,12 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// "treat as human", and hanging up on a real person is far worse than
 		// spending a pipeline slot on a machine.
 		res := ev.Data.Payload.Result
-		if res != "machine" {
-			log.Printf("telnyx amd: %s call=%s (keeping pipeline)", res, id)
-			return
-		}
-		handleVoicemail(id, res)
+		log.Printf("telnyx amd verdict=%s call=%s", res, id)
+		calls.signalAMD(id, res)
 	case "call.machine.greeting.ended", "call.machine.premium.greeting.ended":
 		// beep_detected is the real cue; "ended" (greeting_end mode) and
 		// "not_sure" (30s beep timeout) both mean it is safe to start talking.
-		leaveVoicemail(id, ev.Data.Payload.Result)
-	case "call.speak.ended":
-		// Only voicemail calls speak via Telnyx TTS, so this is the end of the
-		// message: release the line rather than paying for silence.
-		if cfg.Server.VoicemailMessage != "" {
-			log.Printf("telnyx amd: message delivered, hanging up call=%s", id)
-			if err := telnyxClient.Hangup(context.Background(), id); err != nil {
-				log.Printf("telnyx amd hangup err call=%s: %v", id, err)
-			}
-		}
+		calls.signalBeep(id, ev.Data.Payload.Result)
 	case "call.hangup":
 		calls.del(id)
 	}
@@ -298,46 +334,131 @@ func amdMode() string {
 	return m
 }
 
-// handleVoicemail releases a call's AI pipeline the moment Telnyx reports a
-// machine answered, then optionally leaves a message using Telnyx's own TTS.
+// announceCache holds pre-synthesized PCM for the fixed announcements: the
+// greeting and the voicemail message.
 //
-// This is the whole point of enabling detection: a voicemail otherwise holds a
-// VAD, an ASR and a TTS slot for the entire greeting and message while nobody
-// is listening, and those slots are the binding constraint on concurrency. The
-// call itself stays up long enough to speak, but from here on it costs no GPU.
-func handleVoicemail(id, result string) {
-	released := calls.stopMediaFor(id)
-	log.Printf("telnyx amd: machine detected call=%s (result=%s, pipeline_released=%t)", id, result, released)
-
-	// Nothing to leave: end the call now that the pipeline is back.
-	if cfg.Server.VoicemailMessage == "" {
-		if err := telnyxClient.Hangup(context.Background(), id); err != nil {
-			log.Printf("telnyx amd hangup err call=%s: %v", id, err)
-		}
-		return
-	}
-	// A message is configured, so stay on the line and wait for the beep --
-	// speaking now would talk over the greeting and the recording would miss
-	// the start. call.machine.greeting.ended drives the actual speak.
-	log.Printf("telnyx amd: awaiting beep to leave message call=%s", id)
+// These are the same words on every call of a campaign, so synthesizing them
+// per call burns a TTS pool slot to produce audio we already have. Rendering
+// once and replaying the bytes means a voicemail call never touches the GPU at
+// all, and a human call only pays for the conversation itself.
+type announceCache struct {
+	mu sync.Mutex
+	m  map[string][]byte
 }
 
-// leaveVoicemail speaks the configured message once the greeting has finished.
-// Telnyx renders the audio on their side, so this costs none of our TTS pool --
-// the pipeline for this call was already handed back at detection.
-func leaveVoicemail(id, result string) {
+var announcements = &announceCache{m: map[string][]byte{}}
+
+// get returns PCM for text in the given voice, synthesizing on first use. The
+// key includes voice and speed because the same words in a different voice are
+// different audio.
+func (a *announceCache) get(text string, voiceID int, speed float32) []byte {
+	if text == "" {
+		return nil
+	}
+	key := fmt.Sprintf("%d|%.2f|%s", voiceID, speed, text)
+	a.mu.Lock()
+	pcm, ok := a.m[key]
+	a.mu.Unlock()
+	if ok {
+		return pcm
+	}
+	info, err := ttsPool.Get()
+	if err != nil {
+		log.Printf("announce: tts pool err: %v", err)
+		return nil
+	}
+	defer ttsPool.Put(info)
+	prov := info.GetInstance().(tts.VoiceProvider)
+	prov.SetVoice(voiceID, speed)
+	pcm = prov.Synthesize(text)
+	a.mu.Lock()
+	a.m[key] = pcm
+	a.mu.Unlock()
+	log.Printf("announce: cached %d bytes for %q (voice=%d speed=%.2f)", len(pcm), truncate(text, 40), voiceID, speed)
+	return pcm
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// playAnnouncement streams cached PCM over the media socket at roughly real
+// time, stopping early if stop closes. Pacing matters: blasting the whole
+// message means Telnyx buffers it, and "stop the greeting" then only takes
+// effect after a clear, losing the immediacy the caller hears.
+func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
+	const chunkMS = 100
+	chunk := rate * 2 * chunkMS / 1000
+	if chunk <= 0 || len(pcm) == 0 {
+		return true
+	}
+	tick := time.NewTicker(chunkMS * time.Millisecond)
+	defer tick.Stop()
+	for off := 0; off < len(pcm); off += chunk {
+		select {
+		case <-stop:
+			return false // interrupted (machine detected)
+		default:
+		}
+		end := off + chunk
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if err := tw.SendPayload(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+			return false
+		}
+		select {
+		case <-stop:
+			return false
+		case <-tick.C:
+		}
+	}
+	return true
+}
+
+// runVoicemailCall handles a call that answered as a machine, without ever
+// acquiring a pipeline slot: stop the greeting, wait for the beep, play the
+// pre-rendered message, hang up.
+func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWriter, ser *telnyx.Serializer,
+	rate int, p *callParams, beep <-chan string) {
+
+	// Flush whatever of the greeting Telnyx still has buffered, so the message
+	// does not trail the interrupted hello.
+	if b, err := ser.Serialize(&frames.StartInterruptionFrame{}); err == nil && len(b) > 0 {
+		_ = tw.SendPayload(frames.NewAudioRawFrame(nil, rate, 1, 2)) // no-op keeps the writer warm
+	}
+
 	msg := cfg.Server.VoicemailMessage
 	if msg == "" {
+		log.Printf("telnyx amd: no voicemail message configured, hanging up call=%s", id)
+		_ = telnyxClient.Hangup(context.Background(), id)
 		return
 	}
-	// Release the pipeline if detection somehow never fired but a beep did.
-	calls.stopMediaFor(id)
-	log.Printf("telnyx amd: leaving message call=%s (greeting=%s)", id, result)
-	if err := telnyxClient.Speak(context.Background(), id, msg, ""); err != nil {
-		log.Printf("telnyx amd speak err call=%s: %v", id, err)
+	pcm := announcements.get(msg, p.VoiceID, p.Speed)
+	if len(pcm) == 0 {
 		_ = telnyxClient.Hangup(context.Background(), id)
+		return
 	}
-	// Hangup is driven by call.speak.ended so the message is not cut off.
+
+	// Wait for the beep. Telnyx times its own beep detection out at 30s and
+	// reports not_sure, so this bound only covers the event never arriving.
+	select {
+	case res := <-beep:
+		log.Printf("telnyx amd: beep signal (%s) call=%s", res, id)
+	case <-time.After(35 * time.Second):
+		log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
+	}
+
+	log.Printf("telnyx amd: playing voicemail message call=%s (%d bytes, no gpu)", id, len(pcm))
+	playAnnouncement(tw, pcm, rate, make(chan struct{}))
+	// Let the tail drain out of Telnyx's buffer before tearing the call down.
+	time.Sleep(time.Duration(len(pcm)/2/rate)*time.Second/4 + 700*time.Millisecond)
+	if err := telnyxClient.Hangup(context.Background(), id); err != nil {
+		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
+	}
 }
 
 func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +499,58 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		idleSecs = 0
 	}
 
-	runVoiceSession(telnyx.NewConn(ws), ser, sessionConfig{
+	conn := telnyx.NewConn(ws)
+
+	// Greeting first, from cache, before any pool slot is taken. Every call in a
+	// campaign says the same words, so synthesizing per call would burn a TTS
+	// slot to produce audio we already have -- and a call that turns out to be a
+	// machine would have paid for a pipeline it never used.
+	helloText := p.Hello
+	amdOn := amdMode() != "disabled" && len(demoVoices) == 0
+	if amdOn && helloText != "" {
+		pcm := announcements.get(helloText, p.VoiceID, p.Speed)
+		if len(pcm) > 0 {
+			tw := achatbot_processors.NewWebsocketTransportWriter(conn, &params.WebsocketServerParams{
+				AudioCameraParams: params.NewAudioCameraParams(),
+				Serializer:        ser,
+			})
+			stop := make(chan struct{})
+			var stopOnce sync.Once
+			verdict := ""
+			go func() {
+				select {
+				case verdict = <-p.amdCh:
+					if verdict == "machine" {
+						stopOnce.Do(func() { close(stop) }) // cut the greeting mid-word
+					}
+				case <-stop:
+				}
+			}()
+			ttsRate, _, _ := ttsSampleInfo()
+			finished := playAnnouncement(tw, pcm, ttsRate, stop)
+			stopOnce.Do(func() { close(stop) })
+
+			if verdict == "" {
+				// Detection may still be in flight; give it the rest of its
+				// window rather than starting a pipeline we are about to drop.
+				select {
+				case verdict = <-p.amdCh:
+				case <-time.After(3 * time.Second):
+				}
+			}
+			if verdict == "machine" {
+				log.Printf("telnyx amd: machine on call=%s (greeting cut=%t) -- no pipeline will be used", id, !finished)
+				runVoicemailCall(id, tw, ser, ttsRate, p, p.beepCh)
+				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
+				return
+			}
+			// Human: the greeting has already played, so the session must not
+			// repeat it.
+			helloText = ""
+		}
+	}
+
+	runVoiceSession(conn, ser, sessionConfig{
 		clientID:           "telnyx_" + id,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,
@@ -386,7 +558,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		volume:             p.Volume,
 		llmModel:           p.LLMModel,
 		addWavHeader:       false,
-		hello:              p.Hello,
+		hello:              helloText,
 		demoVoices:         demoVoices,
 		allowInterruptions: true, // adaptive echo gate lets real barge-in through
 		idlePrompt:         idlePrompt,

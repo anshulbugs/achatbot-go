@@ -607,6 +607,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // sendAudioChunks synthesizes-then-streams pre-rendered PCM to the client as
 // ~20 ms AudioRawFrames via the serializer, used to play the greeting before
 // the conversation loop starts.
+// ttsSampleInfo reports the TTS service's output format without holding a pool
+// slot for the duration -- announcements need the rate to pace playback.
+func ttsSampleInfo() (int, int, int) {
+	info, err := ttsPool.Get()
+	if err != nil {
+		return consts.DefaultRate, 1, 2
+	}
+	defer ttsPool.Put(info)
+	return info.GetInstance().(tts.VoiceProvider).GetSampleInfo()
+}
+
 func sendAudioChunks(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int) {
 	chunk := rate * 2 * 100 / 1000 // 100 ms chunks limit per-chunk resample boundary artifacts
 	if chunk <= 0 {
