@@ -35,8 +35,12 @@ const echoTail = 250 * time.Millisecond
 // better than a missing first syllable.
 const preRoll = 240 * time.Millisecond
 
-// preRollBytes is preRoll as a byte count of 8 kHz 16-bit mono PCM.
-const preRollBytes = int(preRoll/time.Millisecond) * telnyxRate / 1000 * 2
+// preRollBytes is preRoll as a byte count of 16-bit mono PCM at the wire rate.
+// It is a duration, so the byte count has to follow the rate rather than being
+// fixed at 8 kHz -- otherwise L16/16k would replay half the intended onset.
+func (s *Serializer) preRollBytes() int {
+	return int(preRoll/time.Millisecond) * s.rateOut() / 1000 * 2
+}
 
 // gateHold is how long the echo gate stays fully open after speech, once the
 // caller has barged in. It must exceed the pauses inside a normal sentence, so
@@ -152,6 +156,51 @@ type Serializer struct {
 	clarity  bool
 	hpf      *biquad
 	presence *biquad
+
+	// Wire format. PCMU is G.711 mu-law at 8 kHz -- narrowband, and 8-bit
+	// logarithmic, so it costs both bandwidth and resolution. Telnyx also accepts
+	// L16 (linear PCM16) at 16 or 24 kHz for bidirectional streams, which at our
+	// 16 kHz pipeline rate means no resampling and no companding in either
+	// direction. Whether the caller actually hears wideband still depends on
+	// their leg: a VoLTE mobile or SIP endpoint can carry it, a legacy PSTN line
+	// cannot, and Telnyx transcodes for the difference.
+	linear16 bool // true: L16 payloads at wireRate; false: mu-law at 8 kHz
+	wireRate int
+}
+
+// SetWireFormat selects the media encoding. linear16 with rate 16000 matches the
+// pipeline exactly and skips both the resample and the mu-law round trip.
+func (s *Serializer) SetWireFormat(linear16 bool, rate int) {
+	if rate <= 0 {
+		rate = telnyxRate
+	}
+	s.linear16 = linear16
+	s.wireRate = rate
+	// The clarity filters are designed for a specific sample rate: reusing the
+	// 8 kHz coefficients at 16 kHz would halve both corner frequencies and put
+	// the presence lift at 1.3 kHz, muddying exactly what it was meant to clear.
+	s.hpf = newHighpass(float64(rate), 200, 0.707)
+	s.presence = newPeaking(float64(rate), 2600, 0.9, 4)
+}
+
+// rateOut is the sample rate actually used on the wire.
+func (s *Serializer) rateOut() int {
+	if s.wireRate > 0 {
+		return s.wireRate
+	}
+	return telnyxRate
+}
+
+// L16 on RTP is network byte order (RFC 3551), while everything inside the
+// pipeline is little-endian, so the payload is byte-swapped on the way in and
+// out. Getting this backwards produces loud noise rather than subtle damage,
+// which at least makes it obvious.
+func swap16(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i := 0; i+1 < len(b); i += 2 {
+		out[i], out[i+1] = b[i+1], b[i]
+	}
+	return out
 }
 
 // SupportsInterruption reports that this serializer encodes an interruption on
@@ -278,7 +327,7 @@ func (s *Serializer) keepInbound(pcm8 []byte) []byte {
 	}
 	s.echoFloor = (1-echoFloorEMA)*s.echoFloor + echoFloorEMA*rms
 	s.preRollBuf = append(s.preRollBuf, pcm8...)
-	if n := len(s.preRollBuf) - preRollBytes; n > 0 {
+	if n := len(s.preRollBuf) - s.preRollBytes(); n > 0 {
 		s.preRollBuf = append(s.preRollBuf[:0], s.preRollBuf[n:]...)
 	}
 	return nil
@@ -288,7 +337,7 @@ func (s *Serializer) keepInbound(pcm8 []byte) []byte {
 // chunk of outbound audio (given as sample count at telnyxRate) and, on the
 // first reply audio of a turn, reports the response latency.
 func (s *Serializer) noteOutbound(samples int) {
-	dur := time.Duration(samples) * time.Second / telnyxRate
+	dur := time.Duration(samples) * time.Second / time.Duration(s.rateOut())
 	s.mu.Lock()
 	now := time.Now()
 	if now.After(s.playbackEndsAt) {
@@ -350,17 +399,24 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 	if m.Event != "media" || m.Media == nil || m.Media.Payload == "" {
 		return nil, nil
 	}
-	mulaw, err := base64.StdEncoding.DecodeString(m.Media.Payload)
+	raw, err := base64.StdEncoding.DecodeString(m.Media.Payload)
 	if err != nil {
 		return nil, nil
 	}
-	pcm8 := MuLawToPCM16(mulaw)
+	var wire []byte
+	if s.linear16 {
+		wire = swap16(raw) // network order -> little-endian
+	} else {
+		wire = MuLawToPCM16(raw)
+	}
 	if s.suppressEcho {
-		if pcm8 = s.keepInbound(pcm8); pcm8 == nil {
+		if wire = s.keepInbound(wire); wire == nil {
 			return nil, nil // steady echo while the bot speaks: drop it
 		}
 	}
-	pcm := ResamplePCM16(pcm8, telnyxRate, s.pipelineRate)
+	// At L16/16k the wire rate already equals the pipeline rate, so this is a
+	// no-op rather than an 8k->16k interpolation that invents nothing.
+	pcm := ResamplePCM16(wire, s.rateOut(), s.pipelineRate)
 	return frames.NewAudioRawFrame(pcm, s.pipelineRate, 1, 2), nil
 }
 
@@ -387,11 +443,15 @@ func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 		if muted {
 			return nil, nil // tail of the turn the caller just interrupted
 		}
-		pcm8 := ResamplePCM16(af.Audio, af.SampleRate, telnyxRate)
-		s.applyClarity(pcm8) // high-pass + presence boost for phone clarity
-		s.noteOutbound(len(pcm8) / 2)
-		mulaw := PCM16ToMuLaw(pcm8)
-		payload := base64.StdEncoding.EncodeToString(mulaw)
+		wire := ResamplePCM16(af.Audio, af.SampleRate, s.rateOut())
+		s.applyClarity(wire) // high-pass + presence boost for phone clarity
+		s.noteOutbound(len(wire) / 2)
+		var payload string
+		if s.linear16 {
+			payload = base64.StdEncoding.EncodeToString(swap16(wire))
+		} else {
+			payload = base64.StdEncoding.EncodeToString(PCM16ToMuLaw(wire))
+		}
 		out := mediaMessage{Event: "media", Media: &struct {
 			Track   string `json:"track,omitempty"`
 			Payload string `json:"payload"`

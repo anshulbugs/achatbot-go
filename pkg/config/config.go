@@ -89,6 +89,14 @@ type ServerConfig struct {
 	// MaxCallSecs hangs a call up after this many seconds. Needed for agent-to-agent
 	// load tests, where neither side ever hangs up. 0 disables the cap.
 	MaxCallSecs int `mapstructure:"max_call_secs"`
+	// StreamCodec is the Telnyx bidirectional media encoding: PCMU (G.711
+	// mu-law, 8 kHz, the narrowband default) or L16 (linear PCM16, wideband).
+	// L16 at 16000 matches the pipeline rate exactly, so nothing is resampled
+	// or companded in either direction.
+	StreamCodec string `mapstructure:"stream_codec"`
+	// StreamSampleRate is the wire sample rate for codecs that accept one
+	// (8000, 16000 or 24000). Ignored for PCMU/PCMA.
+	StreamSampleRate int `mapstructure:"stream_sample_rate"`
 	// RecordCalls asks Telnyx to record every answered call (dual channel, mp3).
 	// Recordings are billed and stored by Telnyx — keep this off for large runs.
 	RecordCalls bool `mapstructure:"record_calls"`
@@ -242,6 +250,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.turn_gate_model", "qwen3:0.6b")
 	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 	v.SetDefault("server.first_chunk_words", 4)
+	v.SetDefault("server.stream_codec", "PCMU")
+	v.SetDefault("server.stream_sample_rate", 16000)
 	v.SetDefault("server.clarity_filter", true)
 
 	v.SetDefault("vad.model", "silero")
