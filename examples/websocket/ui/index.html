@@ -335,7 +335,7 @@
 
             <div class="bulk-sep"><span>or call a list</span></div>
             <div class="phone-input field" style="margin:0;">
-              <label for="csvFile">Numbers CSV <span class="badge">one per row, or a phone/number column</span></label>
+              <label for="csvFile">Numbers CSV <span class="badge">phone column, optional hello / voicemail columns</span></label>
               <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
             </div>
             <div class="phone-input bulk-row">
@@ -918,23 +918,38 @@ Your goal:
     // looks like a number. Digits are kept and a leading + restored, so
     // "(555) 123-4567" and "+1 555 123 4567" both survive.
     function parseNumbers(text) {
-      const rows = text.split(/?
-/).filter(l => l.trim());
+      const rows = text.split(/\r?\n/).filter(l => l.trim());
       if (!rows.length) return [];
-      const cells = r => r.split(/[,;	]/).map(c => c.trim().replace(/^"|"$/g, ""));
+      const cells = r => r.split(/[,;\t]/).map(c => c.trim().replace(/^"|"$/g, ""));
       const head = cells(rows[0]).map(h => h.toLowerCase());
-      let col = head.findIndex(h => /phone|number|mobile|msisdn|to$/.test(h));
-      const body = col >= 0 ? rows.slice(1) : rows;
-      const out = [];
+      const findCol = re => head.findIndex(h => re.test(h));
+      const numCol = findCol(/phone|number|mobile|msisdn|^to$/);
+      // Optional per-callee wording. A campaign can greet each person by name and
+      // leave them a tailored voicemail; both are rendered before the call, so
+      // unique text costs one synthesis each rather than any live GPU time.
+      const helloCol = findCol(/^hello$|greeting|first.?message/);
+      const vmCol = findCol(/voicemail|voice.?mail|vm.?message/);
+      const hasHeader = numCol >= 0 || helloCol >= 0 || vmCol >= 0;
+      const body = hasHeader ? rows.slice(1) : rows;
+      const out = [], seen = new Set();
       for (const row of body) {
         const cs = cells(row);
-        const candidates = col >= 0 && cs[col] !== undefined ? [cs[col]] : cs;
+        const candidates = numCol >= 0 && cs[numCol] !== undefined ? [cs[numCol]] : cs;
         for (const raw of candidates) {
           const digits = raw.replace(/[^\d+]/g, "");
-          if (/^\+?\d{7,15}$/.test(digits)) { out.push(digits.startsWith("+") ? digits : "+" + digits); break; }
+          if (!/^\+?\d{7,15}$/.test(digits)) continue;
+          const to = digits.startsWith("+") ? digits : "+" + digits;
+          if (seen.has(to)) break;
+          seen.add(to);
+          out.push({
+            to,
+            hello: helloCol >= 0 ? (cs[helloCol] || "") : "",
+            voicemail: vmCol >= 0 ? (cs[vmCol] || "") : "",
+          });
+          break;
         }
       }
-      return [...new Set(out)];
+      return out;
     }
 
     csvFile.onchange = async () => {
@@ -948,14 +963,19 @@ Your goal:
       }
       bulkBtn.disabled = bulkNumbers.length === 0;
       bulkStatus.className = bulkNumbers.length ? "ok" : "err";
+      const custom = bulkNumbers.filter(r => r.hello || r.voicemail).length;
       bulkStatus.textContent = bulkNumbers.length
-        ? bulkNumbers.length + " number" + (bulkNumbers.length === 1 ? "" : "s") + " ready"
+        ? bulkNumbers.length + " number" + (bulkNumbers.length === 1 ? "" : "s") + " ready" +
+          (custom ? " (" + custom + " with custom wording)" : "")
         : "No valid numbers found — expected E.164 like +15551234567";
     };
 
-    function bulkPayload(to) {
+    function bulkPayload(row) {
       return {
-        to, hello: $("hello").value, system_prompt: $("prompt").value,
+        to: row.to,
+        hello: row.hello || $("hello").value,
+        voicemail_message: row.voicemail || undefined,
+        system_prompt: $("prompt").value,
         voice: Number($("voice").value), speed: Number($("speed").value),
         volume: Number($("volume").value), llm: $("llm").value,
       };
@@ -986,11 +1006,11 @@ Your goal:
       // in flight rather than a burst that would hit the rate limiter at once.
       const worker = async () => {
         while (queue.length && !bulkAbort) {
-          const to = queue.shift();
+          const row = queue.shift(), to = row.to;
           try {
             const r = await fetch(apiBase() + "/api/call", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(bulkPayload(to)),
+              body: JSON.stringify(bulkPayload(row)),
             });
             const body = await r.text();
             if (r.ok) { ok++; line(to, "dialing", true); }

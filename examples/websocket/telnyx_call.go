@@ -28,6 +28,10 @@ type callParams struct {
 	Hello        string `json:"hello"`
 	SystemPrompt string `json:"system_prompt"`
 	PromptSuffix string `json:"prompt_suffix"`
+	// VoicemailMessage is spoken after the beep when this callee's line
+	// answers as a machine. Per call so a campaign can address each person by
+	// name; falls back to the server default when empty.
+	VoicemailMessage string `json:"voicemail_message"`
 	// stopMedia ends the media session for this call, releasing its GPU pool
 	// slots. Set by the media handler, called by answering-machine detection.
 	stopMedia func()
@@ -191,7 +195,17 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	webhookURL := telnyxClient.PublicURL() + "/telnyx/webhook"
-	callControlID, err := telnyxClient.Dial(r.Context(), p.To, webhookURL, "", amdMode())
+	if p.VoicemailMessage == "" {
+		p.VoicemailMessage = cfg.Server.VoicemailMessage
+	}
+	// Render both announcements before the line is even ringing. Doing it here
+	// rather than mid-call means the greeting is ready the instant the callee
+	// answers, and a call that turns out to be a machine never waits on -- or
+	// pays for -- a TTS slot. Cached by text, so a campaign renders each
+	// distinct wording once however many numbers share it.
+	prerenderAnnouncements(&p)
+
+	callControlID, err := telnyxClient.Dial(r.Context(), p.To, webhookURL, "", amdModeFor(&p))
 	if err != nil {
 		log.Printf("telnyx dial err: %v", err)
 		http.Error(w, "dial failed: "+err.Error(), http.StatusBadGateway)
@@ -323,15 +337,30 @@ var telnyxUpgrader = websocket.Upgrader{
 // event that carries beep_detected. Leaving a message needs that cue, so a
 // configured message upgrades the mode rather than silently waiting for a beep
 // that never arrives and holding the line to the call cap.
-func amdMode() string {
+func amdModeFor(p *callParams) string {
 	m := cfg.Server.VoicemailDetection
 	if m == "" {
 		m = "disabled"
 	}
-	if cfg.Server.VoicemailMessage != "" && m == "detect" {
+	if p != nil && p.VoicemailMessage != "" && m == "detect" {
 		return "detect_beep"
 	}
 	return m
+}
+
+// prerenderAnnouncements synthesizes this call's greeting and voicemail
+// message up front so neither costs a TTS slot once the call is live. Both
+// are cached by text/voice/speed, so unique-per-callee wording is supported at
+// the cost of one render each, while shared wording renders once per campaign.
+func prerenderAnnouncements(p *callParams) {
+	if amdModeFor(p) == "disabled" {
+		return
+	}
+	for _, text := range []string{p.Hello, p.VoicemailMessage} {
+		if text != "" {
+			announcements.get(text, p.VoiceID, p.Speed)
+		}
+	}
 }
 
 // announceCache holds pre-synthesized PCM for the fixed announcements: the
@@ -431,7 +460,7 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 		_ = tw.SendPayload(frames.NewAudioRawFrame(nil, rate, 1, 2)) // no-op keeps the writer warm
 	}
 
-	msg := cfg.Server.VoicemailMessage
+	msg := p.VoicemailMessage
 	if msg == "" {
 		log.Printf("telnyx amd: no voicemail message configured, hanging up call=%s", id)
 		_ = telnyxClient.Hangup(context.Background(), id)
@@ -506,7 +535,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	// slot to produce audio we already have -- and a call that turns out to be a
 	// machine would have paid for a pipeline it never used.
 	helloText := p.Hello
-	amdOn := amdMode() != "disabled" && len(demoVoices) == 0
+	amdOn := amdModeFor(p) != "disabled" && len(demoVoices) == 0
 	if amdOn && helloText != "" {
 		pcm := announcements.get(helloText, p.VoiceID, p.Speed)
 		if len(pcm) > 0 {
