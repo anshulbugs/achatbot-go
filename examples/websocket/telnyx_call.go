@@ -426,10 +426,13 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 	}
 	tick := time.NewTicker(chunkMS * time.Millisecond)
 	defer tick.Stop()
+	started := time.Now()
+	sent := 0
 	for off := 0; off < len(pcm); off += chunk {
 		select {
 		case <-stop:
-			return false // interrupted (machine detected)
+			log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
+			return false
 		default:
 		}
 		end := off + chunk
@@ -437,14 +440,18 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 			end = len(pcm)
 		}
 		if err := tw.SendPayload(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+			log.Printf("announce: send failed after %d/%d bytes in %v: %v", sent, len(pcm), time.Since(started).Round(time.Millisecond), err)
 			return false
 		}
+		sent = end
 		select {
 		case <-stop:
+			log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
 			return false
 		case <-tick.C:
 		}
 	}
+	log.Printf("announce: completed %d bytes (%.2fs audio) in %v", len(pcm), float64(len(pcm))/2/float64(rate), time.Since(started).Round(time.Millisecond))
 	return true
 }
 
@@ -556,6 +563,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 			ttsRate, _, _ := ttsSampleInfo()
+			log.Printf("announce: playing greeting call=%s (%d bytes @%dHz)", id, len(pcm), ttsRate)
 			finished := playAnnouncement(tw, pcm, ttsRate, stop)
 			stopOnce.Do(func() { close(stop) })
 
@@ -575,6 +583,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
 				return
 			}
+			log.Printf("announce: greeting done call=%s (finished=%t verdict=%q) -> starting pipeline", id, finished, verdict)
 			// Human: the greeting has already played, so the session must not
 			// repeat it.
 			helloText = ""
