@@ -89,6 +89,16 @@ type ServerConfig struct {
 	// MaxCallSecs hangs a call up after this many seconds. Needed for agent-to-agent
 	// load tests, where neither side ever hangs up. 0 disables the cap.
 	MaxCallSecs int `mapstructure:"max_call_secs"`
+	// VoicemailDetection enables Telnyx answering-machine detection on outbound
+	// calls: disabled, detect, detect_beep, detect_words, greeting_end, premium.
+	// When a machine is detected the AI pipeline is torn down immediately, which
+	// hands back that call's VAD/ASR/TTS slots -- a voicemail otherwise holds a
+	// full pipeline for the whole message while nobody is listening.
+	VoicemailDetection string `mapstructure:"voicemail_detection"`
+	// VoicemailMessage, when set, is spoken into the voicemail using Telnyx's
+	// own TTS after the pipeline is released, so leaving a message costs no GPU.
+	// Empty means hang up as soon as a machine is detected.
+	VoicemailMessage string `mapstructure:"voicemail_message"`
 	// RecordCalls asks Telnyx to record every answered call (dual channel, mp3).
 	// Recordings are billed and stored by Telnyx — keep this off for large runs.
 	RecordCalls bool `mapstructure:"record_calls"`
@@ -242,6 +252,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.turn_gate_model", "qwen3:0.6b")
 	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 	v.SetDefault("server.first_chunk_words", 4)
+	v.SetDefault("server.voicemail_detection", "disabled")
 	v.SetDefault("server.clarity_filter", true)
 
 	v.SetDefault("vad.model", "silero")

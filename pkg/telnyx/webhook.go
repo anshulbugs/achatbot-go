@@ -17,6 +17,10 @@ type WebhookEnvelope struct {
 			HangupCause   string `json:"hangup_cause"`
 			// Direction is "incoming" for calls dialed *to* one of our numbers.
 			Direction string `json:"direction"`
+			// Result carries the answering-machine-detection outcome on
+			// call.machine.*.ended events: human, machine, not_sure, silence,
+			// fax_detected, beep_detected, ended.
+			Result string `json:"result"`
 		} `json:"payload"`
 	} `json:"data"`
 }
