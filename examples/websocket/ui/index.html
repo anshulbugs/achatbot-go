@@ -209,7 +209,10 @@
     .bulk-sep::before, .bulk-sep::after { content:""; flex:1; height:2px; background:var(--ink); opacity:.25; }
     .bulk-row { display:flex; align-items:center; gap:9px; width:100%; max-width:340px; }
     .bulk-lbl { font-family: var(--mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--pool); }
-    .bulk-num { width:74px; flex-shrink:0; }
+    .bulk-hint { font-size:11.5px; line-height:1.6; color:var(--pool); margin-top:6px; text-align:left; }
+    .bulk-hint code { font-family:var(--mono); background:var(--cream); border:1px solid rgba(30,42,71,.25);
+      border-radius:4px; padding:0 4px; }
+    .bulk-hint a { color:var(--vermilion); font-weight:600; }
     .bulk-log { width:100%; max-width:340px; max-height:170px; overflow-y:auto; margin-top:4px;
       font-family: var(--mono); font-size:11.5px; line-height:1.7; text-align:left; }
     .bulk-log div { display:flex; justify-content:space-between; gap:10px; border-bottom:1px dashed rgba(30,42,71,.18); padding:1px 0; }
@@ -335,13 +338,17 @@
 
             <div class="bulk-sep"><span>or call a list</span></div>
             <div class="phone-input field" style="margin:0;">
-              <label for="csvFile">Numbers CSV <span class="badge">phone column, optional hello / voicemail columns</span></label>
+              <label for="csvFile">Numbers CSV <span class="badge">name + phone</span></label>
               <input type="file" id="csvFile" accept=".csv,text/csv,text/plain">
+              <div class="bulk-hint">
+                Two columns: <b>name</b> and <b>phone</b> in E.164.
+                <a href="#" id="sampleCsv">Download sample</a><br>
+                Write <code>{name}</code> in the greeting or voicemail above and each
+                call gets that person's name.
+              </div>
             </div>
             <div class="phone-input bulk-row">
-              <label for="bulkConc" class="bulk-lbl">Concurrency</label>
-              <input type="number" id="bulkConc" value="10" min="1" max="200" class="bulk-num">
-              <button class="btn btn-accent" id="bulkBtn" disabled>Call list</button>
+              <button class="btn btn-accent btn-block" id="bulkBtn" disabled>Call list</button>
               <button class="btn" id="bulkStop" style="display:none;">Stop</button>
             </div>
             <div id="bulkStatus"></div>
@@ -355,7 +362,7 @@
         <div class="rail-h">Agent setup</div>
 
         <div class="field">
-          <label for="hello">Greeting <span class="badge">straight to speech</span></label>
+          <label for="hello">Greeting <span class="badge">straight to speech</span> <span class="badge">{name} supported</span></label>
           <input type="text" id="hello" value="Hey there, thanks so much for taking my call! This is Riley, your AI assistant. I'd love to learn a little about you and answer anything you're curious about. So, how's your day going so far?">
           <div class="note">Spoken instantly via TTS — never sent to the model, so there's no first-response delay.</div>
         </div>
@@ -922,18 +929,15 @@ Your goal:
       if (!rows.length) return [];
       const cells = r => r.split(/[,;\t]/).map(c => c.trim().replace(/^"|"$/g, ""));
       const head = cells(rows[0]).map(h => h.toLowerCase());
-      const findCol = re => head.findIndex(h => re.test(h));
-      const numCol = findCol(/phone|number|mobile|msisdn|^to$/);
-      // Optional per-callee wording. A campaign can greet each person by name and
-      // leave them a tailored voicemail; both are rendered before the call, so
-      // unique text costs one synthesis each rather than any live GPU time.
-      const helloCol = findCol(/^hello$|greeting|first.?message/);
-      const vmCol = findCol(/voicemail|voice.?mail|vm.?message/);
-      const hasHeader = numCol >= 0 || helloCol >= 0 || vmCol >= 0;
+      const numCol = head.findIndex(h => /phone|number|mobile|msisdn|^to$/.test(h));
+      const nameCol = head.findIndex(h => /^name$|first.?name|contact/.test(h));
+      const hasHeader = numCol >= 0 || nameCol >= 0;
       const body = hasHeader ? rows.slice(1) : rows;
       const out = [], seen = new Set();
       for (const row of body) {
         const cs = cells(row);
+        // With a header we know which column is which; without one, take the
+        // first cell that looks like a number and the first that does not.
         const candidates = numCol >= 0 && cs[numCol] !== undefined ? [cs[numCol]] : cs;
         for (const raw of candidates) {
           const digits = raw.replace(/[^\d+]/g, "");
@@ -941,16 +945,36 @@ Your goal:
           const to = digits.startsWith("+") ? digits : "+" + digits;
           if (seen.has(to)) break;
           seen.add(to);
-          out.push({
-            to,
-            hello: helloCol >= 0 ? (cs[helloCol] || "") : "",
-            voicemail: vmCol >= 0 ? (cs[vmCol] || "") : "",
-          });
+          let name = nameCol >= 0 ? (cs[nameCol] || "") : "";
+          if (!name) name = (cs.find(c => c && !/^[+\d()\s-]+$/.test(c)) || "");
+          out.push({ to, name });
           break;
         }
       }
       return out;
     }
+
+    // {name} is substituted per callee so one greeting and one voicemail script
+    // cover the whole list while still addressing each person. Missing names
+    // collapse cleanly rather than leaving a literal placeholder or a double
+    // space in the audio.
+    function fill(tpl, name) {
+      if (!tpl) return tpl;
+      return tpl.replace(/\{\s*name\s*\}/gi, name || "")
+                .replace(/\s{2,}/g, " ")
+                .replace(/\s+([,.!?])/g, "$1")
+                .trim();
+    }
+
+    const SAMPLE_CSV = "name,phone\nPriya Sharma,+15551234567\n";
+    $("sampleCsv").onclick = e => {
+      e.preventDefault();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([SAMPLE_CSV], { type: "text/csv" }));
+      a.download = "numbers-sample.csv";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
 
     csvFile.onchange = async () => {
       bulkLog.innerHTML = ""; bulkNumbers = [];
@@ -963,19 +987,18 @@ Your goal:
       }
       bulkBtn.disabled = bulkNumbers.length === 0;
       bulkStatus.className = bulkNumbers.length ? "ok" : "err";
-      const custom = bulkNumbers.filter(r => r.hello || r.voicemail).length;
+      const named = bulkNumbers.filter(r => r.name).length;
       bulkStatus.textContent = bulkNumbers.length
         ? bulkNumbers.length + " number" + (bulkNumbers.length === 1 ? "" : "s") + " ready" +
-          (custom ? " (" + custom + " with custom wording)" : "")
+          (named ? " (" + named + " with names)" : "")
         : "No valid numbers found — expected E.164 like +15551234567";
     };
 
     function bulkPayload(row) {
       return {
         to: row.to,
-        hello: row.hello || $("hello").value,
-        voicemail_message: row.voicemail || undefined,
-        system_prompt: $("prompt").value,
+        hello: fill($("hello").value, row.name),
+        system_prompt: fill($("prompt").value, row.name),
         voice: Number($("voice").value), speed: Number($("speed").value),
         volume: Number($("volume").value), llm: $("llm").value,
       };
@@ -985,15 +1008,14 @@ Your goal:
 
     bulkBtn.onclick = async () => {
       if (!bulkNumbers.length) return;
-      const conc = Math.max(1, Math.min(200, Number($("bulkConc").value) || 10));
       bulkAbort = false; bulkBtn.disabled = true; csvFile.disabled = true;
       bulkStop.style.display = ""; bulkStop.textContent = "Stop";
       bulkLog.innerHTML = "";
       let done = 0, ok = 0, failed = 0;
-      const queue = bulkNumbers.slice();
+      const total = bulkNumbers.length;
       const render = () => {
         bulkStatus.className = "";
-        bulkStatus.textContent = "Placed " + done + "/" + bulkNumbers.length + " — " + ok + " ok, " + failed + " failed";
+        bulkStatus.textContent = "Placed " + done + "/" + total + " — " + ok + " ok, " + failed + " failed";
       };
       render();
       const line = (num, msg, good) => {
@@ -1002,27 +1024,24 @@ Your goal:
         d.innerHTML = "<span>" + num + "</span><span>" + msg + "</span>";
         bulkLog.appendChild(d); bulkLog.scrollTop = bulkLog.scrollHeight;
       };
-      // A fixed number of workers pull from the queue, so "concurrency" is calls
-      // in flight rather than a burst that would hit the rate limiter at once.
-      const worker = async () => {
-        while (queue.length && !bulkAbort) {
-          const row = queue.shift(), to = row.to;
-          try {
-            const r = await fetch(apiBase() + "/api/call", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(bulkPayload(row)),
-            });
-            const body = await r.text();
-            if (r.ok) { ok++; line(to, "dialing", true); }
-            else { failed++; line(to, (body || ("http " + r.status)).slice(0, 40), false); }
-          } catch (e) { failed++; line(to, e.message.slice(0, 40), false); }
-          done++; render();
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(conc, bulkNumbers.length) }, worker));
+      // Every number is dialled at once. Stop still works because a request
+      // already in flight is cheap to ignore -- it is the remaining ones that
+      // matter, and those check the flag before firing.
+      await Promise.all(bulkNumbers.map(async row => {
+        if (bulkAbort) return;
+        try {
+          const r = await fetch(apiBase() + "/api/call", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bulkPayload(row)),
+          });
+          const body = await r.text();
+          if (r.ok) { ok++; line(row.to, row.name ? "dialing (" + row.name + ")" : "dialing", true); }
+          else { failed++; line(row.to, (body || ("http " + r.status)).slice(0, 40), false); }
+        } catch (e) { failed++; line(row.to, e.message.slice(0, 40), false); }
+        done++; render();
+      }));
       bulkStatus.className = failed ? "err" : "ok";
-      bulkStatus.textContent = (bulkAbort ? "Stopped — " : "Done — ") + ok + " placed, " + failed + " failed, " +
-        (bulkNumbers.length - done) + " skipped";
+      bulkStatus.textContent = (bulkAbort ? "Stopped — " : "Done — ") + ok + " placed, " + failed + " failed";
       bulkBtn.disabled = false; csvFile.disabled = false; bulkStop.style.display = "none";
     };
 
