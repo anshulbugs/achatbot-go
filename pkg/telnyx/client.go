@@ -120,23 +120,13 @@ func (c *Client) Speak(ctx context.Context, callControlID, text, voice string) e
 }
 
 // StreamingStart forks the call's audio to a bidirectional WebSocket at
-// streamURL. codec is the wire encoding (PCMU is G.711 mu-law at 8 kHz; L16 is
-// linear PCM16 and accepts a sampling rate). Telnyx transcodes between this and
-// whatever the carrier leg actually supports, so asking for L16/16000 costs
-// nothing on a narrowband call and carries real wideband on a VoLTE or SIP leg.
-func (c *Client) StreamingStart(ctx context.Context, callControlID, streamURL, codec string, rate int) error {
-	if codec == "" {
-		codec = "PCMU"
-	}
+// streamURL. Audio is PCMU (G.711 µ-law) at 8 kHz in both directions.
+func (c *Client) StreamingStart(ctx context.Context, callControlID, streamURL string) error {
 	body := map[string]any{
 		"stream_url":                 streamURL,
 		"stream_track":               "inbound_track",
 		"stream_bidirectional_mode":  "rtp",
-		"stream_bidirectional_codec": codec,
-	}
-	// PCMU is 8 kHz by definition; only send a rate when the codec has a choice.
-	if codec != "PCMU" && codec != "PCMA" && rate > 0 {
-		body["stream_bidirectional_sampling_rate"] = rate
+		"stream_bidirectional_codec": "PCMU",
 	}
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/streaming_start", body, nil)
 }

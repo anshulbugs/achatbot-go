@@ -199,7 +199,7 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// Fork the call's audio to our media bridge (wss on the public tunnel).
 		streamURL := wsURL(telnyxClient.PublicURL()) + "/telnyx/media?cc=" + id
 		go func() {
-			if err := telnyxClient.StreamingStart(context.Background(), id, streamURL, cfg.Server.StreamCodec, cfg.Server.StreamSampleRate); err != nil {
+			if err := telnyxClient.StreamingStart(context.Background(), id, streamURL); err != nil {
 				log.Printf("telnyx streaming_start err: %v", err)
 			}
 		}()
@@ -242,9 +242,6 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	log.Printf("telnyx media stream connected call=%s", id)
 
 	ser := telnyx.NewSerializer(consts.DefaultRate)
-	// Match the serializer to whatever encoding we asked Telnyx for; getting
-	// these out of step turns every frame into noise.
-	ser.SetWireFormat(strings.EqualFold(cfg.Server.StreamCodec, "L16"), cfg.Server.StreamSampleRate)
 	ser.SetClarity(cfg.Server.ClarityFilter)
 	ser.SetLatencyHook(func(d time.Duration) {
 		log.Printf("telnyx response latency ~%dms call=%s", d.Milliseconds(), id)
