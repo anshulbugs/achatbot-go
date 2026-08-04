@@ -559,13 +559,15 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			finished := playAnnouncement(tw, pcm, ttsRate, stop)
 			stopOnce.Do(func() { close(stop) })
 
-			if verdict == "" {
-				// Detection may still be in flight; give it the rest of its
-				// window rather than starting a pipeline we are about to drop.
-				select {
-				case verdict = <-p.amdCh:
-				case <-time.After(3 * time.Second):
-				}
+			// Do NOT block waiting for a verdict here. Detection resolves within
+			// a few seconds of answer, so on any greeting of normal length it has
+			// already arrived; waiting again at the end just adds dead air to
+			// every human call, and adds it unconditionally when detection is not
+			// firing at all. Silence by now means treat the callee as human and
+			// get the pipeline running immediately.
+			select {
+			case verdict = <-p.amdCh:
+			default:
 			}
 			if verdict == "machine" {
 				log.Printf("telnyx amd: machine on call=%s (greeting cut=%t) -- no pipeline will be used", id, !finished)
