@@ -43,31 +43,13 @@ asr:
   language: en
 
 tts:
-  model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU,
-                             # supertonic_http for Supertonic-3 on :8881)
+  model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
   http_url: "http://127.0.0.1:8880"
   speaker_id: 3              # 3 = Heart (US female). See UI voice list for ids.
   speed: 1.2                 # 1.0 = normal
   gain: 1.4                  # output loudness multiplier (per-call overridable)
   pool_size: 64
   num_threads: 12            # only used by the CPU sherpa model
-  sample_rate: 24000         # only read by supertonic_http; must match its SUPERTONIC_RATE
-
-# Supertonic-3 instead of Kokoro. Voice ids are a DIFFERENT range (100-109 =
-# F1-F5, M1-M5) and are deliberately disjoint from kokoro's, so switching engine
-# means switching speaker_id too — a kokoro id is rejected rather than silently
-# resolved to the wrong voice. Clear the saved voice in the browser as well.
-#
-#   model: supertonic_http
-#   http_url: "http://127.0.0.1:8881"
-#   speaker_id: 101          # 101 = F2. 103 = F4, 104 = F5.
-#   sample_rate: 24000       # 44100 is the model's native rate; see below.
-#
-# The service resamples 44.1kHz -> 24kHz by default so it is drop-in compatible
-# with Kokoro: same frame math, same browser playback context, no downstream
-# change. 24kHz carries 12kHz of bandwidth, well above anything in speech.
-# Serving 44100 means also changing PLAYBACK_RATE in examples/websocket/ui/index.html,
-# or the browser resamples and dulls the treble.
 
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)

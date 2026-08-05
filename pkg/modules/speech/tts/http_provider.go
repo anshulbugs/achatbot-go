@@ -41,17 +41,6 @@ func voiceNameFor(sid int) string {
 	return "af_heart"
 }
 
-// supertonicSidToName maps numeric speaker ids to Supertonic-3's ten preset
-// voice styles. Ids start at 100 so they cannot collide with the Kokoro ids
-// (0-27, 45-52) that may be persisted in a browser's localStorage or sitting in
-// a saved call payload — a stale id resolves to the wrong voice rather than
-// silently picking up a valid one from the other engine. Ids match server.go's
-// supertonicVoices.
-var supertonicSidToName = map[int]string{
-	100: "F1", 101: "F2", 102: "F3", 103: "F4", 104: "F5",
-	105: "M1", 106: "M2", 107: "M3", 108: "M4", 109: "M5",
-}
-
 // HTTPTTSProvider synthesizes speech via a remote GPU Kokoro service that
 // returns raw little-endian PCM16 mono at 24 kHz. Instances are cheap (just an
 // HTTP client), so the pool can be large; the GPU service handles concurrency.
@@ -72,12 +61,6 @@ type HTTPTTSProvider struct {
 	// voiceName, when set, is sent as the /tts "voice" (a fixed voice or, for
 	// Kani, a language tag) instead of mapping the numeric speaker id.
 	voiceName string
-	// sidToName, when set, replaces the Kokoro speaker-id table so a service
-	// with its own voice names still supports per-call SetVoice. Without it a
-	// non-Kokoro service can only be pinned to one fixed voiceName.
-	sidToName map[int]string
-	// defaultVoice is used when sidToName has no entry for the current sid.
-	defaultVoice string
 }
 
 const httpTTSRate = 24000
@@ -206,38 +189,6 @@ func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSP
 	return NewContractProvider(baseURL, languageTag, "kaniHTTP", speed, gain, 22050)
 }
 
-// NewSupertonicProvider builds a provider for the Supertonic-3 service
-// (deploy/tts/supertonic). rate must match the service's SUPERTONIC_RATE: the
-// model is natively 44.1 kHz but the service resamples to 24 kHz by default so
-// it is drop-in compatible with Kokoro's frame math and the browser's playback
-// context. Returns nil if the service is unreachable at startup.
-func NewSupertonicProvider(baseURL string, sid int, speed, gain float32, rate int) *HTTPTTSProvider {
-	p := NewContractProvider(baseURL, "", "supertonicHTTP", speed, gain, rate)
-	if p == nil {
-		return nil
-	}
-	p.sid = sid
-	p.sidToName = supertonicSidToName
-	p.defaultVoice = "F2"
-	return p
-}
-
-// resolveVoice picks the "voice" field for a /tts request. A fixed voiceName
-// wins; otherwise the numeric speaker id is mapped through whichever table this
-// provider was built with.
-func (p *HTTPTTSProvider) resolveVoice() string {
-	if p.voiceName != "" {
-		return p.voiceName
-	}
-	if p.sidToName != nil {
-		if n, ok := p.sidToName[p.sid]; ok {
-			return n
-		}
-		return p.defaultVoice
-	}
-	return voiceNameFor(p.sid)
-}
-
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
 	if p.openaiSpeech {
 		body, _ := json.Marshal(map[string]any{
@@ -248,7 +199,10 @@ func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
 		})
 		return p.client.Post(p.baseURL+"/v1/audio/speech", "application/json", bytes.NewReader(body))
 	}
-	voice := p.resolveVoice()
+	voice := voiceNameFor(p.sid)
+	if p.voiceName != "" {
+		voice = p.voiceName
+	}
 	body, _ := json.Marshal(map[string]any{
 		"input": text,
 		"voice": voice,
