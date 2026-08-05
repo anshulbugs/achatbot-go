@@ -22,6 +22,8 @@ docker rm -f "$NAME" 2>/dev/null || true
 docker run -d --name "$NAME" --restart unless-stopped \
   --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$ASR_GPU" \
   --shm-size=8g \
+  -e HF_TOKEN="${HF_TOKEN:-}" \
+  -e ASR_MODEL="${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v2}" \
   -v "$HF_CACHE":/root/.cache/huggingface \
   -p 127.0.0.1:"$PORT":8890 \
   -w /app \

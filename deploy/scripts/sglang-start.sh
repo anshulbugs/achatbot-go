@@ -38,6 +38,7 @@ mkdir -p "$HF_CACHE"
 docker rm -f "$NAME" 2>/dev/null || true
 docker run -d --name "$NAME" --restart unless-stopped \
   --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$LLM_GPU" \
+  -e HF_TOKEN="${HF_TOKEN:-}" \
   -v "$HF_CACHE":/root/.cache/huggingface \
   -p 127.0.0.1:"$PORT":8000 --shm-size=8g \
   lmsysorg/sglang:latest \

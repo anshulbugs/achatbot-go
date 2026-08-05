@@ -17,6 +17,7 @@ docker rm -f "$NAME" 2>/dev/null || true
 docker run -d --name "$NAME" --restart unless-stopped \
   --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$TTS_GPU" \
   --shm-size=8g \
+  -e HF_TOKEN="${HF_TOKEN:-}" \
   -p 127.0.0.1:"$PORT":8880 \
   -w /app \
   kokoro-gpu:local \
