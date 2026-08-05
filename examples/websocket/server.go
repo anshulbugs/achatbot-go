@@ -628,7 +628,11 @@ func sendAudioChunks(tw *achatbot_processors.WebsocketTransportWriter, pcm []byt
 		if end > len(pcm) {
 			end = len(pcm)
 		}
-		if err := tw.SendPayload(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+		// SendAudioFrame, not SendPayload: the browser needs a WAV header on
+		// every chunk or decodeAudioData rejects it and the audio is silently
+		// dropped. This path carries the greeting, the voice demo and the idle
+		// re-prompt — none of which go through the pipeline's WriteRawAudio.
+		if err := tw.SendAudioFrame(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
 			return
 		}
 	}

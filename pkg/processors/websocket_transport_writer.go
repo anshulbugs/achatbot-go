@@ -70,6 +70,24 @@ func (p *WebsocketTransportWriter) WriteRawAudio(data []byte) error {
 	return nil
 }
 
+// SendAudioFrame sends one audio frame, applying the WAV header when the
+// transport is configured for it.
+//
+// Callers that reach for SendPayload directly send whatever bytes they hold. On
+// a browser transport that produces raw headerless PCM, which decodeAudioData
+// rejects outright with EncodingError — the audio is dropped and nothing in Go
+// reports a failure, because the write itself succeeded. Sending audio through
+// here instead keeps the header decision with the transport that knows the
+// answer, rather than with each caller. Telephony transports set
+// AudioOutAddWavHeader false, so for them this stays a plain SendPayload.
+func (p *WebsocketTransportWriter) SendAudioFrame(frame *frames.AudioRawFrame) error {
+	if p.params.AudioOutAddWavHeader && len(frame.Audio) > 0 {
+		wav := p.AudioOutAddWavHeader(frame)
+		frame = frames.NewAudioRawFrame(wav, frame.SampleRate, frame.NumChannels, frame.SampleWidth)
+	}
+	return p.SendPayload(frame)
+}
+
 func (p *WebsocketTransportWriter) WriteFrame(frame frames.Frame) error {
 	var err error
 	switch f := frame.(type) {

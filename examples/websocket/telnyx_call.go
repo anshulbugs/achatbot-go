@@ -449,7 +449,11 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 		if end > len(pcm) {
 			end = len(pcm)
 		}
-		if err := tw.SendPayload(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+		// Telephony sets AudioOutAddWavHeader false, so this is byte-identical to
+		// SendPayload today. Routed through SendAudioFrame anyway so the header
+		// decision stays with the transport, and enabling headers here later
+		// cannot silently produce undecodable audio.
+		if err := tw.SendAudioFrame(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
 			log.Printf("announce: send failed after %d/%d bytes in %v: %v", sent, len(pcm), time.Since(started).Round(time.Millisecond), err)
 			return false
 		}
