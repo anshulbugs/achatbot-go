@@ -88,8 +88,21 @@ type kokoroVoice struct {
 // is emitted in this sequence, so the top entry is the strongest voice.
 var premiumVoiceOrder = []int{3, 2, 21} // Heart, Bella, Emma
 
-func isPremiumVoice(id int) bool {
-	for _, p := range premiumVoiceOrder {
+// supertonicPremiumOrder is the equivalent for Supertonic-3, chosen by listening
+// rather than from a published grade — upstream publishes none. Supertonic has
+// no voice documentation of any kind and never will, the project was archived on
+// 2026-07-23.
+var supertonicPremiumOrder = []int{101, 103, 104} // F2, F4, F5
+
+func premiumOrderFor(engine string) []int {
+	if engine == "supertonic_http" {
+		return supertonicPremiumOrder
+	}
+	return premiumVoiceOrder
+}
+
+func isPremiumVoice(engine string, id int) bool {
+	for _, p := range premiumOrderFor(engine) {
 		if p == id {
 			return true
 		}
@@ -121,14 +134,41 @@ var kokoroVoices = []kokoroVoice{
 	{51, "Yunxia (zh male)", "zh"}, {52, "Yunyang (zh male)", "zh"},
 }
 
+// supertonicVoices are Supertonic-3's ten preset styles. Ids start at 100 to
+// stay disjoint from the kokoro ids above, so a voice id persisted in a browser
+// or a stored call payload can never silently resolve to a voice from the other
+// engine. Ids match tts.supertonicSidToName. The model has no published voice
+// names, only F1-F5 / M1-M5, so the labels describe what they sound like.
+var supertonicVoices = []kokoroVoice{
+	{100, "F1 (US female)", "en"}, {101, "F2 (US female)", "en"}, {102, "F3 (US female)", "en"},
+	{103, "F4 (US female)", "en"}, {104, "F5 (US female)", "en"},
+	{105, "M1 (US male)", "en"}, {106, "M2 (US male)", "en"}, {107, "M3 (US male)", "en"},
+	{108, "M4 (US male)", "en"}, {109, "M5 (US male)", "en"},
+}
+
+// voicesFor returns the voice table belonging to the configured TTS engine.
+// The two tables are disjoint and must never be merged: a Supertonic id sent to
+// Kokoro (or vice versa) would fall back to that engine's default voice and the
+// caller would hear the wrong person with no error anywhere.
+func voicesFor(engine string) []kokoroVoice {
+	if engine == "supertonic_http" {
+		return supertonicVoices
+	}
+	return kokoroVoices
+}
+
 // languageNames maps the UI language codes to the human name used in the LLM
 // instruction and to the SenseVoice language hint.
 var languageNames = map[string]string{
 	"en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean", "yue": "Cantonese",
 }
 
+// isValidVoiceID reports whether id belongs to the configured engine's voice
+// table. It deliberately rejects ids from the other engine: accepting one would
+// pick that engine's default voice instead, so the call would go out in the
+// wrong voice with nothing logged.
 func isValidVoiceID(id int) bool {
-	for _, v := range kokoroVoices {
+	for _, v := range voicesFor(cfg.TTS.Model) {
 		if v.ID == id {
 			return true
 		}
@@ -196,16 +236,17 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	// Premium voices first, in graded order, then everything else as listed.
-	voices := make([]apiVoice, 0, len(kokoroVoices))
-	for _, id := range premiumVoiceOrder {
-		for _, v := range kokoroVoices {
+	table := voicesFor(cfg.TTS.Model)
+	voices := make([]apiVoice, 0, len(table))
+	for _, id := range premiumOrderFor(cfg.TTS.Model) {
+		for _, v := range table {
 			if v.ID == id {
 				voices = append(voices, apiVoice{kokoroVoice: v, Premium: true})
 			}
 		}
 	}
-	for _, v := range kokoroVoices {
-		if !isPremiumVoice(v.ID) {
+	for _, v := range table {
+		if !isPremiumVoice(cfg.TTS.Model, v.ID) {
 			voices = append(voices, apiVoice{kokoroVoice: v})
 		}
 	}
@@ -395,6 +436,15 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			}
 			return p, nil
 		})
+	} else if cfg.TTS.Model == "supertonic_http" {
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewSupertonicProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Gain, cfg.TTS.SampleRate)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach Supertonic TTS service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
 	} else if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
@@ -569,7 +619,7 @@ type sessionConfig struct {
 // voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
 // "(US female)" qualifier used in the UI list.
 func voiceLabel(id int) string {
-	for _, v := range kokoroVoices {
+	for _, v := range voicesFor(cfg.TTS.Model) {
 		if v.ID == id {
 			if i := strings.Index(v.Name, " ("); i > 0 {
 				return v.Name[:i]

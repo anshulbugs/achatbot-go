@@ -100,6 +100,7 @@ gcc --version
 | Go voice server| `server-bin`        | `4321`         | — (CPU/VAD)   | `GET /api/options` |
 | LLM (SGLang)   | `sglang`            | `127.0.0.1:8001` | `LLM_GPU=0` | `GET /v1/models` |
 | TTS (Kokoro)   | `kokoro-tts`        | `127.0.0.1:8880` | `TTS_GPU=1` | `GET /health` |
+| TTS (Supertonic, optional) | `supertonic-tts` | `127.0.0.1:8881` | `TTS_GPU=7` | `GET /health` |
 | ASR (Parakeet) | `parakeet`          | `127.0.0.1:8890` | `ASR_GPU=2` | `GET /health` |
 | Public tunnel  | `cloudflared`       | → 4321         | —             | `tunnel-url.txt` |
 | Video avatar (optional) | `soulx`    | `8899`         | own GPU       | WS `/` returns a room |
@@ -129,6 +130,11 @@ from each service dir:
 ```bash
 docker build -t kokoro-gpu:local   deploy/tts
 docker build -t parakeet-gpu:local deploy/asr
+
+# Optional: Supertonic-3 as an alternative TTS. Its weights are vendored under
+# deploy/tts/supertonic3 via git-lfs, so run `git lfs pull` first or the ONNX
+# files are 130-byte pointer stubs and the container starts then fails to load.
+docker build -t supertonic-gpu:local -f deploy/tts/supertonic/Dockerfile deploy/tts
 ```
 
 ### 4.2 Start the GPU services
@@ -136,6 +142,7 @@ docker build -t parakeet-gpu:local deploy/asr
 bash deploy/scripts/sglang-start.sh     # LLM  -> :8001  (downloads model on first run)
 bash deploy/scripts/kokoro-start.sh     # TTS  -> :8880
 bash deploy/scripts/parakeet-start.sh   # ASR  -> :8890  (downloads weights on first run)
+# bash deploy/scripts/supertonic-start.sh  # optional alternative TTS -> :8881
 
 # wait for all three to report ready, then verify:
 curl -s http://127.0.0.1:8001/v1/models | head -c 120 ; echo

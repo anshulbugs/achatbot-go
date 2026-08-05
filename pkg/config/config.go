@@ -30,7 +30,7 @@ const envPrefix = "ACHATBOT"
 var (
 	ValidVADModels    = []string{"silero", "ten"}
 	ValidASRModels    = []string{"sense_voice", "whisper", "paraformer", "zipformer_ctc", "moonshine", "fire_red_asr", "dolphin", "nemo_ctc", "parakeet_http"}
-	ValidTTSModels    = []string{"kokoro", "kokoro_http", "voxtral_http", "kani_http", "dots_http"}
+	ValidTTSModels    = []string{"kokoro", "kokoro_http", "supertonic_http", "voxtral_http", "kani_http", "dots_http"}
 	ValidLLMProviders = []string{"openai_api", "ollama_api"}
 	ValidThinking     = []string{"", "low", "medium", "high"}
 )
@@ -167,6 +167,13 @@ type TTSConfig struct {
 	// HTTPVoice is the voice name for OpenAI-speech-style GPU TTS services
 	// (used when Model is "voxtral_http"), e.g. "casual_female".
 	HTTPVoice string `mapstructure:"http_voice"`
+	// SampleRate is the output rate of the HTTP TTS service, in Hz. Only
+	// consulted for services whose rate is configurable rather than fixed by
+	// the model — currently just "supertonic_http", which is natively 44100 but
+	// resamples to 24000 by default so it stays drop-in compatible with Kokoro.
+	// Must match the service's SUPERTONIC_RATE or audio plays at the wrong
+	// pitch, since nothing downstream re-derives the rate from the stream.
+	SampleRate int `mapstructure:"sample_rate"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.
@@ -276,6 +283,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("tts.http_url", "http://127.0.0.1:8880")
 	v.SetDefault("tts.gain", 1.0)
 	v.SetDefault("tts.http_voice", "casual_female")
+	v.SetDefault("tts.sample_rate", 24000)
 
 	v.SetDefault("llm.provider", "openai_api")
 	v.SetDefault("llm.base_url", "http://127.0.0.1:11434/v1")
@@ -314,6 +322,9 @@ func (c *Config) validate() error {
 	}
 	if c.TTS.PoolSize < 1 {
 		return invalidf("tts.pool_size %d must be >= 1", c.TTS.PoolSize)
+	}
+	if c.TTS.Model == "supertonic_http" && c.TTS.SampleRate != 24000 && c.TTS.SampleRate != 44100 {
+		return invalidf("tts.sample_rate %d must be 24000 or 44100 for supertonic_http", c.TTS.SampleRate)
 	}
 	if c.VAD.BufferSizeSeconds <= 0 {
 		return invalidf("vad.buffer_size_seconds %v must be > 0", c.VAD.BufferSizeSeconds)
