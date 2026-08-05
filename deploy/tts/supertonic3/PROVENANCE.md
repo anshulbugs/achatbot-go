@@ -9,8 +9,10 @@ fork, and GitHub bills git-lfs storage to the fork parent, so it rejects LFS
 uploads from forks: *"can not upload new objects to public fork"*. No repo-side
 setting changes that.
 
-Run `./fetch-weights.sh` to download them and verify against `SHA256SUMS`. Point
-`SUPERTONIC_MIRROR` at our own copy rather than relying on upstream.
+Run `./fetch-weights.sh` to download them and verify against `SHA256SUMS`. It
+defaults to our private mirror `Anshulsh/supertonic-3-mirror`, so export a
+`HF_TOKEN`; set `SUPERTONIC_MIRROR=Supertone/supertonic-3` to use upstream while
+it still exists.
 
 Committed here: the ten voice styles (2.9MB, small enough for plain git),
 `config.json`, `LICENSE`, `SHA256SUMS`, and this file.
@@ -26,13 +28,14 @@ Supertone archived the Supertonic project on **2026-07-23**:
 Nothing obliges Supertone to keep hosting the weights on Hugging Face. Since we
 cannot rebuild or re-derive them and there will never be another release, the
 only way to guarantee we can still deploy this model in a year is to hold our
-own copy. That is worth ~386MB of LFS.
+own copy.
 
 ## Provenance
 
 | | |
 |---|---|
 | Source | `https://huggingface.co/Supertone/supertonic-3` |
+| Our mirror | `https://huggingface.co/Anshulsh/supertonic-3-mirror` (private) |
 | Mirrored | 2026-08-06 |
 | Upstream code | `https://github.com/supertone-inc/supertonic` (archived) |
 | Licence | OpenRAIL-M (see `LICENSE`) |

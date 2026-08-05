@@ -12,15 +12,17 @@
 # be, so a substituted or truncated download fails loudly here rather than
 # quietly synthesizing something else.
 #
-# SUPERTONIC_MIRROR should point at our own copy. The upstream default is a
-# fallback only: Supertone archived the project on 2026-07-23 and nothing
-# obliges them to keep hosting it.
+# Defaults to our own mirror, which is PRIVATE -- export HF_TOKEN (a read token
+# is enough). Upstream Supertone/supertonic-3 still works today and needs no
+# token, but it is a fallback only: the project was archived on 2026-07-23 and
+# nothing obliges them to keep hosting it.
 #
-#   SUPERTONIC_MIRROR=<your-org>/supertonic3-weights ./fetch-weights.sh
+#   HF_TOKEN=hf_... ./fetch-weights.sh
+#   SUPERTONIC_MIRROR=Supertone/supertonic-3 ./fetch-weights.sh   # upstream
 set -euo pipefail
 
 cd "$(dirname "$0")"
-REPO="${SUPERTONIC_MIRROR:-Supertone/supertonic-3}"
+REPO="${SUPERTONIC_MIRROR:-Anshulsh/supertonic-3-mirror}"
 BASE="https://huggingface.co/${REPO}/resolve/main"
 FILES="text_encoder.onnx duration_predictor.onnx vector_estimator.onnx vocoder.onnx"
 
