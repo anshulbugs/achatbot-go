@@ -62,3 +62,7 @@ telnyx.env
 deploy/avatar/*.mp4
 deploy/avatar/*.png
 deploy/avatar/*.jpg
+
+# Supertonic ONNX graphs are fetched, not committed -- see
+# deploy/tts/supertonic3/fetch-weights.sh and PROVENANCE.md.
+deploy/tts/supertonic3/onnx/*.onnx
