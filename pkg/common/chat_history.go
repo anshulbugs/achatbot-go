@@ -15,6 +15,23 @@ type ChatHistory struct {
 	initChatMessage map[string]any
 	initChatTools   map[string]any
 	buffer          []map[string]any
+	// observer, when set, is called with every appended item BEFORE the
+	// buffer is trimmed. This buffer is a rolling LLM context window, not a
+	// log: Append discards the oldest pair once it reaches 2*(size+1), so
+	// reading `buffer` at the end of a call yields only the last few turns.
+	// Anything that needs the whole conversation — a call transcript, an
+	// audit trail — must observe appends as they happen rather than reading
+	// the buffer afterwards, or it will silently report a truncated
+	// conversation as a complete one.
+	observer func(map[string]any)
+}
+
+// SetObserver registers a callback invoked on every Append, before trimming.
+//
+// Called on the pipeline goroutine, so the callback must not block; it should
+// hand off to its own buffer and return. Passing nil clears it.
+func (ch *ChatHistory) SetObserver(fn func(map[string]any)) {
+	ch.observer = fn
 }
 
 // NewChatHistory creates a new ChatHistory instance
@@ -41,6 +58,12 @@ func (ch *ChatHistory) Clear() {
 func (ch *ChatHistory) Append(item map[string]any) {
 	if ch.size != nil && *ch.size < 0 {
 		return
+	}
+
+	// Notify before trimming, so an observer sees every turn even though the
+	// buffer only retains the most recent ones.
+	if ch.observer != nil {
+		ch.observer(item)
 	}
 
 	ch.buffer = append(ch.buffer, item)

@@ -1,0 +1,120 @@
+package rexa
+
+import (
+	"sync"
+	"time"
+)
+
+// Transcript accumulates every turn of a call for the end-of-call report.
+//
+// It exists because the pipeline's ChatHistory is a rolling LLM context
+// window, not a log — it trims to the last few turns as the call proceeds, so
+// reading it at the end yields a truncated conversation that *looks* complete.
+// Short calls would appear perfect and long ones would quietly lose their
+// opening, including the part where the caller says what they want.
+//
+// Safe for concurrent use: turns arrive on the pipeline goroutine while the
+// report may be built from the carrier's hangup goroutine.
+type Transcript struct {
+	mu    sync.Mutex
+	start time.Time
+	turns []MessageTurn
+	now   func() time.Time
+}
+
+// NewTranscript starts a transcript. start anchors turn timings, and should be
+// the moment the call was answered so `t` is measured from the beginning of
+// the conversation rather than from dispatch.
+func NewTranscript(start time.Time) *Transcript {
+	return &Transcript{start: start, now: time.Now}
+}
+
+// MaxTranscriptTurns bounds retention so a pathological call — an agent-to-
+// agent loop, or a line left open for hours — cannot grow the report without
+// limit. The platform refuses bodies over 128 KB, and a rejected report loses
+// the whole conversation, so dropping the middle of an extreme outlier is
+// strictly better than losing all of it.
+const MaxTranscriptTurns = 2000
+
+// Add records one turn. role is the pipeline's own vocabulary; it is
+// normalised to the platform's agent/user pair here.
+//
+// Empty content is dropped: a turn that carries only a tool call has nothing
+// to transcribe, and the platform's own relay drops those before showing them
+// to tenants anyway.
+func (t *Transcript) Add(role, content string) {
+	if content == "" {
+		return
+	}
+	mapped := mapRole(role)
+	if mapped == "" {
+		return // system prompts and tool results are not part of the conversation
+	}
+	elapsed := t.now().Sub(t.start).Seconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.turns) >= MaxTranscriptTurns {
+		// Drop from the middle: the opening states intent and the ending
+		// states the outcome, and both matter more than the middle of an
+		// hours-long call.
+		half := MaxTranscriptTurns / 2
+		t.turns = append(t.turns[:half], t.turns[len(t.turns)-half+1:]...)
+	}
+	t.turns = append(t.turns, MessageTurn{Role: mapped, Content: content, T: &elapsed})
+}
+
+// mapRole converts pipeline roles to the platform's vocabulary, returning ""
+// for turns that are not part of the spoken conversation.
+//
+// The platform accepts arbitrary role strings and normalises "assistant" to
+// "agent" itself, but emitting the canonical names means we do not depend on
+// that behaviour surviving a change on their side.
+func mapRole(role string) string {
+	switch role {
+	case "assistant", "agent", "bot":
+		return RoleAgent
+	case "user", "human":
+		return RoleUser
+	default:
+		// system, tool, and anything unrecognised.
+		return ""
+	}
+}
+
+// Turns returns a copy of the accumulated transcript, safe to serialise while
+// the call is still running.
+func (t *Transcript) Turns() []MessageTurn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.turns) == 0 {
+		return nil
+	}
+	out := make([]MessageTurn, len(t.turns))
+	copy(out, t.turns)
+	return out
+}
+
+// Len reports how many turns have been recorded.
+func (t *Transcript) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.turns)
+}
+
+// ObserveChatHistory adapts Transcript to the ChatHistory observer signature,
+// pulling role + content out of the pipeline's message maps.
+//
+// Returns a function suitable for (*common.ChatHistory).SetObserver. It is
+// defined here rather than in common so that package does not take a
+// dependency on the contract types.
+func (t *Transcript) ObserveChatHistory() func(map[string]any) {
+	return func(item map[string]any) {
+		role, _ := item["role"].(string)
+		content, _ := item["content"].(string)
+		t.Add(role, content)
+	}
+}
