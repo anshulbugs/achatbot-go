@@ -18,6 +18,7 @@ import (
 	"achatbot/pkg/modules/speech/tts"
 	"achatbot/pkg/params"
 	achatbot_processors "achatbot/pkg/processors"
+	"achatbot/pkg/rexa"
 	"achatbot/pkg/telnyx"
 )
 
@@ -46,6 +47,58 @@ type callParams struct {
 	LLMModel string  `json:"llm"`
 	Demo     bool    `json:"demo"`   // play a curated set of voices, one after another
 	Voices   []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
+
+	// ─── Platform-contract state ────────────────────────────────────
+	//
+	// Everything below is set only for calls dispatched by the platform
+	// (pkg/rexa) and stays zero for the local demo server's /api/call. The
+	// demo path is chosen by `rexa == nil`, so a demo call takes exactly the
+	// code path it did before the contract existed.
+
+	// rexa carries the platform's per-call context: session/tenant ids, the
+	// callback URL, and the client built from that dispatch's own credentials.
+	// nil on demo calls.
+	platform *rexaCall
+}
+
+// rexaCall is the platform-dispatched half of a call's state.
+//
+// It is a separate struct rather than more fields on callParams so the
+// boundary stays obvious: if you are reading p.platform, you are on the contract
+// path, and if it is nil you are not.
+type rexaCall struct {
+	sessionID  string
+	tenantID   string
+	webhookURL string
+	direction  string // "outbound" | "inbound"
+
+	// client is built from THIS dispatch's telecom credentials. The platform
+	// is multi-tenant and hands over per-call BYO credentials, so using the
+	// process-global client here would place one tenant's call on another
+	// tenant's carrier account.
+	client *telnyx.Client
+
+	// transcript accumulates every turn. It cannot be reconstructed from the
+	// pipeline's ChatHistory, which trims to a rolling window mid-call.
+	transcript *rexa.Transcript
+
+	// startedAt anchors both the report's duration and the transcript's turn
+	// timings. Set when the call is answered, not when it was dispatched.
+	startedAt time.Time
+
+	// answered, amdVerdict and hangupCause accumulate the signals the outcome
+	// mapper needs. They are written from the webhook goroutine and read when
+	// the report is built, so they go through the registry's mutex.
+	answered    bool
+	amdVerdict  string
+	hangupCause string
+	agentEnded  bool
+
+	// reported guards the report against double-emission. Both call.hangup and
+	// a dispatch failure can reach the reporter, and the platform dedupes on
+	// session_id anyway, but sending twice wastes a retry ladder and muddies
+	// the logs.
+	reported bool
 }
 
 // demoVoiceSet is the curated shortlist of the best-sounding Kokoro English
@@ -59,6 +112,79 @@ type callRegistry struct {
 }
 
 func newCallRegistry() *callRegistry { return &callRegistry{m: map[string]*callParams{}} }
+
+// tc returns the Telnyx client that owns this call.
+//
+// Platform-dispatched calls carry their own client, built from the tenant
+// credentials on that dispatch. Everything else — the demo server's /api/call,
+// inbound legs the demo answers — falls back to the process-global client
+// built from TELNYX_* environment variables, which is exactly the client those
+// paths used before the contract existed.
+//
+// Returns nil only when there is no client at all (telephony unconfigured),
+// which callers already handle.
+func (p *callParams) tc() *telnyx.Client {
+	if p != nil && p.platform != nil && p.platform.client != nil {
+		return p.platform.client
+	}
+	return telnyxClient
+}
+
+// markAnswered records the pickup time, which anchors both the report duration
+// and the transcript's turn timings.
+func (r *callRegistry) markAnswered(id string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil && p.platform != nil && !p.platform.answered {
+		p.platform.answered = true
+		p.platform.startedAt = at
+	}
+}
+
+// recordAMD stores the answering-machine verdict for the end-of-call report.
+// Distinct from signalAMD, which wakes the media handler: the verdict is
+// needed by BOTH, and a call that never started a pipeline still has to
+// report the machine it reached.
+func (r *callRegistry) recordAMD(id, verdict string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil && p.platform != nil {
+		p.platform.amdVerdict = verdict
+	}
+}
+
+// recordHangup stores the carrier's hangup cause, which distinguishes busy
+// from rang-out from failed.
+func (r *callRegistry) recordHangup(id, cause string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil && p.platform != nil {
+		p.platform.hangupCause = cause
+	}
+}
+
+// markAgentEnded notes that we hung up deliberately rather than the far end.
+func (r *callRegistry) markAgentEnded(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil && p.platform != nil {
+		p.platform.agentEnded = true
+	}
+}
+
+// claimReport returns the call's contract state exactly once, so the report is
+// emitted a single time however many paths race to send it. Returns nil for
+// demo calls and for a second caller.
+func (r *callRegistry) claimReport(id string) *rexaCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	if p == nil || p.platform == nil || p.platform.reported {
+		return nil
+	}
+	p.platform.reported = true
+	return p.platform
+}
 
 func (r *callRegistry) put(id string, p *callParams) {
 	r.mu.Lock()
@@ -223,7 +349,10 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	w.WriteHeader(http.StatusOK) // always ack promptly
-	if telnyxClient == nil {
+	// Platform-dispatched calls carry their own client, so events for them
+	// must be processed even when the process-global client is absent
+	// (TELNYX_API_KEY unset). Bail out only when neither path is active.
+	if telnyxClient == nil && rexaPoster == nil {
 		return
 	}
 	ev, err := telnyx.ParseWebhook(body)
@@ -242,6 +371,16 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		if ev.Data.Payload.Direction != "incoming" || calls.get(id) != nil {
 			return
 		}
+		// Auto-answering with server defaults is DEMO behaviour and requires
+		// the process-global client. Under the platform contract the platform
+		// decides which inbound calls we answer, and tells us via /incoming
+		// with the tenant's own credentials — so an unregistered inbound leg
+		// here is not ours to pick up. (Without this guard a contract-only
+		// deployment, which has no global client, would also nil-panic below.)
+		if telnyxClient == nil {
+			log.Printf("telnyx: ignoring unregistered inbound call=%s (no demo client configured)", id)
+			return
+		}
 		p := &callParams{
 			To:           ev.Data.Payload.From,
 			Hello:        cfg.Server.InboundHello,
@@ -258,19 +397,21 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		calls.put(id, p)
 		log.Printf("telnyx: inbound call from %s call_control_id=%s", ev.Data.Payload.From, id)
 		go func() {
-			if err := telnyxClient.Answer(context.Background(), id); err != nil {
+			if err := p.tc().Answer(context.Background(), id); err != nil {
 				log.Printf("telnyx answer err: %v", err)
 				calls.del(id)
 			}
 		}()
 
 	case "call.answered":
-		if calls.get(id) == nil {
+		p := calls.get(id)
+		if p == nil {
 			return
 		}
+		calls.markAnswered(id, time.Now())
 		if cfg.Server.RecordCalls {
 			go func() {
-				if err := telnyxClient.RecordStart(context.Background(), id); err != nil {
+				if err := p.tc().RecordStart(context.Background(), id); err != nil {
 					log.Printf("telnyx record_start err: %v", err)
 				} else {
 					log.Printf("telnyx: recording started call=%s", id)
@@ -284,16 +425,18 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(time.Duration(secs) * time.Second)
 				if calls.get(id) != nil {
 					log.Printf("telnyx: max duration %ds reached, hanging up call=%s", secs, id)
-					if err := telnyxClient.Hangup(context.Background(), id); err != nil {
+					// We are ending this, not the callee — the report must say so.
+					calls.markAgentEnded(id)
+					if err := p.tc().Hangup(context.Background(), id); err != nil {
 						log.Printf("telnyx hangup err: %v", err)
 					}
 				}
 			}()
 		}
 		// Fork the call's audio to our media bridge (wss on the public tunnel).
-		streamURL := wsURL(telnyxClient.PublicURL()) + "/telnyx/media?cc=" + id
+		streamURL := wsURL(p.tc().PublicURL()) + "/telnyx/media?cc=" + id
 		go func() {
-			if err := telnyxClient.StreamingStart(context.Background(), id, streamURL); err != nil {
+			if err := p.tc().StreamingStart(context.Background(), id, streamURL); err != nil {
 				log.Printf("telnyx streaming_start err: %v", err)
 			}
 		}()
@@ -303,14 +446,78 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// spending a pipeline slot on a machine.
 		res := ev.Data.Payload.Result
 		log.Printf("telnyx amd verdict=%s call=%s", res, id)
+		// Record before signalling. The media handler may tear the call down
+		// the instant it reads the verdict, and the report needs it too — a
+		// voicemail is precisely the case where no pipeline ever runs.
+		calls.recordAMD(id, res)
 		calls.signalAMD(id, res)
 	case "call.machine.greeting.ended", "call.machine.premium.greeting.ended":
 		// beep_detected is the real cue; "ended" (greeting_end mode) and
 		// "not_sure" (30s beep timeout) both mean it is safe to start talking.
 		calls.signalBeep(id, ev.Data.Payload.Result)
 	case "call.hangup":
+		// The report is emitted from HERE, on the carrier's lifecycle, rather
+		// than from pipeline teardown. Voicemail, no-answer and busy calls all
+		// need a report and none of them ever start a pipeline, so hanging the
+		// reporter off the session would silently drop exactly the outcomes
+		// the platform most needs to hear about.
+		calls.recordHangup(id, ev.Data.Payload.HangupCause)
+		reportCallEnded(id)
 		calls.del(id)
 	}
+}
+
+// reportCallEnded posts the end-of-call report for a platform-dispatched call.
+// No-op for demo calls, and for any call already reported.
+//
+// Runs in the background: the retry ladder can take a quarter of an hour, and
+// the Telnyx webhook goroutine must not be held open for it.
+func reportCallEnded(id string) {
+	rc := calls.claimReport(id)
+	if rc == nil {
+		return // demo call, or already reported
+	}
+	if rexaPoster == nil {
+		log.Printf("rexa: no poster configured; dropping report for session=%s", rc.sessionID)
+		return
+	}
+
+	ended := time.Now()
+	status, reason := rexa.Outcome{
+		AMDVerdict:  rc.amdVerdict,
+		HangupCause: rc.hangupCause,
+		Direction:   rc.direction,
+		Answered:    rc.answered,
+		AgentEnded:  rc.agentEnded,
+	}.Report()
+
+	report := rexa.EndOfCallReport{
+		SessionID:  rc.sessionID,
+		TenantID:   rc.tenantID,
+		CallStatus: status,
+		EndReason:  reason,
+		EndedAt:    rexa.ISOTime(ended),
+		CCID:       id,
+	}
+	// Timestamps and duration only make sense once the call was answered; on a
+	// no-answer there is no conversation to have lasted any length of time,
+	// and inventing a zero duration would misreport it as a completed call of
+	// no length.
+	if rc.answered && !rc.startedAt.IsZero() {
+		report.StartedAt = rexa.ISOTime(rc.startedAt)
+		report.DurationSeconds = int(ended.Sub(rc.startedAt).Seconds())
+	}
+	if rc.transcript != nil {
+		report.Messages = rc.transcript.Turns()
+	}
+
+	log.Printf("rexa: reporting session=%s status=%s reason=%s turns=%d",
+		rc.sessionID, status, reason, len(report.Messages))
+	go func() {
+		if err := rexaPoster.PostEndOfCall(context.Background(), rc.webhookURL, report); err != nil {
+			log.Printf("rexa: end-of-call report FAILED for session=%s: %v", rc.sessionID, err)
+		}
+	}()
 }
 
 // wsURL converts an http(s) base URL to its ws(s) equivalent.
@@ -509,12 +716,12 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 	msg := p.VoicemailMessage
 	if msg == "" {
 		log.Printf("telnyx amd: no voicemail message configured, hanging up call=%s", id)
-		_ = telnyxClient.Hangup(context.Background(), id)
+		_ = p.tc().Hangup(context.Background(), id)
 		return
 	}
 	pcm := announcements.get(msg, p.VoiceID, p.Speed)
 	if len(pcm) == 0 {
-		_ = telnyxClient.Hangup(context.Background(), id)
+		_ = p.tc().Hangup(context.Background(), id)
 		return
 	}
 
@@ -531,7 +738,7 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 	playAnnouncement(tw, pcm, rate, make(chan struct{}))
 	// Let the tail drain out of Telnyx's buffer before tearing the call down.
 	time.Sleep(time.Duration(len(pcm)/2/rate)*time.Second/4 + 700*time.Millisecond)
-	if err := telnyxClient.Hangup(context.Background(), id); err != nil {
+	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
 }
@@ -629,8 +836,15 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Platform calls record a transcript; demo calls do not.
+	var chatObserver func(map[string]any)
+	if p.platform != nil && p.platform.transcript != nil {
+		chatObserver = p.platform.transcript.ObserveChatHistory()
+	}
+
 	runVoiceSession(conn, ser, sessionConfig{
 		clientID:           "telnyx_" + id,
+		chatObserver:       chatObserver,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,
 		speed:              p.Speed,

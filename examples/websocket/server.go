@@ -564,6 +564,9 @@ type sessionConfig struct {
 	audioOutFrameMS    int             // outbound audio framing; small = lower first-audio latency
 	demoVoices         []int           // if set, play a sample in each voice then converse in voiceID
 	stop               <-chan struct{} // when closed, cancels the pipeline task (used by the load test)
+	// chatObserver receives every chat turn as it is appended, for the
+	// platform's end-of-call transcript. nil on the demo path.
+	chatObserver func(map[string]any)
 }
 
 // voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
@@ -674,6 +677,13 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 
 	chatHistorySize := cfg.Server.ChatHistorySize
 	session := common.NewSession(sc.clientID, &chatHistorySize)
+	// Capture every turn for the end-of-call transcript. This has to observe
+	// appends rather than read the buffer afterwards: chatHistorySize bounds
+	// the buffer to a rolling window, so by the end of a long call the earlier
+	// turns are gone. nil on the demo path, which keeps no transcript.
+	if sc.chatObserver != nil {
+		session.GetChatHistory().SetObserver(sc.chatObserver)
+	}
 	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
 
 	// Track caller activity for the idle re-prompt.
@@ -969,11 +979,24 @@ func main() {
 	telnyxClient = telnyx.NewClientFromEnv()
 	if telnyxClient != nil {
 		http.HandleFunc("/api/call", handleCall)
-		http.HandleFunc("/telnyx/webhook", handleTelnyxWebhook)
-		http.HandleFunc("/telnyx/media", handleTelnyxMedia)
 		logger.Info("Telephony enabled", "from", telnyxClient.FromNumber(), "public_url", telnyxClient.PublicURL())
 	} else {
 		logger.Info("Telephony disabled (TELNYX_API_KEY not set)")
+	}
+
+	// Platform call-agent contract (optional): enabled when both REXA_*
+	// secrets are set. Registered after telnyxClient so it can fall back to
+	// that client's public URL.
+	rexaEnabled := registerRexaRoutes(http.DefaultServeMux)
+
+	// The carrier webhook + media bridge serve BOTH paths, so they are
+	// registered when either is active — the contract supplies its telecom
+	// credentials per dispatch, so it needs these even with TELNYX_API_KEY
+	// unset. Registering a pattern twice on a mux panics, hence the single
+	// combined condition rather than one block per path.
+	if telnyxClient != nil || rexaEnabled {
+		http.HandleFunc("/telnyx/webhook", handleTelnyxWebhook)
+		http.HandleFunc("/telnyx/media", handleTelnyxMedia)
 	}
 
 	// Browser voice WS moves to /ws so the UI can be served at /.
