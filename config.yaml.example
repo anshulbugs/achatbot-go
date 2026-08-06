@@ -19,6 +19,12 @@ server:
   allow_interruptions: false
   # Uncomment to replace the built-in voice-assistant system prompt.
   # system_prompt: "You are a helpful voice assistant."
+  # Telephony (Telnyx). Answering-machine detection defaults to "" which the
+  # dialler reads as "disabled" — Telnyx accepts that silently, so an unset key
+  # looks exactly like AMD being unavailable on the account. Set it explicitly.
+  #   disabled | detect | detect_beep | detect_words | greeting_end | premium
+  # voicemail_detection: premium
+  # voicemail_message: "Sorry we missed you — we'll try again later."
 
 vad:
   # silero | ten

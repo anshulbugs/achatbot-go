@@ -331,6 +331,26 @@ var telnyxUpgrader = websocket.Upgrader{
 // WebSocket (base64 µ-law/8 kHz). It runs the full voice pipeline over a
 // Telnyx serializer, so the caller talks to the same VAD->ASR->LLM->TTS agent
 // as the browser client.
+// isMachineVerdict reports whether an AMD result means "no human is listening".
+//
+// The standard modes (detect, detect_beep, detect_words, greeting_end) only ever
+// answer human/machine/not_sure, but `premium` widens the vocabulary to
+// human_residence, human_business, machine, silence, fax_detected and not_sure.
+// Testing `== "machine"` therefore silently routes a silent voicemail or a fax
+// tone down the human path and burns a full pipeline on it for the whole call.
+//
+// not_sure stays on the human path deliberately: Telnyx documents it as
+// "treat as human", and hanging up on a real person is far worse than spending
+// a pipeline slot on a machine.
+func isMachineVerdict(result string) bool {
+	switch result {
+	case "machine", "silence", "fax_detected":
+		return true
+	default:
+		return false
+	}
+}
+
 // amdMode returns the answering-machine-detection mode to request.
 //
 // Plain "detect" only reports human/machine -- it never emits the greeting
@@ -575,7 +595,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			go func() {
 				select {
 				case verdict = <-p.amdCh:
-					if verdict == "machine" {
+					if isMachineVerdict(verdict) {
 						stopOnce.Do(func() { close(stop) }) // cut the greeting mid-word
 					}
 				case <-stop:
@@ -596,8 +616,8 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			case verdict = <-p.amdCh:
 			default:
 			}
-			if verdict == "machine" {
-				log.Printf("telnyx amd: machine on call=%s (greeting cut=%t) -- no pipeline will be used", id, !finished)
+			if isMachineVerdict(verdict) {
+				log.Printf("telnyx amd: machine verdict=%q on call=%s (greeting cut=%t) -- no pipeline will be used", verdict, id, !finished)
 				runVoicemailCall(id, tw, ser, ttsRate, p, p.beepCh)
 				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
 				return

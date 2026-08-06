@@ -9,6 +9,17 @@ server:
   record_calls: false        # ask Telnyx to record every answered call (dual channel, mp3).
                              # Billed and stored by Telnyx — keep off for large runs.
   inbound_hello: ""          # greeting spoken when the agent answers an inbound call
+  # Answering-machine detection on outbound calls. THIS KEY WAS PREVIOUSLY ABSENT,
+  # which left it "" -> "disabled" on every dial, so no call.machine.* webhook could
+  # ever fire and the voicemail path was dead code. Do not remove it again.
+  #   disabled | detect | detect_beep | detect_words | greeting_end | premium
+  # premium is Telnyx's recommended mode and the only one that distinguishes
+  # silence and fax_detected from a plain machine; check its billing rate before
+  # a large campaign, since it is priced separately from standard detection.
+  voicemail_detection: premium
+  # Spoken into the voicemail via the pre-rendered announcement (no GPU slot).
+  # Empty means hang up as soon as a machine is detected.
+  voicemail_message: ""
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the
