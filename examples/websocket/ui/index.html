@@ -770,8 +770,17 @@ Your goal:
     function buildWsUrl() {
       const q = new URLSearchParams({
         voice: $("voice").value, speed: $("speed").value, volume: $("volume").value,
-        llm: $("llm").value, hello: $("hello").value, prompt: $("prompt").value,
+        llm: $("llm").value,
       });
+      // Send the prompt and greeting ONLY when they differ from the server's
+      // own configuration. Echoing the server's prompt back to it achieves
+      // nothing and puts the whole thing — 12.5 KB in the current config — into
+      // a WebSocket URL, where it is at the mercy of every proxy's header
+      // limit. Omitting it means the server uses its configured prompt, which
+      // is exactly what sending an identical copy would have produced.
+      const p = $("prompt").value, h = $("hello").value;
+      if (p && p !== serverDefaults.prompt) q.set("prompt", p);
+      if (h && h !== serverDefaults.hello) q.set("hello", h);
       return wsBase() + "?" + q.toString();
     }
     function initWebSocket() {

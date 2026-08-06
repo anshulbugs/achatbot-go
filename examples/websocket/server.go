@@ -502,17 +502,46 @@ func parseSessionOverrides(r *http.Request) sessionOverrides {
 	if l := q.Get("lang"); languageNames[l] != "" {
 		o.lang = l
 	}
-	if h := q.Get("hello"); h != "" && len(h) <= 500 {
-		o.hello = h
+	if h := q.Get("hello"); h != "" {
+		if len(h) <= maxHelloBytes {
+			o.hello = h
+		} else {
+			log.Printf("WARNING: greeting override ignored — %d bytes exceeds the %d-byte limit; using the server default",
+				len(h), maxHelloBytes)
+		}
 	}
-	if p := q.Get("prompt"); p != "" && len(p) <= 4000 {
-		o.prompt = p
+	if p := q.Get("prompt"); p != "" {
+		if len(p) <= maxPromptBytes {
+			o.prompt = p
+		} else {
+			log.Printf("WARNING: system-prompt override ignored — %d bytes exceeds the %d-byte limit; using the server default",
+				len(p), maxPromptBytes)
+		}
 	}
-	if s := q.Get("prompt_suffix"); s != "" && len(s) <= 4000 {
-		o.promptSuffix = s
+	if s := q.Get("prompt_suffix"); s != "" {
+		if len(s) <= maxPromptBytes {
+			o.promptSuffix = s
+		} else {
+			log.Printf("WARNING: prompt suffix ignored — %d bytes exceeds the %d-byte limit",
+				len(s), maxPromptBytes)
+		}
 	}
 	return o
 }
+
+// Caps on client-supplied overrides, in BYTES (len on a Go string counts
+// bytes, and an em dash or smart quote costs three).
+//
+// The old prompt cap was 4000, which was smaller than the server's OWN
+// configured prompt. The UI round-trips that prompt through the textarea, so
+// every browser call sent ~12.5 KB, tripped the cap, and silently fell back to
+// the server default — making the prompt box look broken with nothing logged
+// anywhere. Any cap here must stay comfortably above whatever a deployment
+// puts in config.yaml.
+const (
+	maxPromptBytes = 32 * 1024
+	maxHelloBytes  = 2000
+)
 
 // resolvePrompt builds the system prompt for a session, preferring a suffix
 // appended to the shared base over a wholesale replacement.
@@ -536,6 +565,18 @@ func resolvePrompt(base, replace, suffix string) string {
 		return base + "\n\n" + suffix
 	}
 	return base
+}
+
+// firstChars returns up to n runes of s on a single line, for log lines that
+// need to identify a prompt without dumping the whole thing. Rune-based so a
+// cut never lands mid-character and corrupts the log.
+func firstChars(s string, n int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // systemPromptFor returns the base system prompt with an optional
@@ -685,6 +726,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		session.GetChatHistory().SetObserver(sc.chatObserver)
 	}
 	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
+	// Log which prompt this session actually got. Answering "did my prompt
+	// apply?" previously meant reading code and guessing, because an override
+	// that was rejected looked identical to one that was never sent.
+	log.Printf("session %s: system prompt %d bytes, starts %q",
+		sc.clientID, len(sc.systemPrompt), firstChars(sc.systemPrompt, 80))
 
 	// Track caller activity for the idle re-prompt.
 	var actMu sync.Mutex
