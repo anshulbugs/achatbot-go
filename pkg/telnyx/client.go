@@ -47,6 +47,33 @@ func NewClientFromEnv() *Client {
 	}
 }
 
+// NewClient builds a Client from explicit credentials.
+//
+// The platform contract supplies telecom credentials per dispatch, scoped to
+// the tenant that owns the call (BYO), so a process-wide client built from the
+// environment cannot serve it — one tenant's calls would be placed with
+// another's API key. Contract dispatches construct a Client per call from
+// their own credentials and discard it when the call ends.
+//
+// NewClientFromEnv is untouched and remains the path for the local demo
+// server, which has a single operator and one set of credentials.
+//
+//   - apiKey, appID: the dispatch's telnyx api_key + connection_id.
+//   - fromNumber: the caller id the platform chose for this call. It is
+//     per-call rather than per-process; a tenant may own several DIDs and the
+//     platform picks one per campaign.
+//   - publicURL: our own externally-reachable base URL, used to build the
+//     per-call webhook and media-stream URLs. Ours, not the platform's.
+func NewClient(apiKey, appID, fromNumber, publicURL string) *Client {
+	return &Client{
+		apiKey:     apiKey,
+		appID:      appID,
+		fromNumber: fromNumber,
+		publicURL:  publicURL,
+		http:       &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
 func (c *Client) FromNumber() string { return c.fromNumber }
 func (c *Client) PublicURL() string  { return c.publicURL }
 
