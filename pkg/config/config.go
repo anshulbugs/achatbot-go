@@ -257,6 +257,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.chat_history_size", 2)
 	v.SetDefault("server.allow_interruptions", false)
 	v.SetDefault("server.system_prompt", consts.DefaultLLMSystemPrompt)
+	// Registering a default is what makes ACHATBOT_SERVER_MAX_GPU_CALLS work
+	// at all: viper's AutomaticEnv only resolves keys it already knows from a
+	// default or the config file when Unmarshal runs, so a key present in
+	// neither is silently invisible to the environment. 0 = unlimited.
+	v.SetDefault("server.max_gpu_calls", 0)
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)
