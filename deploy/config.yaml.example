@@ -30,6 +30,21 @@ server:
   # drops. It is specific to this model, prompt size and GPU layout --
   # remeasure with deploy/loadtest when any of those change. 0 = unlimited.
   max_gpu_calls: 61
+  # Absolute in-flight ceiling, counting calls that cost no GPU at all. Stands
+  # in for what our counters cannot see: the carrier's concurrent channel cap,
+  # CPU for hundreds of media streams, TTS renders at dispatch time. No
+  # capacity estimate may argue past it. 0 = unlimited.
+  max_total_calls: 100
+  # Expected GPU cost of one dispatched call -- the fraction that reach a live
+  # pipeline rather than an answering machine, a no-answer or a busy.
+  #
+  # 1.0 charges every dispatch a full slot. That is deliberately conservative:
+  # a call is dispatched while the phone is still RINGING, and its pipeline
+  # does not exist until it is answered, so anything less assumes an answer
+  # rate you have not measured yet. Watch `measured.answer_rate` on /dashboard
+  # for a real campaign, then lower this to over-subscribe. 0 = use the
+  # measured rate automatically (floored at 0.15).
+  human_answer_weight: 1.0
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the

@@ -92,6 +92,11 @@ const dashboardHTML = `<!doctype html>
     <div class="bar" id="bar"><i style="width:0"></i></div>
   </div>
   <div class="card">
+    <div class="label">Ringing</div>
+    <div class="big" id="res">–</div>
+    <div class="sub">dispatched, not yet answered</div>
+  </div>
+  <div class="card">
     <div class="label">Voicemail</div>
     <div class="big" id="vm">–</div>
     <div class="sub">announcement only — no GPU</div>
@@ -99,14 +104,27 @@ const dashboardHTML = `<!doctype html>
   <div class="card">
     <div class="label">Total live</div>
     <div class="big" id="total">–</div>
-    <div class="sub">on GPU + voicemail</div>
+    <div class="sub" id="totalcap">all three states</div>
   </div>
   <div class="card">
     <div class="label">Headroom</div>
     <div class="big" id="head">–</div>
-    <div class="sub">of the GPU ceiling</div>
+    <div class="sub" id="cost">of the GPU ceiling</div>
   </div>
 </div>
+
+<h2>Measured — what this campaign is actually doing</h2>
+<table>
+  <tbody>
+    <tr><td>Answer rate <span class="sub">— reached a live pipeline</span></td>
+        <td class="n" id="ar">–</td></tr>
+    <tr><td>Ring time p95 <span class="sub">— dial to answer</span></td>
+        <td class="n" id="ring">–</td></tr>
+    <tr><td>Cost charged per dispatch <span class="sub">— 1.0 = no over-subscription</span></td>
+        <td class="n" id="weight">–</td></tr>
+    <tr><td>Resolved calls in window</td><td class="n" id="samples">–</td></tr>
+  </tbody>
+</table>
 
 <h2>Tiers — p95 of our own requests</h2>
 <table>
@@ -120,6 +138,8 @@ const dashboardHTML = `<!doctype html>
     <tr><td>Calls</td><td class="n" id="t-calls">–</td></tr>
     <tr><td>Voicemail</td><td class="n" id="t-vm">–</td></tr>
     <tr><td>Refused at capacity</td><td class="n" id="t-rej">–</td></tr>
+    <tr><td>Reaped <span class="sub">— reservations that never resolved</span></td>
+        <td class="n" id="t-reap">–</td></tr>
   </tbody>
 </table>
 
@@ -127,6 +147,8 @@ const dashboardHTML = `<!doctype html>
   Polls <code>/dashboard/data</code> every 2s — the same snapshot <code>/health</code> serves.
   Judge on p95: at 100 concurrent sessions the median stayed near 1.1s while callers heard
   multi-second hangs. Tier thresholds are calibration defaults, not measured values.
+  A ringing call costs capacity because it will need a pipeline unless it turns out to be a
+  machine — that is what stops a fresh campaign dispatching without limit before anything answers.
 </footer>
 
 <script>
@@ -141,6 +163,7 @@ function render(d){
   $("verdict").className = "verdict " + (d.accepting ? "yes" : "no");
 
   $("ongpu").textContent = d.calls.on_gpu;
+  $("res").textContent   = d.calls.reserved;
   $("vm").textContent    = d.calls.voicemail;
   $("total").textContent = d.calls.total;
 
@@ -149,15 +172,29 @@ function render(d){
   if (max > 0){
     $("ceil").textContent = "of " + max + " ceiling";
     $("head").textContent = Math.round(d.capacity.headroom*100) + "%";
-    const used = Math.min(100, Math.round(d.calls.on_gpu / max * 100));
+    // The bar tracks weighted GPU COST, not the raw pipeline count: that is
+    // the number admission actually decides on, and while calls are ringing
+    // it is the only one that reflects what has been committed.
+    $("cost").textContent = "cost " + d.capacity.gpu_cost.toFixed(1) + " of " + max;
+    const used = Math.min(100, Math.round(d.capacity.gpu_cost / max * 100));
     const bar = $("bar");
     bar.className = "bar" + (used >= 90 ? " bad" : used >= 75 ? " warn" : "");
     bar.firstElementChild.style.width = used + "%";
   } else {
     $("ceil").textContent = "no ceiling configured";
     $("head").textContent = "∞";
+    $("cost").textContent = "";
     $("bar").firstElementChild.style.width = "0";
   }
+  $("totalcap").textContent = d.capacity.max_total_calls > 0
+    ? "of " + d.capacity.max_total_calls + " hard cap" : "all three states";
+
+  // Answer rate is meaningless until calls have actually resolved.
+  const meas = d.measured;
+  $("ar").textContent     = meas.samples > 0 ? Math.round(meas.answer_rate*100) + "%" : "—";
+  $("ring").textContent   = meas.ring_ms_p95 > 0 ? fmtMs(meas.ring_ms_p95) : "—";
+  $("weight").textContent = d.capacity.human_weight.toFixed(2);
+  $("samples").textContent = meas.samples;
 
   const order = ["llm","asr","tts"];
   $("tiers").innerHTML = order.filter(k => d.tiers[k]).map(k => {
@@ -174,6 +211,7 @@ function render(d){
   $("t-calls").textContent = d.totals.calls;
   $("t-vm").textContent    = d.totals.voicemail;
   $("t-rej").textContent   = d.totals.rejected;
+  $("t-reap").textContent  = d.totals.reaped;
 }
 
 async function tick(){

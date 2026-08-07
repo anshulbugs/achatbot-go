@@ -229,16 +229,23 @@ func (s *Server) handleWebrtc(w http.ResponseWriter, r *http.Request) {
 // human is on it, so refusing costs a real answered call, whereas an outbound
 // dispatch can simply wait.
 func (s *Server) admit(w http.ResponseWriter, sessionID string) bool {
-	if s.metrics.Accepting() {
+	// Check and reserve in one atomic step. Asking Accepting() and then
+	// reserving separately lets two dispatches arriving together at the
+	// ceiling both see room and both take it — and concurrent arrivals are
+	// most likely exactly when the ceiling matters.
+	if s.metrics.TryReserve(sessionID) {
 		return true
 	}
-	s.metrics.RejectedAtCapacity()
 	snap := s.metrics.Snapshot()
-	log.Printf("rexa: at capacity, refusing session=%s (on_gpu=%d/%d tiers=%v)",
-		sessionID, snap.Calls.OnGPU, snap.Capacity.MaxGPUCalls, tierStates(snap))
+	log.Printf("rexa: at capacity, refusing session=%s (reserved=%d on_gpu=%d voicemail=%d "+
+		"gpu_cost=%.1f/%d total=%d/%d tiers=%v)",
+		sessionID, snap.Calls.Reserved, snap.Calls.OnGPU, snap.Calls.Voicemail,
+		snap.Capacity.GPUCost, snap.Capacity.MaxGPUCalls,
+		snap.Calls.Total, snap.Capacity.MaxTotalCalls, tierStates(snap))
 	writeErr(w, Errorf(ErrCodeAtCapacity,
-		"agent at capacity: %d of %d GPU calls in flight",
-		snap.Calls.OnGPU, snap.Capacity.MaxGPUCalls))
+		"agent at capacity: gpu cost %.1f of %d, %d of %d calls in flight",
+		snap.Capacity.GPUCost, snap.Capacity.MaxGPUCalls,
+		snap.Calls.Total, snap.Capacity.MaxTotalCalls))
 	return false
 }
 

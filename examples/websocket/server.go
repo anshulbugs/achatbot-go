@@ -608,6 +608,10 @@ type sessionConfig struct {
 	// chatObserver receives every chat turn as it is appended, for the
 	// platform's end-of-call transcript. nil on the demo path.
 	chatObserver func(map[string]any)
+	// callID is the carrier call-control id, used to move this call's capacity
+	// state to on_gpu. Empty for browser sessions, which hold pool slots but
+	// are not part of the platform's call accounting.
+	callID string
 }
 
 // voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
@@ -717,12 +721,14 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	}
 
 	chatHistorySize := cfg.Server.ChatHistorySize
-	// A pipeline session is exactly what the GPU-call ceiling counts: it holds
-	// a VAD, an ASR and a TTS slot for its whole life. Bracketed here rather
-	// than at dispatch so a call that never reaches a pipeline — voicemail,
-	// no-answer, a dial that fails — never counts against capacity.
-	gpuCallStarted()
-	defer gpuCallEnded()
+	// Promote this call from `reserved` to `on_gpu`: the pipeline is about to
+	// hold a VAD, an ASR and a TTS slot for its whole life. Release is driven
+	// by the carrier's hangup rather than by this function returning, since a
+	// call ends for the platform when the CALL ends, not when our media
+	// session does. Empty clientID (browser sessions) is not tracked.
+	if sc.callID != "" {
+		markOnGPU(sc.callID)
+	}
 
 	session := common.NewSession(sc.clientID, &chatHistorySize)
 	// Capture every turn for the end-of-call transcript. This has to observe

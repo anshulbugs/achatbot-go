@@ -116,6 +116,23 @@ type ServerConfig struct {
 	// whenever the model, prompt size or GPU layout changes — it is specific
 	// to all three.
 	MaxGPUCalls int `mapstructure:"max_gpu_calls"`
+	// MaxTotalCalls is the absolute in-flight ceiling, counting calls that
+	// cost no GPU at all. It stands in for the limits our own counters cannot
+	// see -- the carrier's concurrent channel cap, CPU for hundreds of media
+	// streams, TTS renders at dispatch -- and no capacity estimate may argue
+	// past it. 0 = unlimited.
+	MaxTotalCalls int `mapstructure:"max_total_calls"`
+	// HumanAnswerWeight is the expected GPU cost of one dispatched call: the
+	// fraction that reach a live pipeline rather than an answering machine,
+	// a no-answer or a busy.
+	//
+	// 1.0 (default) charges every dispatch a full pipeline slot -- safe, and
+	// under-utilises when most calls hit voicemail. 0 switches to the MEASURED
+	// rate from recent outcomes. Only move off 1.0 once a real campaign has
+	// supplied the number: the estimator looks backwards, so a shift in list
+	// quality or time of day can leave hundreds already dispatched when the
+	// answer rate jumps.
+	HumanAnswerWeight float64 `mapstructure:"human_answer_weight"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -262,6 +279,8 @@ func setDefaults(v *viper.Viper) {
 	// default or the config file when Unmarshal runs, so a key present in
 	// neither is silently invisible to the environment. 0 = unlimited.
 	v.SetDefault("server.max_gpu_calls", 0)
+	v.SetDefault("server.max_total_calls", 0)
+	v.SetDefault("server.human_answer_weight", 1.0)
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)

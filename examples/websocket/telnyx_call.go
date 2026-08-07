@@ -409,6 +409,8 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		calls.markAnswered(id, time.Now())
+		// Ring time = dial to answer, for the reservation-cost estimate.
+		markAnswered(id)
 		if cfg.Server.RecordCalls {
 			go func() {
 				if err := p.tc().RecordStart(context.Background(), id); err != nil {
@@ -463,6 +465,11 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// the platform most needs to hear about.
 		calls.recordHangup(id, ev.Data.Payload.HangupCause)
 		reportCallEnded(id)
+		// Release capacity here, on the carrier's lifecycle, for the same
+		// reason the report is emitted here: a no-answer or a busy never
+		// reaches a pipeline, so nothing downstream would ever give the slot
+		// back.
+		releaseCall(id)
 		calls.del(id)
 	}
 }
@@ -707,13 +714,12 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWriter, ser *telnyx.Serializer,
 	rate int, p *callParams, beep <-chan string) {
 
-	// Counted separately from GPU calls throughout: this path holds no pool
-	// slots at all — the greeting was cut, the pipeline never started, and the
-	// message plays from the announcement cache. A campaign hitting 40%
-	// answering machines therefore has far more real headroom than its raw
-	// call count suggests, and the ceiling must not be spent on these.
-	voicemailStarted()
-	defer voicemailEnded()
+	// Release this call's GPU capacity: the greeting was cut, the pipeline
+	// never started, and the message plays from the announcement cache, so it
+	// holds no pool slots. It stays counted against the TOTAL in-flight
+	// ceiling, because a voicemail still costs a carrier channel, a media
+	// stream and the CPU to play audio down it.
+	markVoicemail(id)
 
 	// Flush whatever of the greeting Telnyx still has buffered, so the message
 	// does not trail the interrupted hello.
@@ -852,6 +858,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 
 	runVoiceSession(conn, ser, sessionConfig{
 		clientID:           "telnyx_" + id,
+		callID:             id,
 		chatObserver:       chatObserver,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,

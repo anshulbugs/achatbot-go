@@ -391,8 +391,8 @@ func TestAtCapacityRejectsDispatch(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	m.CallStarted()
-	m.CallStarted() // at the ceiling
+	m.TryReserve("held-1")
+	m.TryReserve("held-2") // at the ceiling
 
 	resp := post(t, srv, "/connection", validPhone)
 	defer resp.Body.Close()
@@ -412,7 +412,7 @@ func TestAtCapacityRejectsDispatch(t *testing.T) {
 	}
 
 	// Freeing a slot must resume acceptance.
-	m.CallEnded()
+	m.Release("held-1")
 	resp2 := post(t, srv, "/connection", validPhone)
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
@@ -431,7 +431,7 @@ func TestIncomingNotRejectedAtCapacity(t *testing.T) {
 	s.Routes(mux)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	m.CallStarted() // at the ceiling
+	m.TryReserve("held-1") // at the ceiling
 
 	body := `{"CCID":"v3:abc","session_id":"s","tenant_id":"t",
 	          "from_number":"+15551112222","to_number":"+15553334444",
@@ -457,9 +457,12 @@ func TestHealthCarriesCapacityButStays200WhenFull(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	m.CallStarted()
-	m.CallStarted()
-	m.VoicemailStarted()
+	m.TryReserve("gpu-1")
+	m.MarkOnGPU("gpu-1")
+	m.TryReserve("gpu-2")
+	m.MarkOnGPU("gpu-2")
+	m.Track("vm-1")
+	m.MarkVoicemail("vm-1")
 
 	resp, err := srv.Client().Get(srv.URL + "/health")
 	if err != nil {

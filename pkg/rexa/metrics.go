@@ -145,48 +145,148 @@ func (w *tierWindow) state() string {
 	}
 }
 
+// Call lifecycle states. A call is in exactly one at a time.
+//
+// The distinction that matters for capacity is reserved-vs-on_gpu. A dispatch
+// is accepted the moment the carrier takes the dial, but the pipeline does not
+// start until the call is ANSWERED and the media stream connects — up to the
+// 30-second dial timeout later. Counting only live pipelines therefore reports
+// zero load for the entire ring period, and a caller dispatching against that
+// number can push hundreds of calls before the first one registers.
+//
+// So a dispatched call reserves its slot immediately and is reclassified as we
+// learn what it actually became.
+const (
+	// StateReserved: dispatch accepted, dialing or ringing. Counts against
+	// capacity — we must assume it will need a pipeline until proven otherwise.
+	StateReserved = "reserved"
+	// StateOnGPU: pipeline running, holding VAD/ASR/TTS slots.
+	StateOnGPU = "on_gpu"
+	// StateVoicemail: a machine answered. With AMD enabled the pipeline never
+	// starts — the greeting plays from the announcement cache and the verdict
+	// arrives before runVoiceSession is reached — so these hold no pool slots
+	// and are released from capacity.
+	StateVoicemail = "voicemail"
+)
+
+// reservationTTL bounds how long a call may sit in StateReserved before the
+// reaper force-releases it.
+//
+// This exists because a leaked reservation permanently reduces capacity: if a
+// dispatch is accepted and no hangup ever arrives — carrier glitch, lost
+// webhook, a process that missed the event — that slot is gone until restart.
+// Leak enough and the agent silently stops accepting work while reporting
+// itself healthy, which is strictly worse than the lag it was introduced to
+// fix. Set above the 30 s dial timeout so a legitimately long ring is never
+// reaped out from under a live call.
+const reservationTTL = 75 * time.Second
+
+// outcomeWindowSize is how many resolved calls the answer-rate estimate looks
+// back over. Short enough to track the current campaign rather than a lifetime
+// average, long enough not to swing on a handful of calls.
+const outcomeWindowSize = 200
+
+// liveCall is one in-flight call's state.
+type liveCall struct {
+	state        string
+	dispatchedAt time.Time
+	answeredAt   time.Time // zero until the carrier reports an answer
+}
+
 // Metrics is the live view of what this agent is doing and how well.
 //
-// Safe for concurrent use: counters move on call goroutines, latency samples
-// arrive on HTTP transport goroutines, and snapshots are read by the health
-// handler and the dashboard.
+// Safe for concurrent use: state changes arrive on call and webhook
+// goroutines, latency samples on HTTP transport goroutines, and snapshots are
+// read by the health handler and the dashboard.
 type Metrics struct {
 	mu sync.RWMutex
 
-	// onGPU counts calls currently holding a VAD/ASR/TTS pipeline.
-	onGPU int
-	// voicemail counts calls playing a pre-rendered announcement to an
-	// answering machine. These hold NO pool slots — once AMD returns a machine
-	// verdict the pipeline is released and the message is played from cache —
-	// so they must not count against GPU capacity. A campaign hitting 40%
-	// answering machines has far more real headroom than its call count
-	// suggests.
-	voicemail int
+	// calls is every in-flight call keyed by carrier call id (or session id
+	// before one exists). Counts are DERIVED from this map rather than kept
+	// alongside it — parallel counters and a map inevitably drift, and a
+	// capacity counter that drifts high refuses work forever.
+	calls map[string]*liveCall
 
-	// maxGPUCalls is the concurrency ceiling. Configured, never derived: 61
-	// came from one ramp on one GPU layout with one prompt size, and has to be
-	// remeasured whenever the model, prompt or hardware changes.
+	// maxGPUCalls is the pipeline ceiling. Configured, never derived: 61 came
+	// from one ramp on one GPU layout with one prompt size.
 	maxGPUCalls int
+	// maxTotalCalls is the absolute in-flight ceiling regardless of what the
+	// GPU-cost estimate allows. It stands in for the limits our counters
+	// cannot see — the carrier's concurrent channel cap, CPU for hundreds of
+	// media streams, TTS renders at dispatch time — and is the number no
+	// amount of optimism may exceed. 0 = unlimited.
+	maxTotalCalls int
+
+	// humanWeight is the expected GPU cost of one reservation: the fraction of
+	// dispatches that become live pipelines. At 1.0 every reservation costs a
+	// full slot (safe, under-utilises). Lower values over-subscribe on the
+	// basis that most calls reach an answering machine and never take a slot.
+	//
+	// Pinned at 1.0 until a real campaign supplies the measurement.
+	humanWeight float64
+	// minHumanWeight floors the weight when it is computed rather than pinned,
+	// so a freak run of voicemails cannot authorise an unbounded dispatch
+	// burst on the strength of a lucky sample.
+	minHumanWeight float64
 
 	tiers map[string]*tierWindow
 
-	// draining is set during shutdown so the platform stops routing new calls
-	// here while those already running finish.
 	draining bool
 
-	// totals are cumulative for the dashboard.
+	// outcomes is a ring of recent resolutions (true = became a live
+	// pipeline), for the measured answer rate.
+	outcomes    [outcomeWindowSize]bool
+	outcomeNext int
+	outcomeLen  int
+
+	// ringMs is a ring of measured dial-to-answer times.
+	ringWindow tierWindow
+
 	totalCalls     int64
 	totalVoicemail int64
 	totalRejected  int64
+	totalReaped    int64
 }
 
 // NewMetrics builds a registry with the given GPU-call ceiling.
 func NewMetrics(maxGPUCalls int) *Metrics {
-	m := &Metrics{maxGPUCalls: maxGPUCalls, tiers: map[string]*tierWindow{}}
+	m := &Metrics{
+		calls:       map[string]*liveCall{},
+		maxGPUCalls: maxGPUCalls,
+		tiers:       map[string]*tierWindow{},
+		// Full weight by default: assume every dispatch will need a pipeline
+		// until measurement says otherwise. Over-subscribing by default would
+		// mean the safe configuration is the one you have to remember to set.
+		humanWeight:    1.0,
+		minHumanWeight: 0.15,
+	}
 	for _, t := range []string{TierLLM, TierASR, TierTTS} {
 		m.tiers[t] = &tierWindow{th: DefaultThresholds(t)}
 	}
 	return m
+}
+
+// SetMaxTotalCalls sets the absolute in-flight ceiling. 0 = unlimited.
+func (m *Metrics) SetMaxTotalCalls(n int) {
+	m.mu.Lock()
+	m.maxTotalCalls = n
+	m.mu.Unlock()
+}
+
+// SetHumanWeight pins the expected GPU cost per reservation, 0 < w <= 1.
+//
+// Passing 0 switches to the MEASURED rate from recent outcomes, floored at
+// minHumanWeight. Measured mode is only safe once a campaign has run: the
+// estimator looks backwards, so a regime change — a different segment, a
+// different hour — can leave hundreds already dispatched when the answer rate
+// jumps.
+func (m *Metrics) SetHumanWeight(w float64) {
+	m.mu.Lock()
+	if w > 1 {
+		w = 1
+	}
+	m.humanWeight = w
+	m.mu.Unlock()
 }
 
 // SetThresholds overrides a tier's degraded/saturated latencies.
@@ -198,46 +298,191 @@ func (m *Metrics) SetThresholds(tier string, th TierThresholds) {
 	}
 }
 
-// CallStarted records a call taking a pipeline. Pair with CallEnded.
-func (m *Metrics) CallStarted() {
+// countsLocked derives the per-state counts. Callers must hold the lock.
+func (m *Metrics) countsLocked() (reserved, onGPU, voicemail int) {
+	for _, c := range m.calls {
+		switch c.state {
+		case StateReserved:
+			reserved++
+		case StateOnGPU:
+			onGPU++
+		case StateVoicemail:
+			voicemail++
+		}
+	}
+	return
+}
+
+// weightLocked is the current expected GPU cost of one reservation.
+func (m *Metrics) weightLocked() float64 {
+	if m.humanWeight > 0 {
+		return m.humanWeight
+	}
+	// Measured mode: fall back to full weight until there is enough history
+	// to estimate from, so a cold start is never optimistic.
+	if m.outcomeLen < 20 {
+		return 1.0
+	}
+	live := 0
+	for i := 0; i < m.outcomeLen; i++ {
+		if m.outcomes[i] {
+			live++
+		}
+	}
+	w := float64(live) / float64(m.outcomeLen)
+	if w < m.minHumanWeight {
+		w = m.minHumanWeight
+	}
+	return w
+}
+
+// TryReserve atomically checks capacity and, if there is room, reserves a slot
+// for id. Returns false when the dispatch must be refused.
+//
+// Check and reserve are ONE operation under one lock. Splitting them lets two
+// dispatches arriving together at the ceiling both observe room and both take
+// it — a check-then-act race that puts you one over every time it happens, and
+// more under load, which is exactly when it matters.
+func (m *Metrics) TryReserve(id string) bool {
 	m.mu.Lock()
-	m.onGPU++
+	defer m.mu.Unlock()
+	if !m.acceptingLocked() {
+		m.totalRejected++
+		return false
+	}
+	// A repeated id is the platform retrying the same logical dispatch; it
+	// must not consume a second slot.
+	if _, exists := m.calls[id]; exists {
+		return true
+	}
+	m.calls[id] = &liveCall{state: StateReserved, dispatchedAt: time.Now()}
 	m.totalCalls++
-	m.mu.Unlock()
+	return true
 }
 
-// CallEnded releases a pipeline call.
-func (m *Metrics) CallEnded() {
+// Track registers a call that bypasses admission but must still be counted.
+//
+// Inbound calls take this path: the carrier leg is already ringing with a
+// human on it, so refusing costs a real answered call. Counting them anyway is
+// what makes inbound load reduce the outbound allowance rather than silently
+// exceeding the ceiling.
+func (m *Metrics) Track(id string) {
 	m.mu.Lock()
-	if m.onGPU > 0 {
-		m.onGPU--
+	defer m.mu.Unlock()
+	if _, exists := m.calls[id]; exists {
+		return
 	}
-	m.mu.Unlock()
+	m.calls[id] = &liveCall{state: StateReserved, dispatchedAt: time.Now()}
+	m.totalCalls++
 }
 
-// VoicemailStarted records a call that reached an answering machine and is
-// playing a cached announcement without a pipeline.
-func (m *Metrics) VoicemailStarted() {
-	m.mu.Lock()
-	m.voicemail++
-	m.totalVoicemail++
-	m.mu.Unlock()
-}
-
-// VoicemailEnded releases a voicemail call.
-func (m *Metrics) VoicemailEnded() {
-	m.mu.Lock()
-	if m.voicemail > 0 {
-		m.voicemail--
+// Rekey moves a tracked call from one id to another, preserving its state and
+// timings.
+//
+// Admission happens before the carrier has given us anything to call the call
+// by, so the slot is reserved under the platform's session_id and re-keyed to
+// the carrier's call-control id once Dial returns. Every later transition
+// arrives from a carrier webhook and knows only that id.
+func (m *Metrics) Rekey(oldID, newID string) {
+	if oldID == newID {
+		return
 	}
-	m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.calls[oldID]
+	if c == nil {
+		return
+	}
+	delete(m.calls, oldID)
+	m.calls[newID] = c
 }
 
-// RejectedAtCapacity counts a dispatch we turned away.
-func (m *Metrics) RejectedAtCapacity() {
+// MarkAnswered records the dial-to-answer time, for the ring-time estimate.
+func (m *Metrics) MarkAnswered(id string) {
 	m.mu.Lock()
-	m.totalRejected++
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	if c := m.calls[id]; c != nil && c.answeredAt.IsZero() {
+		c.answeredAt = time.Now()
+		if !c.dispatchedAt.IsZero() {
+			m.ringWindow.add(float64(c.answeredAt.Sub(c.dispatchedAt).Milliseconds()))
+		}
+	}
+}
+
+// MarkOnGPU promotes a reservation to a live pipeline.
+//
+// Idempotent, and it does NOT create an entry for an unknown id: a pipeline
+// with no reservation means the call arrived by a path that never reserved
+// (the demo server), and inventing capacity for it here would let that path
+// quietly consume the contract's ceiling.
+func (m *Metrics) MarkOnGPU(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c := m.calls[id]; c != nil {
+		c.state = StateOnGPU
+	}
+}
+
+// MarkVoicemail reclassifies a call as an answering machine, releasing its
+// GPU capacity while keeping it counted against the total in-flight ceiling.
+func (m *Metrics) MarkVoicemail(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c := m.calls[id]; c != nil && c.state != StateVoicemail {
+		c.state = StateVoicemail
+		m.totalVoicemail++
+	}
+}
+
+// Release ends a call and records what it became, for the answer-rate
+// estimate. Safe to call more than once and for ids that were never tracked —
+// call.hangup can arrive twice, and the demo path never reserves.
+func (m *Metrics) Release(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.calls[id]
+	if c == nil {
+		return
+	}
+	// Only calls that actually reached a pipeline count as "human" for the
+	// weighting. A reservation that ended without answering is a no-answer or
+	// a busy — it cost no GPU, so it belongs on the cheap side of the ratio.
+	m.recordOutcomeLocked(c.state == StateOnGPU)
+	delete(m.calls, id)
+}
+
+func (m *Metrics) recordOutcomeLocked(becameLive bool) {
+	m.outcomes[m.outcomeNext] = becameLive
+	m.outcomeNext = (m.outcomeNext + 1) % outcomeWindowSize
+	if m.outcomeLen < outcomeWindowSize {
+		m.outcomeLen++
+	}
+}
+
+// ReapStale force-releases reservations that never resolved, returning how
+// many it dropped.
+//
+// Without this a lost hangup webhook removes a slot permanently. Only
+// StateReserved is reaped: a call on GPU is released by runVoiceSession's
+// deferred call, which runs whatever happens, and a voicemail call is bounded
+// by its own announcement.
+func (m *Metrics) ReapStale() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := time.Now().Add(-reservationTTL)
+	n := 0
+	for id, c := range m.calls {
+		if c.state == StateReserved && c.dispatchedAt.Before(cutoff) {
+			// Reaped reservations are NOT recorded as outcomes: we never
+			// learned what they became, and feeding guesses to the answer-rate
+			// estimator would bias the weighting on exactly the calls we
+			// understand least.
+			delete(m.calls, id)
+			m.totalReaped++
+			n++
+		}
+	}
+	return n
 }
 
 // Observe records one downstream request's latency against a tier.
@@ -276,19 +521,41 @@ func (m *Metrics) acceptingLocked() bool {
 	if m.draining {
 		return false
 	}
+	reserved, onGPU, voicemail := m.countsLocked()
+
+	// The absolute ceiling comes first: it stands in for the limits our
+	// counters cannot see (carrier channels, CPU for hundreds of media
+	// streams) and no estimate may argue past it.
+	if m.maxTotalCalls > 0 && reserved+onGPU+voicemail >= m.maxTotalCalls {
+		return false
+	}
+
 	// A ceiling of zero or less means UNLIMITED, not "refuse everything".
 	// Getting this backwards makes an unconfigured registry reject every
 	// dispatch while reporting itself healthy — which is exactly what the
 	// demo path and the tests would get by default.
-	if m.maxGPUCalls > 0 && m.onGPU >= m.maxGPUCalls {
+	if m.maxGPUCalls > 0 && m.gpuCostLocked(reserved, onGPU) >= float64(m.maxGPUCalls) {
 		return false
 	}
+
 	for _, w := range m.tiers {
 		if w.state() == TierSaturated {
 			return false
 		}
 	}
 	return true
+}
+
+// gpuCostLocked is the expected pipeline load: every live pipeline at full
+// cost, plus each reservation weighted by how likely it is to become one.
+//
+// Weighting is what lets a voicemail-heavy campaign run far more calls than
+// the pipeline ceiling. At a 10% answer rate a reservation costs a tenth of a
+// slot, so ~610 in-flight dispatches equal 61 pipelines — but the total
+// ceiling still caps it, because that arithmetic ignores everything a
+// voicemail call DOES cost.
+func (m *Metrics) gpuCostLocked(reserved, onGPU int) float64 {
+	return float64(onGPU) + float64(reserved)*m.weightLocked()
 }
 
 // TierSnapshot is one tier's public view.
@@ -299,18 +566,41 @@ type TierSnapshot struct {
 	Samples int `json:"samples"`
 }
 
-// CallsSnapshot separates pipeline calls from announcement-only calls.
+// CallsSnapshot separates the three in-flight states.
 type CallsSnapshot struct {
-	Total     int `json:"total"`
+	Total int `json:"total"`
+	// Reserved: dispatched and ringing. Counts against capacity because it
+	// will need a pipeline unless it turns out to be a machine.
+	Reserved  int `json:"reserved"`
 	OnGPU     int `json:"on_gpu"`
 	Voicemail int `json:"voicemail"`
 }
 
 // CapacitySnapshot is the headroom view.
 type CapacitySnapshot struct {
-	MaxGPUCalls int `json:"max_gpu_calls"`
+	MaxGPUCalls   int `json:"max_gpu_calls"`
+	MaxTotalCalls int `json:"max_total_calls"`
+	// GPUCost is the weighted pipeline load: live pipelines plus reservations
+	// discounted by how many are expected to become pipelines.
+	GPUCost float64 `json:"gpu_cost"`
+	// HumanWeight is the cost currently charged per reservation. 1.0 means
+	// every dispatch is assumed to need a slot.
+	HumanWeight float64 `json:"human_weight"`
 	// Headroom is the fraction of the GPU-call ceiling still free, 0..1.
 	Headroom float64 `json:"headroom"`
+}
+
+// MeasuredSnapshot is what the campaign is actually doing — the numbers you
+// need before over-subscription can be tuned from data rather than guessed.
+type MeasuredSnapshot struct {
+	// AnswerRate is the fraction of resolved calls that became live
+	// pipelines: humans who picked up. Machines, no-answers and busies are
+	// all on the cheap side.
+	AnswerRate float64 `json:"answer_rate"`
+	// RingMsP95 is dial-to-answer time. Long rings are why reservations
+	// dominate in-flight counts on a fresh campaign.
+	RingMsP95 int `json:"ring_ms_p95"`
+	Samples   int `json:"samples"`
 }
 
 // TotalsSnapshot is cumulative since process start, for the dashboard.
@@ -318,6 +608,10 @@ type TotalsSnapshot struct {
 	Calls     int64 `json:"calls"`
 	Voicemail int64 `json:"voicemail"`
 	Rejected  int64 `json:"rejected"`
+	// Reaped counts reservations force-released after never resolving. Any
+	// non-zero value means hangup events are being missed; a persistently
+	// climbing one means capacity would have leaked away without the reaper.
+	Reaped int64 `json:"reaped"`
 }
 
 // HealthSnapshot is the body of GET /health.
@@ -331,6 +625,7 @@ type HealthSnapshot struct {
 	Accepting bool                    `json:"accepting"`
 	Calls     CallsSnapshot           `json:"calls"`
 	Capacity  CapacitySnapshot        `json:"capacity"`
+	Measured  MeasuredSnapshot        `json:"measured"`
 	Tiers     map[string]TierSnapshot `json:"tiers"`
 	Totals    TotalsSnapshot          `json:"totals"`
 }
@@ -348,27 +643,58 @@ func (m *Metrics) Snapshot() HealthSnapshot {
 			Samples: w.filled,
 		}
 	}
+
+	reserved, onGPU, voicemail := m.countsLocked()
+	cost := m.gpuCostLocked(reserved, onGPU)
 	headroom := 0.0
 	if m.maxGPUCalls > 0 {
-		headroom = float64(m.maxGPUCalls-m.onGPU) / float64(m.maxGPUCalls)
+		headroom = (float64(m.maxGPUCalls) - cost) / float64(m.maxGPUCalls)
 		if headroom < 0 {
 			headroom = 0
 		}
 	}
+
+	// Answer rate over resolved calls. Reported separately from the weight in
+	// use, so pinning the weight at 1.0 while watching the real rate is
+	// exactly the calibration workflow.
+	answerRate := 0.0
+	if m.outcomeLen > 0 {
+		live := 0
+		for i := 0; i < m.outcomeLen; i++ {
+			if m.outcomes[i] {
+				live++
+			}
+		}
+		answerRate = float64(live) / float64(m.outcomeLen)
+	}
+
 	return HealthSnapshot{
 		// status stays true while draining: the process is alive and finishing
 		// its calls. `accepting` is the field that says stop sending work.
 		Status:    !m.draining,
 		Accepting: m.acceptingLocked(),
 		Calls: CallsSnapshot{
-			Total:     m.onGPU + m.voicemail,
-			OnGPU:     m.onGPU,
-			Voicemail: m.voicemail,
+			Total:     reserved + onGPU + voicemail,
+			Reserved:  reserved,
+			OnGPU:     onGPU,
+			Voicemail: voicemail,
 		},
-		Capacity: CapacitySnapshot{MaxGPUCalls: m.maxGPUCalls, Headroom: headroom},
-		Tiers:    tiers,
+		Capacity: CapacitySnapshot{
+			MaxGPUCalls:   m.maxGPUCalls,
+			MaxTotalCalls: m.maxTotalCalls,
+			GPUCost:       cost,
+			HumanWeight:   m.weightLocked(),
+			Headroom:      headroom,
+		},
+		Measured: MeasuredSnapshot{
+			AnswerRate: answerRate,
+			RingMsP95:  int(m.ringWindow.p95()),
+			Samples:    m.outcomeLen,
+		},
+		Tiers: tiers,
 		Totals: TotalsSnapshot{
-			Calls: m.totalCalls, Voicemail: m.totalVoicemail, Rejected: m.totalRejected,
+			Calls: m.totalCalls, Voicemail: m.totalVoicemail,
+			Rejected: m.totalRejected, Reaped: m.totalReaped,
 		},
 	}
 }

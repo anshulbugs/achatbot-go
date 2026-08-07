@@ -39,28 +39,39 @@ var rexaVoices *rexa.VoiceResolver
 // runs with it unset.
 var rexaMetrics *rexa.Metrics
 
-// gpuCallStarted / gpuCallEnded bracket a call that holds a pipeline.
-// Voicemail calls use the voicemail pair instead: once AMD returns a machine
-// verdict the pipeline is released and the message plays from cache, so they
-// consume no GPU capacity and must not count against the ceiling.
-func gpuCallStarted() {
+// Capacity transitions, all no-ops when the contract is not configured.
+//
+// A call is reserved at dispatch (admission), promoted to on_gpu when its
+// pipeline starts, reclassified to voicemail if a machine answered, and
+// released on hangup. Only the reserved and on_gpu states cost GPU capacity.
+
+// markOnGPU promotes a call to a live pipeline. Keyed by carrier call id.
+func markOnGPU(callID string) {
 	if rexaMetrics != nil {
-		rexaMetrics.CallStarted()
+		rexaMetrics.MarkOnGPU(callID)
 	}
 }
-func gpuCallEnded() {
+
+// markVoicemail releases a call's GPU capacity: with AMD enabled the pipeline
+// never started, so it holds no pool slots and only the announcement remains.
+func markVoicemail(callID string) {
 	if rexaMetrics != nil {
-		rexaMetrics.CallEnded()
+		rexaMetrics.MarkVoicemail(callID)
 	}
 }
-func voicemailStarted() {
+
+// releaseCall ends a call and records what it became for the answer-rate
+// estimate. Safe for untracked ids, so the demo path can call it freely.
+func releaseCall(callID string) {
 	if rexaMetrics != nil {
-		rexaMetrics.VoicemailStarted()
+		rexaMetrics.Release(callID)
 	}
 }
-func voicemailEnded() {
+
+// markAnswered records dial-to-answer time for the ring-time estimate.
+func markAnswered(callID string) {
 	if rexaMetrics != nil {
-		rexaMetrics.VoicemailEnded()
+		rexaMetrics.MarkAnswered(callID)
 	}
 }
 
@@ -85,6 +96,20 @@ func initRexaTelemetry() {
 		return
 	}
 	rexaMetrics = rexa.NewMetrics(cfg.Server.MaxGPUCalls)
+	rexaMetrics.SetMaxTotalCalls(cfg.Server.MaxTotalCalls)
+	rexaMetrics.SetHumanWeight(cfg.Server.HumanAnswerWeight)
+
+	// Reap leaked reservations. Without this a lost hangup webhook removes a
+	// slot permanently, and enough of them silently stop the agent accepting
+	// work while it still reports itself healthy — strictly worse than the
+	// dispatch-vs-pipeline lag reservations were introduced to fix.
+	go func() {
+		for range time.Tick(15 * time.Second) {
+			if n := rexaMetrics.ReapStale(); n > 0 {
+				log.Printf("rexa: reaped %d stale reservation(s) — hangup events are being missed", n)
+			}
+		}
+	}()
 	// Timing the transport measures true wire latency — what the caller
 	// actually waits for — rather than inferring load from GPU utilisation,
 	// and the providers never learn that metrics exist.
@@ -158,10 +183,19 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 		// The call never rang, so nothing downstream will ever emit a report
 		// for it. Report the failure here or the platform waits 30 minutes and
 		// marks the session failed with no detail.
+		// The slot was reserved at admission; the call never rang, so give it
+		// back rather than waiting for the reaper.
+		releaseCall(req.SessionID)
 		d.reportDispatchFailure(req.SessionID, req.TenantID, req.WebhookURL, "outbound")
 		return rexa.DispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable, "dial failed: %v", err)
 	}
 
+	// Admission reserved under session_id because the carrier had not yet
+	// named the call. Every later transition arrives from a webhook that knows
+	// only the call-control id.
+	if rexaMetrics != nil {
+		rexaMetrics.Rekey(req.SessionID, callControlID)
+	}
 	calls.put(callControlID, p)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
 	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: callControlID}, nil
@@ -206,9 +240,17 @@ func (d *platformDispatcher) DispatchIncoming(ctx context.Context, req rexa.Inco
 	// Register BEFORE answering: the carrier can deliver call.answered before
 	// Answer() returns, and an unregistered call is dropped on the floor.
 	calls.put(req.CCID, p)
+	// Counted, never refused. The leg is already ringing with a human on it,
+	// so refusing costs a real answered call — but counting it is what makes
+	// inbound load reduce the outbound allowance instead of silently
+	// exceeding the ceiling.
+	if rexaMetrics != nil {
+		rexaMetrics.Track(req.CCID)
+	}
 
 	if err := client.Answer(ctx, req.CCID); err != nil {
 		calls.del(req.CCID)
+		releaseCall(req.CCID)
 		log.Printf("rexa: session=%s answer failed: %v", req.SessionID, err)
 		d.reportDispatchFailure(req.SessionID, req.TenantID, req.WebhookURL, "inbound")
 		return rexa.DispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable, "answer failed: %v", err)
