@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"sync/atomic"
 )
 
 // MaxBodyBytes bounds an inbound dispatch body.
@@ -81,21 +80,27 @@ func statusFor(code string) int {
 type Server struct {
 	verifier   *Verifier
 	dispatcher Dispatcher
-	// draining flips to true on shutdown so /health reports false and the
-	// platform's load balancer stops routing new calls here, while calls
-	// already in flight run to completion.
-	draining atomic.Bool
+	metrics    *Metrics
 }
 
 // NewServer builds the dispatch surface. secret is the platform's OUTBOUND
 // secret — the one it signs dispatches with, which we verify. Signing our
 // callbacks uses the other one; see NewPoster.
-func NewServer(secret string, nonces NonceStore, d Dispatcher) *Server {
-	return &Server{verifier: NewVerifier(secret, nonces), dispatcher: d}
+//
+// A nil metrics registry is replaced with one that has no ceiling, so tests
+// and demo-only deployments need not supply one.
+func NewServer(secret string, nonces NonceStore, d Dispatcher, m *Metrics) *Server {
+	if m == nil {
+		m = NewMetrics(0)
+	}
+	return &Server{verifier: NewVerifier(secret, nonces), dispatcher: d, metrics: m}
 }
 
-// Drain makes /health report false. Calls already running are unaffected.
-func (s *Server) Drain() { s.draining.Store(true) }
+// Metrics exposes the registry so callers can instrument their call paths.
+func (s *Server) Metrics() *Metrics { return s.metrics }
+
+// Drain takes the agent out of rotation. Calls already running are unaffected.
+func (s *Server) Drain() { s.metrics.SetDraining(true) }
 
 // Routes registers the contract endpoints on mux.
 //
@@ -110,16 +115,26 @@ func (s *Server) Routes(mux *http.ServeMux) {
 }
 
 // handleHealth is the load-balancer liveness probe: unauthenticated, and
-// deliberately free of dependency checks. A deep readiness probe would couple
-// our health to downstream systems we do not own, so a slow LLM would take the
-// whole agent out of rotation instead of merely slowing calls down.
+// deliberately free of dependency checks. Every number comes from in-process
+// counters — a probe that fanned out to SGLang, Parakeet and Kokoro would take
+// the agent out of rotation whenever one was merely slow, turning a latency
+// blip into an outage. The platform hits this every 5 s across the fleet.
+//
+// The response is a superset of the v1 contract's `{status}`. The platform's
+// Zod schema is a plain object, which strips unknown keys rather than
+// rejecting them, so the extra fields are safe to serve before it reads them.
+//
+// The HTTP status still reflects liveness only, NOT capacity: a full agent is
+// healthy, just busy. Reporting 503 when merely at capacity would make the
+// platform's load balancer mark the URL unhealthy and stop probing it
+// normally, when all we wanted was backpressure — which `accepting` carries.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	live := !s.draining.Load()
+	snap := s.metrics.Snapshot()
 	status := http.StatusOK
-	if !live {
+	if !snap.Status {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, HealthResponse{Status: live})
+	writeJSON(w, status, snap)
 }
 
 func (s *Server) handlePhone(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +152,9 @@ func (s *Server) handlePhone(w http.ResponseWriter, r *http.Request) {
 		"webhook_url":   req.WebhookURL,
 	}); missing != "" {
 		writeErr(w, Errorf(ErrCodeInvalidRequest, "missing required field: %s", missing))
+		return
+	}
+	if !s.admit(w, req.SessionID) {
 		return
 	}
 	resp, err := s.dispatcher.DispatchPhone(r.Context(), req)
@@ -194,6 +212,43 @@ func (s *Server) handleWebrtc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// admit applies backpressure, writing the error response itself and reporting
+// whether the caller may proceed.
+//
+// Nothing else caps concurrency: the provider pools pre-warm instances but
+// create more on demand rather than blocking, so without this the 62nd call is
+// accepted and every caller's p95 degrades together. The measured cliff is
+// sharp — 60 concurrent sessions held p95 at 1628 ms with zero dropped audio
+// writes, while 100 produced 6244 ms and 234 drops.
+//
+// at_capacity is the right code: the platform holds the session and retries
+// rather than failing it, so a caller is delayed rather than lost. Inbound
+// calls are deliberately exempt — the carrier leg is already ringing and a
+// human is on it, so refusing costs a real answered call, whereas an outbound
+// dispatch can simply wait.
+func (s *Server) admit(w http.ResponseWriter, sessionID string) bool {
+	if s.metrics.Accepting() {
+		return true
+	}
+	s.metrics.RejectedAtCapacity()
+	snap := s.metrics.Snapshot()
+	log.Printf("rexa: at capacity, refusing session=%s (on_gpu=%d/%d tiers=%v)",
+		sessionID, snap.Calls.OnGPU, snap.Capacity.MaxGPUCalls, tierStates(snap))
+	writeErr(w, Errorf(ErrCodeAtCapacity,
+		"agent at capacity: %d of %d GPU calls in flight",
+		snap.Calls.OnGPU, snap.Capacity.MaxGPUCalls))
+	return false
+}
+
+// tierStates renders tier states compactly for one log line.
+func tierStates(s HealthSnapshot) map[string]string {
+	out := make(map[string]string, len(s.Tiers))
+	for name, t := range s.Tiers {
+		out[name] = t.State
+	}
+	return out
 }
 
 // decode reads the raw body, verifies the HMAC envelope over those exact

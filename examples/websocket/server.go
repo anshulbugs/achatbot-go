@@ -717,6 +717,13 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	}
 
 	chatHistorySize := cfg.Server.ChatHistorySize
+	// A pipeline session is exactly what the GPU-call ceiling counts: it holds
+	// a VAD, an ASR and a TTS slot for its whole life. Bracketed here rather
+	// than at dispatch so a call that never reaches a pipeline — voicemail,
+	// no-answer, a dial that fails — never counts against capacity.
+	gpuCallStarted()
+	defer gpuCallEnded()
+
 	session := common.NewSession(sc.clientID, &chatHistorySize)
 	// Capture every turn for the end-of-call transcript. This has to observe
 	// appends rather than read the buffer afterwards: chatHistorySize bounds
@@ -1008,6 +1015,10 @@ func main() {
 		"tts.model", cfg.TTS.Model, "tts.speaker_id", cfg.TTS.SpeakerID, "tts.pool_size", cfg.TTS.PoolSize,
 		"llm.provider", cfg.LLM.Provider, "llm.model", cfg.LLM.Model, "llm.base_url", cfg.LLM.BaseURL,
 	)
+	// Must precede load(): the speech providers capture their HTTP transport
+	// when their clients are constructed, so wrapping it afterwards would
+	// silently record nothing.
+	initRexaTelemetry()
 	vadPool, asrPool, ttsPool = load(cfg)
 
 	// Create HTTP server

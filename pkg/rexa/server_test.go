@@ -47,7 +47,7 @@ const testSecret = "test-secret"
 func newTestServer(t *testing.T) (*httptest.Server, *fakeDispatcher, *Server) {
 	t.Helper()
 	f := &fakeDispatcher{}
-	s := NewServer(testSecret, NewMemoryNonceStore(), f)
+	s := NewServer(testSecret, NewMemoryNonceStore(), f, nil)
 	mux := http.NewServeMux()
 	s.Routes(mux)
 	srv := httptest.NewServer(mux)
@@ -213,7 +213,7 @@ func TestErrorCodeDrivesStatus(t *testing.T) {
 	}
 	for code, wantStatus := range cases {
 		f := &fakeDispatcher{err: Errorf(code, "nope")}
-		s := NewServer(testSecret, NewMemoryNonceStore(), f)
+		s := NewServer(testSecret, NewMemoryNonceStore(), f, nil)
 		mux := http.NewServeMux()
 		s.Routes(mux)
 		srv := httptest.NewServer(mux)
@@ -235,7 +235,7 @@ func TestErrorCodeDrivesStatus(t *testing.T) {
 // An unexpected error must not leak its detail, and must be retryable.
 func TestUnexpectedErrorBecomesInternal(t *testing.T) {
 	f := &fakeDispatcher{err: errString("gpu pool exhausted at /dev/nvidia3")}
-	s := NewServer(testSecret, NewMemoryNonceStore(), f)
+	s := NewServer(testSecret, NewMemoryNonceStore(), f, nil)
 	mux := http.NewServeMux()
 	s.Routes(mux)
 	srv := httptest.NewServer(mux)
@@ -374,5 +374,115 @@ func TestReplayedDispatchRejected(t *testing.T) {
 	}
 	if got := send(); got != http.StatusUnauthorized {
 		t.Errorf("replay = %d, want 401", got)
+	}
+}
+
+// Backpressure: past the ceiling the platform must get 503 at_capacity, which
+// it holds and retries rather than failing the session. Nothing else in the
+// stack caps concurrency — the provider pools create instances on demand
+// rather than blocking — so without this the 62nd call is accepted and every
+// caller's p95 degrades together.
+func TestAtCapacityRejectsDispatch(t *testing.T) {
+	f := &fakeDispatcher{}
+	m := NewMetrics(2)
+	s := NewServer(testSecret, NewMemoryNonceStore(), f, m)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	m.CallStarted()
+	m.CallStarted() // at the ceiling
+
+	resp := post(t, srv, "/connection", validPhone)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	var e AgentError
+	json.NewDecoder(resp.Body).Decode(&e)
+	if e.Error.Code != ErrCodeAtCapacity {
+		t.Errorf("code = %q, want at_capacity", e.Error.Code)
+	}
+	if f.phone != nil {
+		t.Error("dispatch reached the dispatcher while at capacity")
+	}
+	if got := m.Snapshot().Totals.Rejected; got != 1 {
+		t.Errorf("rejected total = %d, want 1", got)
+	}
+
+	// Freeing a slot must resume acceptance.
+	m.CallEnded()
+	resp2 := post(t, srv, "/connection", validPhone)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("status = %d after a slot freed, want 200", resp2.StatusCode)
+	}
+}
+
+// Inbound is deliberately exempt from backpressure: the carrier leg is already
+// ringing with a human on it, so refusing costs a real answered call, whereas
+// an outbound dispatch can simply wait.
+func TestIncomingNotRejectedAtCapacity(t *testing.T) {
+	f := &fakeDispatcher{}
+	m := NewMetrics(1)
+	s := NewServer(testSecret, NewMemoryNonceStore(), f, m)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	m.CallStarted() // at the ceiling
+
+	body := `{"CCID":"v3:abc","session_id":"s","tenant_id":"t",
+	          "from_number":"+15551112222","to_number":"+15553334444",
+	          "telecom_credentials":{"provider":"telnyx","credentials":{"api_key":"K","connection_id":"C"}},
+	          "voice":"leah","language":"en","system_prompt":"p","hello_message":"hi",
+	          "webhook_url":"https://p.example.com/cb"}`
+	resp := post(t, srv, "/incoming", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 — inbound must not be refused at capacity", resp.StatusCode)
+	}
+}
+
+// /health must carry capacity without lying about liveness: a full agent is
+// healthy, just busy. A 503 here would make the platform's load balancer mark
+// the URL unhealthy when all we wanted was backpressure.
+func TestHealthCarriesCapacityButStays200WhenFull(t *testing.T) {
+	f := &fakeDispatcher{}
+	m := NewMetrics(2)
+	s := NewServer(testSecret, NewMemoryNonceStore(), f, m)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	m.CallStarted()
+	m.CallStarted()
+	m.VoicemailStarted()
+
+	resp, err := srv.Client().Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 — full is not unhealthy", resp.StatusCode)
+	}
+	var snap HealthSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Status {
+		t.Error("status = false while alive")
+	}
+	if snap.Accepting {
+		t.Error("accepting = true at the ceiling")
+	}
+	if snap.Calls.OnGPU != 2 || snap.Calls.Voicemail != 1 || snap.Calls.Total != 3 {
+		t.Errorf("calls = %+v", snap.Calls)
+	}
+	if snap.Capacity.Headroom != 0 {
+		t.Errorf("headroom = %v, want 0", snap.Capacity.Headroom)
 	}
 }

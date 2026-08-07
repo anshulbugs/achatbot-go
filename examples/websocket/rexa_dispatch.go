@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"achatbot/pkg/modules/speech/asr"
+	"achatbot/pkg/modules/speech/tts"
 	"achatbot/pkg/rexa"
 	"achatbot/pkg/telnyx"
 )
@@ -30,6 +32,65 @@ var rexaPoster *rexa.Poster
 
 // rexaVoices maps the platform's voice vocabulary onto kokoro speaker ids.
 var rexaVoices *rexa.VoiceResolver
+
+// rexaMetrics is the live capacity + bottleneck registry behind /health,
+// /dashboard and the at_capacity backpressure. nil when the contract is not
+// configured, so every instrumentation point must nil-check — the demo path
+// runs with it unset.
+var rexaMetrics *rexa.Metrics
+
+// gpuCallStarted / gpuCallEnded bracket a call that holds a pipeline.
+// Voicemail calls use the voicemail pair instead: once AMD returns a machine
+// verdict the pipeline is released and the message plays from cache, so they
+// consume no GPU capacity and must not count against the ceiling.
+func gpuCallStarted() {
+	if rexaMetrics != nil {
+		rexaMetrics.CallStarted()
+	}
+}
+func gpuCallEnded() {
+	if rexaMetrics != nil {
+		rexaMetrics.CallEnded()
+	}
+}
+func voicemailStarted() {
+	if rexaMetrics != nil {
+		rexaMetrics.VoicemailStarted()
+	}
+}
+func voicemailEnded() {
+	if rexaMetrics != nil {
+		rexaMetrics.VoicemailEnded()
+	}
+}
+
+// rexaConfigured reports whether both platform secrets are present. Both are
+// required together: with only one we could either verify dispatches but never
+// report, or report but accept unauthenticated calls. An agent that accepts
+// calls it cannot report on is worse than one that does not start.
+func rexaConfigured() bool {
+	return os.Getenv("REXA_OUTBOUND_HMAC_SECRET") != "" && os.Getenv("REXA_INBOUND_HMAC_SECRET") != ""
+}
+
+// initRexaTelemetry creates the metrics registry and wraps the speech
+// providers' HTTP transports so every downstream request is timed.
+//
+// MUST be called before the provider pools are built. Each provider captures
+// the package-level Transport when it constructs its http.Client, so setting
+// it afterwards silently does nothing and every tier reports `unknown`
+// forever — a failure that looks like "the dashboard is broken" rather than
+// "the wiring ran in the wrong order".
+func initRexaTelemetry() {
+	if !rexaConfigured() {
+		return
+	}
+	rexaMetrics = rexa.NewMetrics(cfg.Server.MaxGPUCalls)
+	// Timing the transport measures true wire latency — what the caller
+	// actually waits for — rather than inferring load from GPU utilisation,
+	// and the providers never learn that metrics exist.
+	asr.Transport = rexaMetrics.Tripper(rexa.TierASR, nil)
+	tts.Transport = rexaMetrics.Tripper(rexa.TierTTS, nil)
+}
 
 // platformDispatcher places calls on behalf of the platform.
 type platformDispatcher struct {
@@ -220,11 +281,24 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 
 	rexaPoster = rexa.NewPoster(inbound)
 	rexaVoices = rexa.NewVoiceResolver(kokoroVoiceCatalog(), parseVoiceOverrides(), cfg.TTS.SpeakerID)
+	if rexaMetrics == nil {
+		// initRexaTelemetry must have run first; without it the transports are
+		// unwrapped and every tier would report `unknown` forever.
+		log.Printf("rexa: DISABLED — telemetry was not initialised before route registration")
+		return false
+	}
 
 	srv := rexa.NewServer(outbound, rexa.NewMemoryNonceStore(),
-		&platformDispatcher{publicURL: strings.TrimRight(publicURL, "/")})
+		&platformDispatcher{publicURL: strings.TrimRight(publicURL, "/")}, rexaMetrics)
 	srv.Routes(mux)
-	log.Printf("rexa: contract endpoints enabled (/health /connection /incoming /connection_webrtc) public=%s", publicURL)
+	srv.RoutesDashboard(mux)
+
+	ceiling := "unlimited"
+	if cfg.Server.MaxGPUCalls > 0 {
+		ceiling = strconv.Itoa(cfg.Server.MaxGPUCalls)
+	}
+	log.Printf("rexa: contract endpoints enabled (/health /connection /incoming /connection_webrtc), "+
+		"dashboard at /dashboard, gpu-call ceiling=%s, public=%s", ceiling, publicURL)
 	return true
 }
 

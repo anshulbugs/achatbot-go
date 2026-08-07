@@ -105,6 +105,17 @@ type ServerConfig struct {
 	// ClarityFilter enables the outbound telephone voice-enhancement filter
 	// (high-pass + presence boost) on Telnyx calls.
 	ClarityFilter bool `mapstructure:"clarity_filter"`
+	// MaxGPUCalls is the concurrency ceiling the platform contract enforces:
+	// past this many calls holding a pipeline, /connection is refused with
+	// at_capacity and /health reports accepting=false. Calls playing a
+	// voicemail announcement do NOT count — they hold no pool slots.
+	//
+	// 0 means unlimited. This is a MEASURED value, not a guess: 60 concurrent
+	// agent sessions held p95 at 1628ms with zero dropped audio writes, while
+	// 100 produced 6244ms and 234 drops. Remeasure with deploy/loadtest
+	// whenever the model, prompt size or GPU layout changes — it is specific
+	// to all three.
+	MaxGPUCalls int `mapstructure:"max_gpu_calls"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.

@@ -44,6 +44,15 @@ func voiceNameFor(sid int) string {
 // HTTPTTSProvider synthesizes speech via a remote GPU Kokoro service that
 // returns raw little-endian PCM16 mono at 24 kHz. Instances are cheap (just an
 // HTTP client), so the pool can be large; the GPU service handles concurrency.
+
+// Transport, when set, is used for every HTTP request this package makes.
+//
+// The hook exists so the application can time downstream latency (capacity
+// telemetry, tracing) without this package importing the code that consumes
+// the measurements. nil means net/http's DefaultTransport, so leaving it
+// unset changes nothing.
+var Transport http.RoundTripper
+
 type HTTPTTSProvider struct {
 	baseURL string
 	sid     int
@@ -97,7 +106,7 @@ func NewHTTPTTSProvider(baseURL string, sid int, speed, gain float32) *HTTPTTSPr
 		speed:   speed,
 		gain:    gain,
 		rate:    httpTTSRate,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: 30 * time.Second, Transport: Transport},
 		name:    "kokoroHTTP",
 	}
 	resp, err := p.client.Get(baseURL + "/health")
@@ -122,7 +131,7 @@ func NewOpenAISpeechProvider(baseURL, model, voice string, speed, gain float32) 
 		speed:        speed,
 		gain:         gain,
 		rate:         httpTTSRate,
-		client:       &http.Client{Timeout: 60 * time.Second},
+		client:       &http.Client{Timeout: 60 * time.Second, Transport: Transport},
 		name:         "voxtralHTTP",
 		openaiSpeech: true,
 		model:        model,
@@ -171,7 +180,7 @@ func NewContractProvider(baseURL, voice, name string, speed, gain float32, rate 
 		speed:     speed,
 		gain:      gain,
 		rate:      rate,
-		client:    &http.Client{Timeout: 90 * time.Second},
+		client:    &http.Client{Timeout: 90 * time.Second, Transport: Transport},
 		name:      name,
 		voiceName: voice,
 	}

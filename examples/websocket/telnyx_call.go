@@ -707,6 +707,14 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWriter, ser *telnyx.Serializer,
 	rate int, p *callParams, beep <-chan string) {
 
+	// Counted separately from GPU calls throughout: this path holds no pool
+	// slots at all — the greeting was cut, the pipeline never started, and the
+	// message plays from the announcement cache. A campaign hitting 40%
+	// answering machines therefore has far more real headroom than its raw
+	// call count suggests, and the ceiling must not be spent on these.
+	voicemailStarted()
+	defer voicemailEnded()
+
 	// Flush whatever of the greeting Telnyx still has buffered, so the message
 	// does not trail the interrupted hello.
 	if b, err := ser.Serialize(&frames.StartInterruptionFrame{}); err == nil && len(b) > 0 {

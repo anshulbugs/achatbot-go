@@ -23,12 +23,21 @@ type HTTPASRProvider struct {
 	name    string
 }
 
+// Transport, when set, is used for every HTTP request this package makes.
+//
+// The hook exists so the application can time downstream latency (capacity
+// telemetry, tracing) without this package importing the code that consumes
+// the measurements — a speech module has no business depending on the
+// platform contract. nil means net/http's DefaultTransport, so leaving it
+// unset changes nothing.
+var Transport http.RoundTripper
+
 // NewHTTPASRProvider builds a provider pointing at baseURL (e.g.
 // http://127.0.0.1:8890). Returns nil if the service is unreachable at startup.
 func NewHTTPASRProvider(baseURL string) *HTTPASRProvider {
 	p := &HTTPASRProvider{
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 15 * time.Second},
+		client:  &http.Client{Timeout: 15 * time.Second, Transport: Transport},
 		name:    "parakeetHTTP",
 	}
 	resp, err := p.client.Get(baseURL + "/health")
