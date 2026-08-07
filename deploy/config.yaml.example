@@ -16,6 +16,10 @@ server:
   # premium is Telnyx's recommended mode and the only one that distinguishes
   # silence and fax_detected from a plain machine; check its billing rate before
   # a large campaign, since it is priced separately from standard detection.
+  voicemail_detection: premium
+  # Spoken into the voicemail via the pre-rendered announcement (no GPU slot).
+  # Empty means hang up as soon as a machine is detected.
+  voicemail_message: ""
   # Concurrency ceiling for platform-dispatched calls. Past this many calls
   # holding a pipeline, /connection is refused with at_capacity and /health
   # reports accepting=false. Calls playing a voicemail announcement do NOT
@@ -26,10 +30,6 @@ server:
   # drops. It is specific to this model, prompt size and GPU layout --
   # remeasure with deploy/loadtest when any of those change. 0 = unlimited.
   max_gpu_calls: 61
-  voicemail_detection: premium
-  # Spoken into the voicemail via the pre-rendered announcement (no GPU slot).
-  # Empty means hang up as soon as a machine is detected.
-  voicemail_message: ""
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the
