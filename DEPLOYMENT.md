@@ -7,6 +7,15 @@ etc. — and documents every error we hit and how we fixed it.
 
 Median wire latency achieved: **~0.9–1.3 s per turn** (sub-second is possible).
 
+The server runs in two modes, which can be enabled together:
+
+- **Demo mode** — the browser page and `POST /api/call`, driven by one set of
+  `TELNYX_*` env vars. This is what §4 sets up.
+- **Platform-contract mode** — HMAC-authenticated endpoints the Rexa platform
+  dispatches to, with per-call tenant credentials, capacity backpressure and a
+  live dashboard. See **[§10](#10-platform-contract-mode)** and
+  **[docs/CALL-AGENT-CONTRACT.md](docs/CALL-AGENT-CONTRACT.md)**.
+
 ---
 
 ## 1. Architecture
@@ -103,6 +112,16 @@ gcc --version
 | ASR (Parakeet) | `parakeet`          | `127.0.0.1:8890` | `ASR_GPU=2` | `GET /health` |
 | Public tunnel  | `cloudflared`       | → 4321         | —             | `tunnel-url.txt` |
 | Video avatar (optional) | `soulx`    | `8899`         | own GPU       | WS `/` returns a room |
+
+Contract mode adds these on the same port as the Go server (4321):
+
+| Path | Auth | Purpose |
+|------|------|---------|
+| `GET /health` | none | Liveness + capacity. Gate dispatch on `accepting` |
+| `POST /connection` | HMAC | Outbound call |
+| `POST /incoming` | HMAC | Answer a ringing inbound leg |
+| `POST /connection_webrtc` | HMAC | Not implemented — returns 503 |
+| `GET /dashboard` | none | Live capacity dashboard |
 
 GPU services bind to `127.0.0.1` only — they're reached by the Go server on the
 same host. Only port 4321 is exposed publicly (via the tunnel).
@@ -329,7 +348,128 @@ carrying 8 kHz µ-law (~64 kbps each way). Go handles **tens of thousands** of
 
 ---
 
-## 10. Operating cheatsheet
+## 10. Platform-contract mode
+
+Everything in §4 gives you a working agent driven by the browser demo and
+`/api/call`. This section turns on the endpoints the **Rexa platform**
+dispatches to. The full wire spec — payloads, auth, callbacks, error codes — is
+in **[docs/CALL-AGENT-CONTRACT.md](docs/CALL-AGENT-CONTRACT.md)**; this is just
+the operational setup.
+
+### 10.1 What changes
+
+| | Demo mode | Contract mode |
+|---|---|---|
+| Telnyx credentials | one set, from `TELNYX_API_KEY` | **per call**, from each dispatch (multi-tenant) |
+| Who places calls | you, via `/api/call` | the platform, via `POST /connection` |
+| Concurrency limit | none | `max_gpu_calls` + `max_total_calls`, enforced |
+| Reporting | none | end-of-call report POSTed back, with transcript |
+
+Both can run in one process. The demo path is unchanged when contract mode is
+on — it keeps using the env-built client and never touches per-call
+credentials.
+
+### 10.2 Enable it
+
+```bash
+# Both are REQUIRED and must be set together. With only one, the agent would
+# either verify dispatches but never report, or report but accept
+# unauthenticated calls — so it refuses to enable the contract and logs why.
+export REXA_OUTBOUND_HMAC_SECRET="<32-byte hex from the platform>"
+export REXA_INBOUND_HMAC_SECRET="<32-byte hex from the platform>"
+
+# Where the CARRIER reaches us for webhooks + media. Not the platform's URL.
+export TELNYX_PUBLIC_URL="https://<your-tunnel-host>"
+
+# Optional: map the platform's voice ids onto kokoro speakers.
+# Unknown voices fall back to the configured default and log once.
+export REXA_VOICE_MAP="leah=3,marcus=16"
+```
+
+Note contract mode does **not** require `TELNYX_API_KEY` — credentials arrive
+per dispatch. If you leave it unset, the demo endpoints simply aren't
+registered, which is the right shape for a production agent.
+
+Confirm on startup:
+
+```
+rexa: contract endpoints enabled (/health /connection /incoming /connection_webrtc),
+      dashboard at /dashboard, gpu-call ceiling=61, public=https://...
+```
+
+### 10.3 Capacity configuration
+
+```yaml
+server:
+  max_gpu_calls: 61          # live pipelines. MEASURED — see §8
+  max_total_calls: 200       # absolute in-flight cap, incl. zero-GPU calls
+  human_answer_weight: 1.0   # or "auto", or a number
+```
+
+**`max_gpu_calls: 61`** is measured, not guessed: 60 concurrent agent sessions
+held p95 at 1628 ms with zero dropped audio writes, while 100 gave 6244 ms and
+234 drops. It is specific to this model, prompt size and GPU layout — remeasure
+with `deploy/loadtest` when any of those change.
+
+**`max_total_calls`** is the backstop for what these counters cannot see:
+carrier channel caps, CPU for hundreds of concurrent media streams, TTS renders
+at dispatch time. In practice `max_gpu_calls` binds first.
+
+**`human_answer_weight`** is the expected GPU cost of one dispatched call. A
+call is dispatched while the phone is still *ringing*; its pipeline does not
+exist until someone answers, up to 30 s later. So each ringing call is charged
+against capacity in advance, and this is how much.
+
+The rule is **weight ≥ the real answer rate**. Admission allows
+`max_gpu_calls / weight` calls to ring at once, and whatever fraction of them
+answers becomes pipelines — so a weight below the true rate creates more
+pipelines than the ceiling allows, and a call a human has already picked up
+cannot be refused.
+
+| Value | Behaviour |
+|---|---|
+| `1.0` | Every dispatch charged a full slot. The **only** value that guarantees `on_gpu` never exceeds `max_gpu_calls`. Under-utilises when most calls hit voicemail. **Use this first.** |
+| `auto` | Tracks the measured answer rate × a 2× safety margin, floored at 0.15, capped at 1.0. Starts at 1.0 until enough calls resolve. |
+| e.g. `0.3` | Fixed over-subscription, once the rate is known and steady. |
+
+A bare `0` is rejected at boot — it used to mean "adaptive", which reads as
+"a ringing call costs nothing". Use `auto`.
+
+### 10.4 Watch it
+
+`GET /dashboard` — self-contained page, no CDN, polls every 2 s. Shows calls by
+state (ringing / on GPU / voicemail), weighted GPU cost against the ceiling,
+per-tier p95 with ok/degraded/saturated, and the **measured answer rate and ring
+time** — the two numbers that decide whether `human_answer_weight` can move off
+1.0.
+
+`GET /health` returns the same snapshot as JSON.
+
+Judge tiers on **p95, never p50**: at 100 concurrent sessions the median still
+read 1112 ms while callers heard multi-second hangs.
+
+### 10.5 Testing without the platform
+
+`deploy/loadtest/` has the throughput benchmarks. For the contract surface, any
+HMAC-signing client works — sign per §1 of the contract doc and POST to
+`/connection`. A dispatch with deliberately wrong credentials (`provider:
+"twilio"`) is a safe way to exercise auth, validation and error mapping without
+placing a real call: it reaches the credential check and returns `412`.
+
+### 10.6 Gotchas
+
+| Symptom | Cause |
+|---|---|
+| Contract endpoints missing, no error | Only one of the two `REXA_*` secrets set. Check the startup log — it says so |
+| `rexa: DISABLED — TELNYX_PUBLIC_URL is unset` | Carrier webhooks would have nowhere to arrive |
+| All tiers stuck on `unknown` | Fewer than 20 samples yet, or telemetry initialised after the pools were built |
+| `401` on every dispatch | Body re-serialised between signing and sending, or the secret hex-decoded instead of used raw |
+| `at_capacity` immediately at 0 calls | `max_gpu_calls` mis-set. `0` means unlimited; a small number means a small ceiling |
+| Reservations climbing, `reaped` climbing | Carrier hangup webhooks are being missed. The reaper is covering for it, but find out why |
+
+---
+
+## 11. Operating cheatsheet
 
 ```bash
 # bring everything up (after images are built + config in place)

@@ -3,6 +3,34 @@
 # achatbot-go
 a multimodal chatbot.
 
+---
+
+## This fork: self-hosted voice agent
+
+A production voice agent — **VAD → ASR → LLM → TTS** over WebSockets — with a
+browser demo, real phone calls via Telnyx, and an HMAC-authenticated contract
+the Rexa platform dispatches to.
+
+| Doc | What it covers |
+|---|---|
+| **[DEPLOYMENT.md](DEPLOYMENT.md)** | Full setup on a fresh GPU box, ports, capacity, errors we hit |
+| **[docs/CALL-AGENT-CONTRACT.md](docs/CALL-AGENT-CONTRACT.md)** | The platform contract: endpoints, HMAC, payloads, callbacks. **Start here to integrate** |
+| [deploy/loadtest/README.md](deploy/loadtest/README.md) | How capacity was measured and where the bottlenecks were |
+| [deploy/models/MIRRORS.md](deploy/models/MIRRORS.md) | Model weight mirrors, so upstream deletions can't break a deploy |
+
+Quick start on a 4-GPU box:
+
+```bash
+bash deploy/scripts/up-voice-4gpu.sh      # LLM x2 + ASR + TTS + Go server
+```
+
+Measured capacity: **~60 concurrent calls on 4 RTX 5090s** (p95 1628 ms, zero
+dropped audio). See DEPLOYMENT.md §8.
+
+---
+
+## Upstream
+
 ## Design
 ⭐️ [Pipeline Design](https://github.com/ai-bot-pro/pipeline-py/blob/main/README.md#design) ⭐️
 
