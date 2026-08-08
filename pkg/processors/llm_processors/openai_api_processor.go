@@ -125,7 +125,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 						logger.Errorf("Failed to unmarshal function arguments: %v err: %v", funcArgs, err)
 						continue
 					}
-					result, err := functions.RegisterFuncs.Execute(toolCall.Function.Name, args)
+					result, err := p.execFunc(toolCall.Function.Name, args)
 					if err != nil {
 						logger.Errorf("Failed to execute function: %v err: %v", toolCall.Function.Name, err)
 						continue
@@ -193,7 +193,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 							logger.Errorf("Failed to Unmarshal err: %v", err)
 							continue
 						}
-						result, err := functions.RegisterFuncs.Execute(tool.Function.Name, args)
+						result, err := p.execFunc(tool.Function.Name, args)
 						if err != nil {
 							logger.Error("Execute", "err", err, "funcName", tool.Function.Name, "funcArgs", tool.Function.Arguments)
 							continue
@@ -255,4 +255,17 @@ func (p *LLMOpenAIApiProcessor) generate(frame *frames.TextFrame, direction proc
 		})
 	}
 	p.QueueFrame(achatbot_frames.NewTurnEndFrame(), direction)
+}
+
+// execFunc runs a tool, preferring an implementation bound to this session.
+//
+// Session-scoped tools shadow global ones because a tool that acts on the call
+// it was invoked from — transferring it, ending it — cannot be a process-wide
+// singleton: the invocation carries only arguments, so a global handler has no
+// way to tell which of the calls in flight it belongs to.
+func (p *LLMOpenAIApiProcessor) execFunc(name string, args map[string]any) (string, error) {
+	if fn := p.session.Func(name); fn != nil {
+		return fn.Execute(args)
+	}
+	return functions.RegisterFuncs.Execute(name, args)
 }

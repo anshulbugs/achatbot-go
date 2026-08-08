@@ -63,6 +63,27 @@ func NewOpenAIAPIProvider(name, baseUrl, model string, toolNames []string) *Open
 	return p
 }
 
+// AddTools advertises additional tool schemas to the model beyond the ones
+// named in config.
+//
+// The config list is resolved from the global function registry at
+// construction, which cannot express a tool that exists only for one call —
+// transferring THIS call, for example. Such tools are bound per session, and
+// this is how the model gets told they exist. Registering an implementation
+// without advertising it is a silent no-op: the model never learns the tool is
+// available, so it never calls it.
+func (p *OpenAIAPIProvider) AddTools(schemas []map[string]any) {
+	if len(schemas) == 0 {
+		return
+	}
+	adapted, err := functions.AdapteOpenAIToolSchema(schemas)
+	if err != nil {
+		logger.Error("AddTools: schema adaptation failed", "error", err)
+		return
+	}
+	p.tools = append(p.tools, adapted...)
+}
+
 // Generate 生成文本token
 // call /v1/completions
 func (p *OpenAIAPIProvider) Generate(ctx context.Context, args types.LMGenerateArgs, prompt string, respFunc common.OpenAICompletionRespFunc) {

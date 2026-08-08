@@ -146,6 +146,17 @@ type ServerConfig struct {
 	// Use 1.0 for a first campaign, read measured.answer_rate off /dashboard,
 	// then decide. Resolve it with ResolveHumanAnswerWeight.
 	HumanAnswerWeight string `mapstructure:"human_answer_weight"`
+	// TransferCallerID chooses the caller ID presented to a transfer
+	// destination: "contact" (default) shows the number of the person being
+	// transferred, "tenant" shows the number we dialled from.
+	//
+	// "contact" is what the receiving human wants to see -- it is the point of
+	// transferring rather than cold-dialling them. The cost is that a `from`
+	// which is not on the carrier account gets low or no STIR/SHAKEN
+	// attestation, and US carriers increasingly mark those "Spam Likely" or
+	// drop them. Suspect this setting first if transfers connect unreliably.
+	// `from_display_name` carries the contact's name under either setting.
+	TransferCallerID string `mapstructure:"transfer_caller_id"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -294,6 +305,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.max_gpu_calls", 0)
 	v.SetDefault("server.max_total_calls", 0)
 	v.SetDefault("server.human_answer_weight", "1.0")
+	v.SetDefault("server.transfer_caller_id", "contact")
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)

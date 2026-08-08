@@ -5,6 +5,49 @@ type Session struct {
 	chatRound   int
 	sessionID   string
 	chatHistory *ChatHistory
+	// funcs are tools scoped to THIS session, checked before the global
+	// registry.
+	//
+	// The global registry maps a name to one implementation for the whole
+	// process, and a tool invocation carries only its arguments — no session,
+	// no call id. That is fine for stateless tools like web search, but a tool
+	// that acts on the call it was invoked from (transferring it, ending it)
+	// has no way to know which of the calls in flight it belongs to. Binding
+	// the tool per session lets the implementation be a closure over that
+	// call's own state.
+	funcs map[string]IFunction
+}
+
+// RegisterFunc binds a tool to this session only. It shadows a global
+// registration of the same name, so a per-call implementation always wins over
+// a process-wide one.
+func (s *Session) RegisterFunc(name string, fn IFunction) {
+	if s.funcs == nil {
+		s.funcs = make(map[string]IFunction, 1)
+	}
+	s.funcs[name] = fn
+}
+
+// Func returns this session's implementation of name, or nil when the session
+// has none and the caller should fall back to the global registry.
+func (s *Session) Func(name string) IFunction {
+	if s == nil || s.funcs == nil {
+		return nil
+	}
+	return s.funcs[name]
+}
+
+// ToolCalls returns the OpenAI tool schemas for this session's own tools, so
+// they can be advertised to the model alongside the global ones.
+func (s *Session) ToolCalls() []map[string]any {
+	if s == nil || len(s.funcs) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(s.funcs))
+	for _, fn := range s.funcs {
+		out = append(out, fn.GetToolCall())
+	}
+	return out
 }
 
 // NewSession creates a new Session instance

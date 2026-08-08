@@ -48,6 +48,16 @@ type callParams struct {
 	Demo     bool    `json:"demo"`   // play a curated set of voices, one after another
 	Voices   []int   `json:"voices"` // explicit voice ids to demo (overrides the default set)
 
+	// TransferNumber is where a "put me through to a human" request goes.
+	// Empty means transfer is unavailable, and the call_transfer tool is not
+	// registered at all — a model that cannot see the tool cannot promise a
+	// transfer it will not get.
+	TransferNumber string `json:"transfer_number"`
+	// DisplayName is the contact's name, presented alongside the caller ID on
+	// a transfer so the receiving human knows who is being put through even if
+	// the number is filtered.
+	DisplayName string `json:"display_name"`
+
 	// ─── Platform-contract state ────────────────────────────────────
 	//
 	// Everything below is set only for calls dispatched by the platform
@@ -859,6 +869,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	runVoiceSession(conn, ser, sessionConfig{
 		clientID:           "telnyx_" + id,
 		callID:             id,
+		call:               p,
 		chatObserver:       chatObserver,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,

@@ -451,6 +451,12 @@ func newLLMProcessor(cfg *config.Config, session *common.Session, model string) 
 		if provider == nil {
 			return nil, fmt.Errorf("failed to create openai_api LLM provider for model %q at %s", model, cfg.LLM.BaseURL)
 		}
+		// Advertise this session's own tools alongside the globally configured
+		// ones. Registering an implementation without advertising it is a
+		// silent no-op — the model never learns the tool exists, so it never
+		// calls it, and the failure looks like "the model refuses to transfer"
+		// rather than "the tool was never offered".
+		provider.AddTools(session.ToolCalls())
 		return llm_processors.NewLLMOpenAIApiProcessor(provider, session, llm_processors.Mode_Chat, cfg.LLM.Stream, *llmArgs()), nil
 	default:
 		return nil, fmt.Errorf("unknown llm.provider %q", cfg.LLM.Provider)
@@ -612,6 +618,9 @@ type sessionConfig struct {
 	// state to on_gpu. Empty for browser sessions, which hold pool slots but
 	// are not part of the platform's call accounting.
 	callID string
+	// call is the telephony call this session belongs to, used to bind
+	// per-call tools such as call_transfer. nil for browser sessions.
+	call *callParams
 }
 
 // voiceLabel returns the spoken name of a voice id (e.g. "Bella"), stripping the
@@ -737,6 +746,12 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// turns are gone. nil on the demo path, which keeps no transcript.
 	if sc.chatObserver != nil {
 		session.GetChatHistory().SetObserver(sc.chatObserver)
+	}
+	// Bind per-call tools. Registered on the session rather than globally
+	// because they act on THIS call, and a global handler could not tell which
+	// of the calls in flight invoked it.
+	if sc.call != nil && sc.callID != "" {
+		registerTransferTool(session, sc.call, sc.callID)
 	}
 	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
 	// Log which prompt this session actually got. Answering "did my prompt

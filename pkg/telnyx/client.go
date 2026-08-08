@@ -168,6 +168,32 @@ func (c *Client) Answer(ctx context.Context, callControlID string) error {
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/answer", nil, nil)
 }
 
+// Transfer hands the call to another destination.
+//
+// The existing leg is connected to `to` — a DID in E.164, or a SIP URI. Our
+// media fork is not part of that bridge, so the agent should stop speaking and
+// release its pipeline once this returns; the carrier owns the conversation
+// from that point.
+//
+// `from` is the caller ID presented to the transfer destination. Pass the
+// tenant's own number (the one the call was placed from) rather than the
+// contact's, so the person receiving the transfer sees who is transferring
+// rather than who is being transferred.
+//
+// A transfer that cannot be completed hangs up the NEW leg and leaves the
+// original call active, so failure here is recoverable — the agent still has
+// the caller and can tell them it did not work instead of dropping them.
+func (c *Client) Transfer(ctx context.Context, callControlID, to, from string, timeoutSecs int) error {
+	body := map[string]any{"to": to}
+	if from != "" {
+		body["from"] = from
+	}
+	if timeoutSecs > 0 {
+		body["timeout_secs"] = timeoutSecs
+	}
+	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/transfer", body, nil)
+}
+
 // Hangup ends the call.
 func (c *Client) Hangup(ctx context.Context, callControlID string) error {
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/hangup", nil, nil)

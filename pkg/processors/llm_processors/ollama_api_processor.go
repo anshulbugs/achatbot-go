@@ -108,7 +108,7 @@ func (p *LLMOllamaApiProcessor) chat(frame *frames.TextFrame, direction processo
 			if resp.Message.ToolCalls != nil { //tool_calls
 				toolMsgs := []api.Message{}
 				for _, toolCall := range resp.Message.ToolCalls {
-					result, err := functions.RegisterFuncs.Execute(toolCall.Function.Name, toolCall.Function.Arguments)
+					result, err := p.execFunc(toolCall.Function.Name, toolCall.Function.Arguments)
 					if err != nil {
 						logger.Error("Execute", "err", err, "funcName", toolCall.Function.Name, "funcArgs", toolCall.Function.Arguments)
 						continue
@@ -166,4 +166,17 @@ func (p *LLMOllamaApiProcessor) generate(frame *frames.TextFrame, direction proc
 		return nil
 	})
 	p.QueueFrame(achatbot_frames.NewTurnEndFrame(), direction)
+}
+
+// execFunc runs a tool, preferring an implementation bound to this session.
+//
+// Session-scoped tools shadow global ones because a tool that acts on the call
+// it was invoked from — transferring it, ending it — cannot be a process-wide
+// singleton: the invocation carries only arguments, so a global handler has no
+// way to tell which of the calls in flight it belongs to.
+func (p *LLMOllamaApiProcessor) execFunc(name string, args map[string]any) (string, error) {
+	if fn := p.session.Func(name); fn != nil {
+		return fn.Execute(args)
+	}
+	return functions.RegisterFuncs.Execute(name, args)
 }
