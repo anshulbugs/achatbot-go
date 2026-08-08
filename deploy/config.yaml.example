@@ -34,7 +34,14 @@ server:
   # in for what our counters cannot see: the carrier's concurrent channel cap,
   # CPU for hundreds of media streams, TTS renders at dispatch time. No
   # capacity estimate may argue past it. 0 = unlimited.
-  max_total_calls: 100
+  #
+  # In practice max_gpu_calls binds first and this never fires -- projected
+  # steady state at 90% voicemail is ~126 calls in flight at weight 1.0, and
+  # ~188 at weight 0.3. 200 sits just above that, so it is a real backstop
+  # rather than decoration. Raise it together with a lower human_answer_weight,
+  # and watch the box: CPU was 5-6 cores at 60 agents, and several hundred
+  # concurrent media streams is untested territory.
+  max_total_calls: 200
   # Expected GPU cost of one dispatched call -- the fraction that reach a live
   # pipeline rather than an answering machine, a no-answer or a busy.
   #
