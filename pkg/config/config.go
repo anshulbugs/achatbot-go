@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
@@ -123,16 +124,28 @@ type ServerConfig struct {
 	// past it. 0 = unlimited.
 	MaxTotalCalls int `mapstructure:"max_total_calls"`
 	// HumanAnswerWeight is the expected GPU cost of one dispatched call: the
-	// fraction that reach a live pipeline rather than an answering machine,
-	// a no-answer or a busy.
+	// fraction that reach a live pipeline rather than an answering machine, a
+	// no-answer or a busy.
 	//
-	// 1.0 (default) charges every dispatch a full pipeline slot -- safe, and
-	// under-utilises when most calls hit voicemail. 0 switches to the MEASURED
-	// rate from recent outcomes. Only move off 1.0 once a real campaign has
-	// supplied the number: the estimator looks backwards, so a shift in list
-	// quality or time of day can leave hundreds already dispatched when the
-	// answer rate jumps.
-	HumanAnswerWeight float64 `mapstructure:"human_answer_weight"`
+	// Accepts a number, or the literal "auto".
+	//
+	// The governing rule is `weight >= actual answer rate`. Admission allows
+	// (max_gpu_calls / weight) calls to be ringing at once, and the fraction
+	// of those that answer become pipelines, so a weight below the real rate
+	// creates more pipelines than the ceiling allows -- and a call a human has
+	// already picked up cannot be refused.
+	//
+	//   1.0    every dispatch charged a full slot. The ONLY setting that
+	//          guarantees on_gpu never exceeds max_gpu_calls, since converting
+	//          a reservation to a pipeline leaves the total unchanged.
+	//          Under-utilises when most calls hit voicemail.
+	//   auto   track the measured answer rate, times a safety factor, floored
+	//          and capped. Starts at 1.0 until enough calls have resolved.
+	//   0.3    a fixed over-subscription, for when the rate is known and steady.
+	//
+	// Use 1.0 for a first campaign, read measured.answer_rate off /dashboard,
+	// then decide. Resolve it with ResolveHumanAnswerWeight.
+	HumanAnswerWeight string `mapstructure:"human_answer_weight"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -280,7 +293,7 @@ func setDefaults(v *viper.Viper) {
 	// neither is silently invisible to the environment. 0 = unlimited.
 	v.SetDefault("server.max_gpu_calls", 0)
 	v.SetDefault("server.max_total_calls", 0)
-	v.SetDefault("server.human_answer_weight", 1.0)
+	v.SetDefault("server.human_answer_weight", "1.0")
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)
@@ -322,7 +335,42 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("llm.max_tokens", 160)
 }
 
+// AdaptiveAnswerWeight is the internal sentinel meaning "compute the weight
+// from measurements". Config expresses it as the word "auto"; a bare 0 in the
+// file is rejected, because a weight of zero would otherwise read as "a
+// ringing call costs nothing", which is not what it means.
+const AdaptiveAnswerWeight = 0.0
+
+// ResolveHumanAnswerWeight turns the configured value into the number the
+// metrics registry takes: a weight in (0,1], or AdaptiveAnswerWeight for
+// "auto".
+func (c *ServerConfig) ResolveHumanAnswerWeight() (float64, error) {
+	raw := strings.TrimSpace(strings.ToLower(c.HumanAnswerWeight))
+	if raw == "" {
+		return 1.0, nil
+	}
+	if raw == "auto" {
+		return AdaptiveAnswerWeight, nil
+	}
+	w, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, invalidf("server.human_answer_weight must be a number or \"auto\", got %q", c.HumanAnswerWeight)
+	}
+	if w <= 0 {
+		return 0, invalidf("server.human_answer_weight must be > 0 (use \"auto\" for the measured rate), got %s", c.HumanAnswerWeight)
+	}
+	if w > 1 {
+		return 0, invalidf("server.human_answer_weight must be <= 1 (a ringing call cannot cost more than a live one), got %s", c.HumanAnswerWeight)
+	}
+	return w, nil
+}
+
 func (c *Config) validate() error {
+	// Resolve for its side effect: a typo here must fail at boot, not silently
+	// fall back to a capacity policy nobody chose.
+	if _, err := c.Server.ResolveHumanAnswerWeight(); err != nil {
+		return err
+	}
 	if !slices.Contains(ValidVADModels, c.VAD.Model) {
 		return invalidf("vad.model %q not in %v", c.VAD.Model, ValidVADModels)
 	}

@@ -181,3 +181,44 @@ func TestBaseURLNotRequiredForOllama(t *testing.T) {
 	_, err := Load(path)
 	require.NoError(t, err)
 }
+
+func TestResolveHumanAnswerWeight(t *testing.T) {
+	ok := map[string]float64{
+		"":       1.0, // unset behaves as the safe full weight
+		"1.0":    1.0,
+		"1":      1.0,
+		"0.3":    0.3,
+		"auto":   AdaptiveAnswerWeight,
+		"AUTO":   AdaptiveAnswerWeight,
+		" Auto ": AdaptiveAnswerWeight,
+	}
+	for in, want := range ok {
+		got, err := (&ServerConfig{HumanAnswerWeight: in}).ResolveHumanAnswerWeight()
+		if err != nil {
+			t.Errorf("%q: unexpected error %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q = %v, want %v", in, got, want)
+		}
+	}
+
+	// A bare 0 used to mean "adaptive". It now fails loudly, because read back
+	// months later it says "a ringing call costs nothing", which is the
+	// opposite of what it did.
+	for _, bad := range []string{"0", "0.0", "-1", "1.5", "yes", "adaptive"} {
+		if _, err := (&ServerConfig{HumanAnswerWeight: bad}).ResolveHumanAnswerWeight(); err == nil {
+			t.Errorf("%q was accepted; want a validation error", bad)
+		}
+	}
+}
+
+// A typo must stop the process at boot rather than silently selecting a
+// capacity policy nobody chose.
+func TestInvalidAnswerWeightFailsValidation(t *testing.T) {
+	c := &Config{}
+	c.Server.HumanAnswerWeight = "definitely-not-a-number"
+	if err := c.validate(); err == nil {
+		t.Error("validate() accepted a malformed human_answer_weight")
+	}
+}

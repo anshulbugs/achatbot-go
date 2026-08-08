@@ -44,19 +44,24 @@ server:
   max_total_calls: 200
   # Expected GPU cost of one dispatched call -- the fraction that reach a live
   # pipeline rather than an answering machine, a no-answer or a busy.
+  # Accepts a number, or the word "auto".
   #
-  # 0 = ADAPTIVE (recommended). Starts at 1.0 while cold, then tracks the
-  # measured answer rate x a 2x safety factor, floored at 0.15 and capped at
-  # 1.0. The safety factor matters: overshoot is bounded by
-  # (max_gpu_calls / weight) x the rate that actually materialises, so charging
-  # the recent MEAN leaves nothing in hand when the next batch answers better
-  # than the last -- and a call a human has already picked up cannot be refused.
+  # The rule is: weight >= the real answer rate. Admission lets
+  # (max_gpu_calls / weight) calls ring at once, and whatever fraction of them
+  # answers becomes pipelines -- so a weight below the true rate creates more
+  # pipelines than the ceiling allows, and a call a human has already picked
+  # up cannot be refused.
   #
-  # 1.0 = every dispatch charged a full pipeline slot. The only setting that
-  # GUARANTEES on_gpu never exceeds max_gpu_calls, because converting a
-  # reservation to a pipeline then leaves the total unchanged. Under-utilises
-  # when most calls hit voicemail. Use it for the first real campaign, read
-  # measured.answer_rate off /dashboard, then switch to 0.
+  #   1.0    charge every dispatch a full slot. The ONLY value that guarantees
+  #          on_gpu never exceeds max_gpu_calls. Under-utilises when most calls
+  #          reach voicemail. Use this for a first real campaign.
+  #   auto   track the measured answer rate x a 2x safety margin, floored at
+  #          0.15 and capped at 1.0. Starts at 1.0 until enough calls resolve.
+  #          The margin covers batches that answer better than recent average;
+  #          the mean alone would overshoot on roughly half of them.
+  #   0.3    a fixed over-subscription, once the rate is known and steady.
+  #
+  # Read measured.answer_rate off /dashboard before moving off 1.0.
   human_answer_weight: 1.0
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in

@@ -97,7 +97,14 @@ func initRexaTelemetry() {
 	}
 	rexaMetrics = rexa.NewMetrics(cfg.Server.MaxGPUCalls)
 	rexaMetrics.SetMaxTotalCalls(cfg.Server.MaxTotalCalls)
-	rexaMetrics.SetHumanWeight(cfg.Server.HumanAnswerWeight)
+	// Already validated at config load, so an error here is impossible; fall
+	// back to the safe full weight rather than panicking if that ever changes.
+	weight, err := cfg.Server.ResolveHumanAnswerWeight()
+	if err != nil {
+		log.Printf("rexa: %v — using full weight", err)
+		weight = 1.0
+	}
+	rexaMetrics.SetHumanWeight(weight)
 
 	// Reap leaked reservations. Without this a lost hangup webhook removes a
 	// slot permanently, and enough of them silently stop the agent accepting
