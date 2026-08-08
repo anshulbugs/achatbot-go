@@ -6,7 +6,21 @@ import (
 
 	"achatbot/pkg/common"
 	"achatbot/pkg/config"
+	"achatbot/pkg/telnyx"
 )
+
+// testCall builds a platform-dispatched call with its own carrier client,
+// which is what production looks like — transfer needs a client to act on.
+func testCall(transferNumber string) *callParams {
+	return &callParams{
+		To:             "+15551112222",
+		TransferNumber: transferNumber,
+		platform: &rexaCall{
+			sessionID: "sess-1", tenantID: "tenant-1",
+			client: telnyx.NewClient("KEY", "APP", "+15557654321", "https://agent.example"),
+		},
+	}
+}
 
 // The tool must be registered only when a destination exists. A model that can
 // see the tool will offer a transfer, so offering it without a destination
@@ -16,16 +30,13 @@ func TestTransferToolOnlyRegisteredWithDestination(t *testing.T) {
 	size := 2
 
 	withDest := common.NewSession("s1", &size)
-	registerTransferTool(withDest, &callParams{
-		TransferNumber: "+15559998888",
-		To:             "+15551112222",
-	}, "call-1")
+	registerTransferTool(withDest, testCall("+15559998888"), "call-1")
 	if withDest.Func("call_transfer") == nil {
 		t.Error("tool not registered despite a transfer number")
 	}
 
 	noDest := common.NewSession("s2", &size)
-	registerTransferTool(noDest, &callParams{To: "+15551112222"}, "call-2")
+	registerTransferTool(noDest, testCall(""), "call-2")
 	if noDest.Func("call_transfer") != nil {
 		t.Error("tool registered with no transfer number — the model would promise a transfer it cannot make")
 	}
@@ -37,7 +48,7 @@ func TestTransferToolIsAdvertised(t *testing.T) {
 	cfg = &config.Config{}
 	size := 2
 	s := common.NewSession("s", &size)
-	registerTransferTool(s, &callParams{TransferNumber: "+15559998888", To: "+1555"}, "c")
+	registerTransferTool(s, testCall("+15559998888"), "c")
 
 	schemas := s.ToolCalls()
 	if len(schemas) != 1 {
