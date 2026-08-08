@@ -4,7 +4,8 @@ What this agent exposes, what it sends back, and how the platform should drive
 it. Written from the implementation, not from a spec — every field and status
 below is what the code actually does.
 
-**Version:** v1.0 · **Status:** phone (outbound + inbound) implemented, WebRTC not
+**Version:** v1.0 · **Status:** phone (outbound + inbound) implemented · WebRTC and
+call transfer **not** implemented — see §7 before sending `transfer_number`
 · **Agent side:** `pkg/rexa/` in `achatbot-go`
 
 ---
@@ -137,7 +138,6 @@ Request bodies are capped at **128 KB**; larger returns `400 invalid_request`.
   "hello_message":     "Hi, this is a quick call.",
   "voicemail_message": "Sorry we missed you — we'll try again.",
 
-  "transfer_number": "+15559998888",
   "webhook_url": "https://platform.example.com/v1/_internal/webhooks/call-agent"
 }
 ```
@@ -152,7 +152,7 @@ the field named in the message.
 | `voice` | Bare string in your vocabulary (`"leah"`). Resolved against the local kokoro catalogue, then `REXA_VOICE_MAP`, then a bare integer speaker id, then the configured default. **An unknown voice does not fail the call** — it falls back and logs once. |
 | `language` | ISO 639-1 two-letter (`"en"`), not BCP-47. |
 | `voicemail_message` | Spoken after the beep when answering-machine detection reports a machine. Pre-rendered at dispatch, so it costs no GPU at call time. |
-| `transfer_number` | Optional. Its presence is the signal that transfer may be offered. |
+| `transfer_number` | **Do not send this yet — transfer is not implemented. See §7.** |
 | `webhook_url` | Where the agent POSTs the end-of-call report. |
 
 ### Response — 200
@@ -328,16 +328,49 @@ Timestamps are ISO 8601 UTC with a literal `Z` and millisecond precision.
 Expected response: `200 {"ok": true, ...}`. The platform dedupes on
 `session_id`, so a retry is safe.
 
-### Transfer initiated
+### Transfer initiated — defined, never sent
 
 ```json
 { "type": "transfer_initiated", "session_id": "…", "tenant_id": "…",
   "transfer_number": "+15559998888", "transferred_at": "2026-08-09T08:39:55.000Z" }
 ```
 
+The shape is implemented and will be emitted when transfer lands, but **the
+agent never sends this today** — nothing performs a transfer. See §7.
+
 ---
 
 ## 7. Not implemented
+
+### Call transfer — send `transfer_number` empty
+
+`transfer_number` is accepted and parsed, and then **nothing reads it**. There
+is no transfer action on the carrier client, no tool the model can invoke, and
+`transfer_initiated` is never emitted.
+
+This one needs care on the platform side, because it fails **loudly and badly**
+rather than quietly. `appendTransferNote` puts this into the system prompt
+whenever a transfer number is present:
+
+> `Note : this outreach has transfer functionality and can be transferred when requested`
+
+So the model is told it can transfer, a caller asks for a human, the model says
+it is transferring them — and nothing happens. The caller waits on a line that
+is still just the bot. A silent no-op would be better; this actively misleads
+the person on the phone.
+
+**Until transfer is implemented, dispatch with `transfer_number` absent or
+empty.** The prompt then gets the negative note (`does not have transfer
+functionality`) and the model correctly declines, which is honest and safe.
+
+What implementing it needs, roughly: a `transfer` action on the Telnyx client
+(`POST /calls/{id}/actions/transfer`), a way for the model to trigger it — the
+function-calling layer in `pkg/modules/functions` is the natural hook — and
+wiring the `transfer_initiated` callback plus the capacity release, since a
+transferred call leaves our media path and should stop counting against the
+pipeline ceiling.
+
+### WebRTC rooms
 
 **`POST /connection_webrtc`** returns `503 provider_unavailable`:
 
@@ -351,9 +384,13 @@ the leg into the existing media path. It fails loudly rather than returning a
 room nobody has joined, because a browser sitting in an empty room hears silence
 and is indistinguishable from a broken agent.
 
+### Everything else
+
 Also absent, all optional on the platform side: `functions[]` (tool calling),
 `recording` config, `opt_out_detection`, `metadata` passthrough, sentiment
-webhooks, `disposition_code`, `question_answers[]`, `recording_saved`.
+webhooks, `disposition_code`, `question_answers[]`, `recording_saved`. Unlike
+transfer, none of these are advertised to the model, so omitting them is
+invisible to callers.
 
 ---
 
@@ -403,6 +440,8 @@ calls to ring at once, and whatever fraction answers becomes pipelines.
    `REXA_INBOUND_HMAC_SECRET`, and carries a full `messages` transcript.
 6. Confirm a voicemail-answered call still produces a report with
    `call_status: "voicemail"`.
+7. **Check no dispatch carries a non-empty `transfer_number`** until transfer
+   lands — see §7 for why this one matters more than the other gaps.
 
 Watch `/dashboard` during the first campaign and record `measured.answer_rate`
 and `measured.ring_ms_p95` — those are the numbers that decide whether
