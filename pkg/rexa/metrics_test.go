@@ -514,3 +514,48 @@ func TestDuplicateReserveDoesNotDoubleCount(t *testing.T) {
 		t.Errorf("in flight = %d, want 1", got)
 	}
 }
+
+// Measured mode charges a multiple of the recent mean, not the mean itself.
+// Overshoot is bounded by (ceiling / weight) x the rate that materialises, so
+// weighting by the average leaves nothing in hand when the next batch answers
+// better than the last — and a call a human has answered cannot be refused.
+func TestMeasuredWeightAppliesSafetyFactor(t *testing.T) {
+	m := NewMetrics(100)
+	m.SetHumanWeight(0)
+	// 100 resolved calls, 20 of which reached a pipeline: a 20% answer rate.
+	for i := 0; i < 100; i++ {
+		k := id(i)
+		m.TryReserve(k)
+		if i < 20 {
+			m.MarkOnGPU(k)
+		} else {
+			m.MarkVoicemail(k)
+		}
+		m.Release(k)
+	}
+	s := m.Snapshot()
+	if got := s.Measured.AnswerRate; got < 0.19 || got > 0.21 {
+		t.Fatalf("answer rate = %v, want 0.2", got)
+	}
+	// 0.2 measured x 2.0 factor = 0.4 charged.
+	if got := s.Capacity.HumanWeight; got < 0.39 || got > 0.41 {
+		t.Errorf("weight = %v, want ~0.4 (mean x safety factor)", got)
+	}
+}
+
+// The charge must never exceed a full slot, or we refuse work the ceiling can
+// genuinely serve.
+func TestMeasuredWeightNeverExceedsOne(t *testing.T) {
+	m := NewMetrics(100)
+	m.SetHumanWeight(0)
+	// Everyone answers: a 100% rate, which the safety factor would double.
+	for i := 0; i < 100; i++ {
+		k := id(i)
+		m.TryReserve(k)
+		m.MarkOnGPU(k)
+		m.Release(k)
+	}
+	if got := m.Snapshot().Capacity.HumanWeight; got != 1.0 {
+		t.Errorf("weight = %v, want it capped at 1.0", got)
+	}
+}

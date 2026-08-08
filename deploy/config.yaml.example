@@ -45,12 +45,18 @@ server:
   # Expected GPU cost of one dispatched call -- the fraction that reach a live
   # pipeline rather than an answering machine, a no-answer or a busy.
   #
-  # 1.0 charges every dispatch a full slot. That is deliberately conservative:
-  # a call is dispatched while the phone is still RINGING, and its pipeline
-  # does not exist until it is answered, so anything less assumes an answer
-  # rate you have not measured yet. Watch `measured.answer_rate` on /dashboard
-  # for a real campaign, then lower this to over-subscribe. 0 = use the
-  # measured rate automatically (floored at 0.15).
+  # 0 = ADAPTIVE (recommended). Starts at 1.0 while cold, then tracks the
+  # measured answer rate x a 2x safety factor, floored at 0.15 and capped at
+  # 1.0. The safety factor matters: overshoot is bounded by
+  # (max_gpu_calls / weight) x the rate that actually materialises, so charging
+  # the recent MEAN leaves nothing in hand when the next batch answers better
+  # than the last -- and a call a human has already picked up cannot be refused.
+  #
+  # 1.0 = every dispatch charged a full pipeline slot. The only setting that
+  # GUARANTEES on_gpu never exceeds max_gpu_calls, because converting a
+  # reservation to a pipeline then leaves the total unchanged. Under-utilises
+  # when most calls hit voicemail. Use it for the first real campaign, read
+  # measured.answer_rate off /dashboard, then switch to 0.
   human_answer_weight: 1.0
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in

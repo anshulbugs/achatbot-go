@@ -228,6 +228,10 @@ type Metrics struct {
 	// so a freak run of voicemails cannot authorise an unbounded dispatch
 	// burst on the strength of a lucky sample.
 	minHumanWeight float64
+	// weightSafetyFactor multiplies the measured answer rate in measured mode,
+	// so the charge reflects a plausible worst case rather than the recent
+	// mean. See weightLocked.
+	weightSafetyFactor float64
 
 	tiers map[string]*tierWindow
 
@@ -257,8 +261,9 @@ func NewMetrics(maxGPUCalls int) *Metrics {
 		// Full weight by default: assume every dispatch will need a pipeline
 		// until measurement says otherwise. Over-subscribing by default would
 		// mean the safe configuration is the one you have to remember to set.
-		humanWeight:    1.0,
-		minHumanWeight: 0.15,
+		humanWeight:        1.0,
+		minHumanWeight:     0.15,
+		weightSafetyFactor: 2.0,
 	}
 	for _, t := range []string{TierLLM, TierASR, TierTTS} {
 		m.tiers[t] = &tierWindow{th: DefaultThresholds(t)}
@@ -329,9 +334,27 @@ func (m *Metrics) weightLocked() float64 {
 			live++
 		}
 	}
-	w := float64(live) / float64(m.outcomeLen)
+	// Charge a MULTIPLE of the recent mean, not the mean itself.
+	//
+	// Overshoot is bounded by (ceiling / weight) x the answer rate that
+	// actually materialises. Weighting by the recent mean assumes the next
+	// batch behaves like the last one, and it is exactly when that assumption
+	// breaks — a different segment, a different hour, a better list — that the
+	// error is unrecoverable: a call a human has already answered cannot be
+	// refused without hanging up on them.
+	//
+	// The factor is the answer to "how much better than recent average could
+	// the next batch plausibly be?". At 2.0 a measured 10% is charged as 20%,
+	// which halves the throughput a naive estimate would allow and keeps
+	// on_gpu at or under the ceiling for any rate up to twice the mean.
+	w := (float64(live) / float64(m.outcomeLen)) * m.weightSafetyFactor
 	if w < m.minHumanWeight {
 		w = m.minHumanWeight
+	}
+	// Never charge MORE than a full slot: above 1.0 we would refuse work the
+	// ceiling can genuinely serve.
+	if w > 1 {
+		w = 1
 	}
 	return w
 }
