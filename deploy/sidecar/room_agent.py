@@ -37,6 +37,11 @@ log = logging.getLogger("room-agent")
 # is how a box quietly fills with processes.
 JOIN_TIMEOUT = 120
 
+# Matches the Go side's roomInterruptMute. Both ends drop the interrupted
+# turn's tail because either alone leaves a window: the Go side cannot unsend
+# what is already on the wire, and this cannot unhear what was already queued.
+INTERRUPT_FENCE = 0.4
+
 DAILY_RATE = 48000
 PIPELINE_IN_RATE = 16000
 # 20 ms of 48 kHz mono s16 — matches Daily's own frame size, so reads never
@@ -81,6 +86,11 @@ class RoomAgent:
         # The pipeline tells us its output rate implicitly; assume 24 kHz until
         # proven otherwise, which is what the TTS emits.
         self.out_rate = 24000
+        # When the caller last barged in. Audio that arrives within the fence
+        # after it belongs to the interrupted turn: the Go side mutes for 400ms
+        # for the same reason, and this is the second line of defence for
+        # anything already in flight when the interrupt was sent.
+        self.interrupted_at = 0.0
 
         Daily.init()
         # Virtual devices are created through the factory, never constructed
@@ -108,9 +118,9 @@ class RoomAgent:
         # Text frames are control. Binary frames are audio for the room.
         if isinstance(message, str):
             if message.strip().lower() == "interrupt":
-                # Barge-in. Drop everything queued: the caller has started
-                # talking and the rest of the previous reply is now noise they
-                # deliberately cut off.
+                # Barge-in, and it has to clear TWO buffers, not one.
+                #
+                # Ours: everything queued here but not yet written.
                 dropped = 0
                 while not self.playback.empty():
                     try:
@@ -118,7 +128,17 @@ class RoomAgent:
                         dropped += 1
                     except queue.Empty:
                         break
-                log.debug("interrupt: dropped %d queued chunks", dropped)
+                # Daily's: audio already written to the virtual microphone is
+                # held by the SDK and keeps playing regardless of what we do
+                # here. Clearing our queue alone leaves the caller hearing the
+                # tail of the reply they just interrupted — which is exactly
+                # what a browser call did.
+                try:
+                    self.mic.write_frames(b"")
+                except Exception:  # noqa: BLE001
+                    pass
+                self.interrupted_at = time.monotonic()
+                log.info("interrupt: dropped %d queued chunks", dropped)
             return
         try:
             self.playback.put_nowait(message)
@@ -168,6 +188,8 @@ class RoomAgent:
                 chunk = self.playback.get(timeout=0.2)
             except queue.Empty:
                 continue
+            if time.monotonic() - self.interrupted_at < INTERRUPT_FENCE:
+                continue  # tail of the turn the caller just cut off
             pcm = np.frombuffer(chunk, dtype=np.int16)
             pcm48 = resample(pcm, self.out_rate, DAILY_RATE)
             try:

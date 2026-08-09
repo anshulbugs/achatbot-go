@@ -41,19 +41,46 @@ import (
 // does acoustic echo cancellation in the browser, which is the same reason a
 // laptop on speakerphone works in any video call, so the half-duplex gating
 // that a phone line needs would only cut the caller off mid-sentence here.
-type roomSerializer struct{}
+type roomSerializer struct {
+	mu sync.Mutex
+	// mutedUntil is a post-interruption fence, copied from the phone path
+	// because the failure is identical and this path had none.
+	//
+	// Telling the far end to drop what it has buffered flushes only what it
+	// ALREADY holds. Cancellation upstream is asynchronous, so TTS frames for
+	// the turn the caller just interrupted keep arriving here for a while
+	// afterwards — and without a fence they are dutifully forwarded and played,
+	// so the caller interrupts and then hears the rest of the sentence they cut
+	// off. That is exactly what a browser call did.
+	//
+	// A deadline, never a flag. Gating on some "new turn started" frame is what
+	// a first attempt at the phone path did, and it silenced calls completely:
+	// no such frame is emitted in this pipeline, so the mute latched on the
+	// first interruption and never lifted. A deadline degrades safely.
+	mutedUntil time.Time
+
+	// firstAudioAt measures reply latency: caller stops, agent speaks. Without
+	// it "the call felt laggy" has no number attached to it.
+	lastInterrupt time.Time
+	awaitingReply bool
+}
+
+// roomInterruptMute matches the phone path's 400ms. Measured reply latency is
+// ~950ms at best, so a genuinely new turn's audio lands well after this window
+// and is never clipped.
+const roomInterruptMute = 400 * time.Millisecond
 
 // SupportsInterruption reports that barge-in is encoded on the wire, so the
 // transport hands us the frame instead of falling back to a client control
 // message the sidecar would not understand.
-func (roomSerializer) SupportsInterruption() bool { return true }
+func (*roomSerializer) SupportsInterruption() bool { return true }
 
 // Deserialize turns inbound PCM into a pipeline frame.
 //
 // Anything not a clean 16-bit sample pair is dropped rather than errored: a
 // short read at the end of a stream is normal, and killing the read loop over
 // one odd byte would end the call.
-func (roomSerializer) Deserialize(data []byte) (frames.Frame, error) {
+func (s *roomSerializer) Deserialize(data []byte) (frames.Frame, error) {
 	if len(data) < 2 {
 		return nil, nil
 	}
@@ -70,11 +97,27 @@ func (roomSerializer) Deserialize(data []byte) (frames.Frame, error) {
 // which is how the sidecar knows to drop audio it has buffered but not yet
 // played — without it the caller barges in and still hears the tail of the
 // reply they just cut off.
-func (roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
+func (s *roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
 	switch f := frame.(type) {
 	case *frames.AudioRawFrame:
+		s.mu.Lock()
+		muted := time.Now().Before(s.mutedUntil)
+		if !muted && s.awaitingReply {
+			s.awaitingReply = false
+			log.Printf("room: reply latency ~%dms",
+				time.Since(s.lastInterrupt).Milliseconds())
+		}
+		s.mu.Unlock()
+		if muted {
+			return nil, nil // tail of the turn the caller just interrupted
+		}
 		return f.Audio, nil
 	case *frames.StartInterruptionFrame:
+		s.mu.Lock()
+		s.mutedUntil = time.Now().Add(roomInterruptMute)
+		s.lastInterrupt = time.Now()
+		s.awaitingReply = true
+		s.mu.Unlock()
 		return []byte("interrupt"), nil
 	default:
 		return nil, nil
@@ -175,7 +218,7 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 		chatObserver = chainObservers(chatObserver, obs)
 	}
 
-	runVoiceSession(&roomConn{Conn: conn}, roomSerializer{}, sessionConfig{
+	runVoiceSession(&roomConn{Conn: conn}, &roomSerializer{}, sessionConfig{
 		clientID:     "room_" + sessionID,
 		callID:       sessionID,
 		call:         p,
@@ -190,10 +233,11 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 		// Barge-in works properly here: Daily's client cancels echo before the
 		// audio ever reaches us, so the caller's voice is the caller's voice.
 		allowInterruptions: true,
-		// Bigger than the phone path's 40ms. There is no carrier repacing the
-		// stream, and larger frames mean fewer WebSocket writes per second per
-		// call, which matters once sixty of these are running.
-		audioOutFrameMS: 60,
+		// Matches the phone path. 60ms was chosen to save WebSocket writes and
+		// it bought nothing worth having: every frame is 60ms of audio the
+		// caller waits for before the first word, on a path where the sidecar
+		// and Daily each add their own buffering on top.
+		audioOutFrameMS: 40,
 	})
 	log.Printf("room: session=%s media ended", sessionID)
 
