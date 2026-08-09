@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
@@ -22,8 +23,13 @@ import (
 
 type LLMOpenAIApiProcessor struct {
 	*processors.AsyncFrameProcessor
-	provider       common.IOpenAILLMProvider
-	session        *common.Session
+	provider common.IOpenAILLMProvider
+	session  *common.Session
+	// turnMu guards turnCancel, which stops the in-flight generation when the
+	// caller interrupts. Written from the pipeline goroutine delivering frames
+	// and read from the goroutine running the turn.
+	turnMu         sync.Mutex
+	turnCancel     context.CancelFunc
 	mode           string
 	stream         bool
 	args           types.LMGenerateArgs
@@ -68,6 +74,14 @@ func (p *LLMOpenAIApiProcessor) ProcessFrame(frame frames.Frame, direction proce
 		p.PushFrame(f, direction)
 	case *frames.CancelFrame:
 		logger.Info("LLMOpenAIApiProcessor Cancel")
+		p.PushFrame(f, direction)
+	case *frames.StartInterruptionFrame:
+		// Stop generating. Without this the pipeline drops the TTS audio — so
+		// the caller stops hearing the reply — while the model runs the turn to
+		// completion in the background. Two costs, both real: the whole reply
+		// lands in the end-of-call transcript as if it had been spoken, and a
+		// cancelled turn keeps consuming LLM capacity that live calls need.
+		p.cancelTurn()
 		p.PushFrame(f, direction)
 	case *frames.TextFrame:
 		logger.Infof("STAGE llm_recv %q", f.Text)
@@ -126,6 +140,29 @@ func normaliseHistoryItem(m map[string]any) map[string]any {
 	return out
 }
 
+// cancelTurn stops any generation in flight. Safe to call when none is.
+func (p *LLMOpenAIApiProcessor) cancelTurn() {
+	p.turnMu.Lock()
+	cancel := p.turnCancel
+	p.turnCancel = nil
+	p.turnMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// beginTurn returns a context for one turn's generation, cancelled when the
+// caller interrupts.
+func (p *LLMOpenAIApiProcessor) beginTurn() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.turnMu.Lock()
+	// A previous turn's cancel is stale by now; dropping it cannot strand a
+	// generation because each turn cancels its own on the way out.
+	p.turnCancel = cancel
+	p.turnMu.Unlock()
+	return ctx, cancel
+}
+
 func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processors.FrameDirection) {
 	chatHistory := p.session.GetChatHistory()
 	chatHistory.Append(map[string]any{"role": "user", "content": frame.Text})
@@ -141,6 +178,9 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 	// purpose: a turn that calls a tool makes several requests and the caller
 	// waits for all of them, so timing each request separately would call a
 	// turn fast that the caller heard as a long silence.
+	turnCtx, endTurn := p.beginTurn()
+	defer endTurn()
+
 	turnStart := time.Now()
 	turnObserved := false
 	observeTurn := func() {
@@ -160,7 +200,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 		}
 		cnToolCalls++
 		if !p.stream {
-			p.provider.Chat(context.Background(), p.args, messages, func(resp *openai.ChatCompletion) error {
+			p.provider.Chat(turnCtx, p.args, messages, func(resp *openai.ChatCompletion) error {
 				toolMsgs := []types.Message{}
 				for i, toolCall := range resp.Choices[0].Message.ToolCalls {
 					// Extract the location from the function call arguments
@@ -216,7 +256,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 			acc := openai.ChatCompletionAccumulator{}
 			toolMsgs := []types.Message{}
 			firstToken := true
-			p.provider.ChatStream(context.Background(), p.args, messages, func(chunk *openai.ChatCompletionChunk) error {
+			p.provider.ChatStream(turnCtx, p.args, messages, func(chunk *openai.ChatCompletionChunk) error {
 				acc.AddChunk(*chunk)
 				if len(chunk.Choices) == 0 {
 					return nil
