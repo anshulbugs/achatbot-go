@@ -90,6 +90,17 @@ type ServerConfig struct {
 	// MaxCallSecs hangs a call up after this many seconds. Needed for agent-to-agent
 	// load tests, where neither side ever hangs up. 0 disables the cap.
 	MaxCallSecs int `mapstructure:"max_call_secs"`
+	// DialTimeoutSecs is how long an outbound call is allowed to ring before
+	// the carrier gives up and reports no_answer.
+	//
+	// THIS IS A VOICEMAIL SETTING as much as a ring setting. Most carriers
+	// divert to voicemail somewhere between 25 and 35 seconds, so Telnyx's
+	// default of 30 sits exactly on that boundary: a line whose voicemail
+	// would have answered at 32s is abandoned at 30 and reported no_answer,
+	// and no message is left because nothing ever picked up. Raise it above
+	// the divert time to reach voicemail reliably; lower it to spend less
+	// carrier time on numbers that will not answer.
+	DialTimeoutSecs int `mapstructure:"dial_timeout_secs"`
 	// VoicemailDetection enables Telnyx answering-machine detection on outbound
 	// calls: disabled, detect, detect_beep, detect_words, greeting_end, premium.
 	// When a machine is detected the AI pipeline is torn down immediately, which
@@ -383,6 +394,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 	v.SetDefault("server.first_chunk_words", 4)
 	v.SetDefault("server.voicemail_detection", "disabled")
+	// Telnyx's own default, so an unset key changes nothing.
+	v.SetDefault("server.dial_timeout_secs", 30)
 	v.SetDefault("server.clarity_filter", true)
 
 	v.SetDefault("vad.model", "silero")

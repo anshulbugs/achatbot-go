@@ -65,10 +65,24 @@ func (t *transferTool) GetToolCall() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name": "call_transfer",
-			"description": "Transfer this call to a human. Call this ONLY when the " +
-				"person explicitly asks to speak to a human, a real person, an agent, " +
-				"or a manager. Tell them you are connecting them BEFORE calling this. " +
-				"Do not call it to answer a question you could answer yourself.",
+			// "Tell them you are connecting them BEFORE calling this" used to be
+			// the second sentence, and it is the reason a real caller never got
+			// transferred: gemma said "Certainly, I can connect you with X right
+			// away", then "I'm just getting you connected now" — and stopped
+			// there, having done the part the description asked for first and
+			// treated the announcement as the action. The tool was registered,
+			// advertised, and never invoked, twice in one call.
+			//
+			// So the description now says the sentence is not the transfer.
+			"description": "Transfer this call to a human. INVOKE THIS TOOL as soon as " +
+				"the person asks to speak to a human, a real person, an agent or a " +
+				"manager, including when they just say 'transfer me' or agree to be " +
+				"put through. Saying that you are connecting or transferring them does " +
+				"NOT transfer the call — only invoking this tool does, and a caller " +
+				"told they are being connected who then is not has been abandoned on " +
+				"the line. Never say you are connecting, transferring, or putting " +
+				"someone through unless you invoke this tool in the same turn. Do not " +
+				"call it to answer a question you could answer yourself.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -278,7 +278,7 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	prerenderAnnouncements(p)
 
 	webhookURL := d.publicURL + "/telnyx/webhook"
-	callControlID, err := client.Dial(ctx, req.ToNumber, webhookURL, "", amdModeFor(p))
+	callControlID, err := client.Dial(ctx, req.ToNumber, webhookURL, "", amdModeFor(p), cfg.Server.DialTimeoutSecs)
 	if err != nil {
 		log.Printf("rexa: session=%s dial failed: %v", req.SessionID, err)
 		// The call never rang, so nothing downstream will ever emit a report

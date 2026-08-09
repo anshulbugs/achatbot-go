@@ -119,14 +119,17 @@ type DialResult struct {
 // Dial places an outbound call. webhookURL overrides the application's
 // configured webhook for this call only (so test calls do not hit a shared
 // production endpoint). clientState is echoed back on every webhook event.
-func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd string) (string, error) {
+func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd string, ringSecs int) (string, error) {
+	if ringSecs <= 0 {
+		ringSecs = 30
+	}
 	body := map[string]any{
 		"connection_id": c.appID,
 		"to":            to,
 		"from":          c.fromNumber,
 		"webhook_url":   webhookURL,
 		"client_state":  encodeState(clientState),
-		"timeout_secs":  30,
+		"timeout_secs":  ringSecs,
 		"answering_machine_detection": func() string {
 			if amd == "" {
 				return "disabled"

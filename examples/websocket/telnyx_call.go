@@ -446,7 +446,7 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	// distinct wording once however many numbers share it.
 	prerenderAnnouncements(&p)
 
-	callControlID, err := telnyxClient.Dial(r.Context(), p.To, webhookURL, "", amdModeFor(&p))
+	callControlID, err := telnyxClient.Dial(r.Context(), p.To, webhookURL, "", amdModeFor(&p), cfg.Server.DialTimeoutSecs)
 	if err != nil {
 		log.Printf("telnyx dial err: %v", err)
 		http.Error(w, "dial failed: "+err.Error(), http.StatusBadGateway)
@@ -539,6 +539,24 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		calls.markAnswered(id, time.Now())
 		// Ring time = dial to answer, for the reservation-cost estimate.
 		markAnswered(id)
+		// Tell the watchers the phone was picked up.
+		//
+		// THIS WAS MISSING ON THE OUTBOUND PATH ENTIRELY. The inbound handler
+		// publishes call_answered because an inbound leg is already up when we
+		// see it, but an outbound call went dialing -> ringing -> human_detected
+		// -> call_ended and never once said "answered". A consumer that leaves
+		// the ringing state on call_answered — which is what the event is for —
+		// therefore showed every outbound call stuck ringing for its whole
+		// duration, including calls that were mid-conversation.
+		//
+		// Published for a machine answer too, and before the detection verdict
+		// exists: a voicemail that picked up HAS been answered, and the verdict
+		// arrives seconds later as its own machine_detected event.
+		if p.platform != nil {
+			p.platform.live.Event(rexa.EventAnswered, map[string]any{
+				"to_number": p.To,
+			})
+		}
 		if cfg.Server.RecordCalls {
 			go func() {
 				if err := p.tc().RecordStart(context.Background(), id); err != nil {
