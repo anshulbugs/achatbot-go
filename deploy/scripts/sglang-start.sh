@@ -30,6 +30,14 @@
 set -euo pipefail
 LLM_GPU="${LLM_GPU:-0}"
 LLM_MODEL="${LLM_MODEL:-google/gemma-4-E4B-it}"
+# Context window. MUST exceed system prompt + retained history + max_tokens.
+#
+# 4096 is far too small for this deployment: the configured system prompt alone
+# is ~3.1k tokens and chat_history_size 12 retains 26 messages on top. Exceed it
+# and SGLang answers HTTP 400 for EVERY request while /v1/models still returns
+# 200 -- the LLM GPU sits at 0% and calls stall at a flat ~7s, looking like a
+# hang rather than a rejection. Raise it whenever the prompt grows.
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-8192}"
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
@@ -45,7 +53,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   python3 -m sglang.launch_server \
     --model-path "$LLM_MODEL" \
     --host 0.0.0.0 --port 8000 \
-    --context-length 4096 \
+    --context-length "$CONTEXT_LENGTH" \
     --mem-fraction-static 0.85 \
     --cuda-graph-max-bs 256 \
     --schedule-policy lpm \
