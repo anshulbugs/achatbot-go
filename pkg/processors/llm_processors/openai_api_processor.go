@@ -168,6 +168,15 @@ func (p *LLMOpenAIApiProcessor) beginTurn() (context.Context, context.CancelFunc
 }
 
 func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processors.FrameDirection) {
+	// The caller's reflex "hello" on pickup is not a turn. Dropped before it
+	// reaches history, the model or the transcript — answering it produces the
+	// stilted exchange where someone says hello and is told "thanks for taking
+	// my call" before anything has actually happened.
+	if p.session.ShouldSkipCallerTurn(frame.Text) {
+		logger.Infof("STAGE llm_skip_pickup %q", frame.Text)
+		return
+	}
+
 	chatHistory := p.session.GetChatHistory()
 	chatHistory.Append(map[string]any{"role": "user", "content": frame.Text})
 	historyList := chatHistory.ToListWithoutTools() // init tools in provider

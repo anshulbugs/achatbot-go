@@ -34,6 +34,11 @@ type Session struct {
 	// converts it back to a position in the text.
 	spokenSecs  float64
 	charsPerSec float64
+	// filterPickup drops the caller's opening "hello" until they say something
+	// with content in it. Off unless the app turns it on, because it only makes
+	// sense when a greeting was spoken before the pipeline started.
+	filterPickup bool
+	heardContent bool
 	// funcs are tools scoped to THIS session, checked before the global
 	// registry.
 	//
@@ -124,6 +129,42 @@ func (s *Session) RecordSpokenAudio(d time.Duration) {
 	s.llmMu.Lock()
 	s.spokenSecs += d.Seconds()
 	s.llmMu.Unlock()
+}
+
+// SetFilterPickupNoise enables dropping the caller's opening greeting reflex.
+//
+// Only sensible when a greeting has already been spoken: the caller is
+// answering the phone, not the agent, and their "hello" carries nothing to
+// respond to. See IsPickupNoise.
+func (s *Session) SetFilterPickupNoise(v bool) {
+	if s == nil {
+		return
+	}
+	s.llmMu.Lock()
+	s.filterPickup = v
+	s.llmMu.Unlock()
+}
+
+// ShouldSkipCallerTurn reports whether this caller turn should be ignored
+// entirely — no reply, no history, no transcript entry.
+//
+// True only for the FIRST thing said, and only when it is a bare greeting.
+// Once anything with content has arrived, a later "hello" is the caller
+// checking whether the line is still alive, and that deserves an answer.
+func (s *Session) ShouldSkipCallerTurn(text string) bool {
+	if s == nil {
+		return false
+	}
+	s.llmMu.Lock()
+	defer s.llmMu.Unlock()
+	if !s.filterPickup || s.heardContent {
+		return false
+	}
+	if IsPickupNoise(text) {
+		return true
+	}
+	s.heardContent = true
+	return false
 }
 
 // SetSpeakingRate calibrates characters per second for the voice in use, used

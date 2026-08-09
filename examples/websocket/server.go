@@ -838,6 +838,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		// at a word boundary.
 		session.SetSpeakingRate(14 * float64(sc.speed))
 	}
+	// Only when a greeting was already spoken: the caller is answering the
+	// phone, not the agent, so their opening "hello" carries nothing to reply
+	// to. Without a greeting there is nothing for them to be acknowledging and
+	// their first word is a real turn.
+	session.SetFilterPickupNoise(sc.spokenGreeting != "")
 	// Report per-turn LLM latency. The first turn of each call drives
 	// backpressure on its own — see pkg/rexa/metrics.go.
 	sessionID := sc.clientID
