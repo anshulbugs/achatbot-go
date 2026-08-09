@@ -22,6 +22,7 @@ Usage:
 
     mode: shared | distinct | contact | campaignsN   (see build_prompt)
 """
+import hashlib
 import json
 import statistics
 import sys
@@ -140,6 +141,11 @@ lock = threading.Lock()
 
 def one_call(call_id):
     system = build_prompt(call_id)
+    # The same routing tag the agent sets (pkg/rexa/route.go): a hash of the
+    # system prompt's leading 4KB, so calls sharing a campaign prefix pin to one
+    # replica. Only equality matters -- nginx compares keys, it does not care
+    # which hash produced them -- so this need not match Go's FNV.
+    prefix_key = hashlib.sha1(system[:4096].encode()).hexdigest()[:16]
     history = [{"role": "assistant", "content": "Hi, thanks for taking my call. How are you today?"}]
     for turn in range(TURNS):
         history.append({"role": "user", "content": USER_TURNS[turn % len(USER_TURNS)]})
@@ -147,7 +153,8 @@ def one_call(call_id):
         body = json.dumps({"model": MODEL, "messages": msgs, "max_tokens": 70,
                            "temperature": 0.7, "stream": True}).encode()
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat/completions",
-                                     data=body, headers={"content-type": "application/json"})
+                                     data=body, headers={"content-type": "application/json",
+                                                         "x-prefix-key": prefix_key})
         t0 = time.time()
         first = None
         reply = []

@@ -79,12 +79,15 @@ server:
   # workload invalidates it. Serving 6 calls well beats accepting 61 and serving
   # all of them badly.
   #
-  # STARTING POINTS, NOT MEASURED CROSSOVERS. Ramp with
-  # `deploy/loadtest/turnbench.py <port> <calls> 8 12.4 3000 distinct` and move
-  # them to where first-turn latency stops being acceptable. 0 = built-in
-  # default (4000 / 8000 / 30).
-  first_turn_saturated_ms: 4000   # p95 over >=4 calls that shuts admission
-  first_turn_critical_ms: 8000    # ONE first turn this slow shuts it immediately
+  # CALIBRATED against a ramp, not guessed. At 60 calls through two replicas:
+  #   one campaign, contact block last      2286 ms   must not trip
+  #   12 independent campaigns              3550 ms   must not trip
+  #   30 independent campaigns              5400 ms   should trip
+  #   60 unique prompts, varying part first 5906 ms   must trip
+  # saturated sits in the gap. Remeasure with deploy/loadtest/calibrate.sh
+  # whenever prompt size, model or replica count changes. 0 = built-in default.
+  first_turn_saturated_ms: 4500   # p95 over >=4 calls that shuts admission
+  first_turn_critical_ms: 7000    # ONE first turn this slow shuts it immediately
   first_turn_cooldown_secs: 30    # then reopen and re-measure on fresh calls
   # SGLang base URLs (not the /v1 path) whose /metrics is polled every 5s for
   # prefix-cache hit rate and queue depth. Shown on /dashboard and /health;

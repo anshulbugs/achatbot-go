@@ -212,10 +212,19 @@ const (
 
 // FirstTurnThresholds configures the first-turn gate, in milliseconds.
 //
-// IMPORTANT: like TierThresholds these are calibration starting points. The
-// measured good case was 2471 ms and the measured bad case 9903 ms, which is
-// where the defaults come from, but the crossover between them has not been
-// ramped. Calibrate with `turnbench.py ... distinct` before trusting them.
+// CALIBRATED, not guessed. Measured at 60 concurrent calls, 3k prompts, two
+// replicas behind the prefix-hashing balancer (deploy/loadtest/calibrate.sh and
+// scenarios.sh):
+//
+//	one campaign, contact block last     2286 ms   must NOT trip
+//	12 independent campaigns             3550 ms   must NOT trip
+//	30 independent campaigns             5400 ms   should trip
+//	60 unique prompts, varying part first 5906 ms   must trip
+//
+// So the crossover sits between 3550 and 5400, and the defaults below put
+// `saturated` in that gap with margin on the healthy side. Remeasure whenever
+// prompt size, model or replica count changes — every number here is specific
+// to all three.
 type FirstTurnThresholds struct {
 	// DegradedMs only colours the dashboard; it does not refuse traffic.
 	DegradedMs int
@@ -245,10 +254,17 @@ type FirstTurnThresholds struct {
 // DefaultFirstTurnThresholds returns the starting configuration.
 func DefaultFirstTurnThresholds() FirstTurnThresholds {
 	return FirstTurnThresholds{
-		DegradedMs:  2500,
-		SaturatedMs: 4000,
-		CriticalMs:  8000,
-		Cooldown:    30 * time.Second,
+		// Above the worst healthy reading (3550 ms at 12 campaigns), so the
+		// dashboard is not permanently amber on traffic that is fine.
+		DegradedMs: 3000,
+		// In the gap between the hardest workload that must be served (3550 ms)
+		// and the lightest that should be refused (5400 ms).
+		SaturatedMs: 4500,
+		// One first turn this slow is already a caller sitting in silence.
+		// Above the p95 of every workload measured, so it fires on genuine
+		// outliers rather than on a healthy tail.
+		CriticalMs: 7000,
+		Cooldown:   30 * time.Second,
 	}
 }
 

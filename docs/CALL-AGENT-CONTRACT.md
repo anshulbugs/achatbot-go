@@ -103,6 +103,17 @@ nothing else in this contract will work.
 
 ## 2. Endpoints the agent exposes
 
+Base URL for integration testing:
+
+```
+https://entirely-reduces-donna-when.trycloudflare.com
+```
+
+> **This URL is temporary.** It is a Cloudflare quick tunnel and it changes
+> every time the tunnel restarts. Treat it as a value in your config, never as
+> a constant in code. Ask for a stable hostname before anything but integration
+> testing runs against it.
+
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/health` | none | Liveness **and capacity**. See §5 |
@@ -112,6 +123,29 @@ nothing else in this contract will work.
 | `GET` | `/dashboard` | none | Operator capacity dashboard (HTML) |
 
 Request bodies are capped at **128 KB**; larger returns `400 invalid_request`.
+
+### Verify your integration in two calls
+
+Before wiring anything up, confirm the two things that break silently.
+
+**1. The agent is reachable and reporting capacity:**
+
+```bash
+curl -s https://entirely-reduces-donna-when.trycloudflare.com/health
+```
+
+Expect `200` with `"status": true` and `"accepting": true`.
+
+**2. Your signing matches ours.** Send a `/connection` with deliberately fake
+Telnyx credentials:
+
+- `401 unauthenticated` → the HMAC does not match. Work through §1 before
+  anything else; nothing will function until this passes.
+- `503 provider_unavailable` with a Telnyx `10009` in the message → **correct**.
+  The signature verified, the body parsed, and the agent got as far as trying to
+  place the call. Real credentials are all that is missing.
+- `400 invalid_request` → signing is fine; a required field is absent. The
+  message names it.
 
 ---
 
