@@ -297,29 +297,51 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 					p.QueueFrame(frames.NewTextFrame(chunk.Choices[0].Delta.Content), direction)
 				}
 
-				if chunk.Choices[0].Delta.ToolCalls != nil {
-					for _, tool := range chunk.Choices[0].Delta.ToolCalls {
-						tool.Function.Arguments = strings.ReplaceAll(tool.Function.Arguments, "{}", "")
-						var args map[string]any
-						err := json.Unmarshal([]byte(tool.Function.Arguments), &args)
-						if err != nil {
-							logger.Errorf("Failed to Unmarshal err: %v", err)
-							continue
-						}
-						result, err := p.execFunc(tool.Function.Name, args)
-						if err != nil {
-							logger.Error("Execute", "err", err, "funcName", tool.Function.Name, "funcArgs", tool.Function.Arguments)
-							continue
-						}
-						toolMsgs = append(toolMsgs, types.Message{
-							ChatCompletionMessage: openai.ChatCompletionMessage{Role: "tool", Content: result},
-							ToolCallID:            tool.ID,
-						})
-						p.QueueFrame(achatbot_frames.NewFunctionCallFrame(tool.ID, tool.Function.Name, args, int(tool.Index)), direction)
-					}
-				}
+				// TOOL CALLS ARE NOT RUN FROM THE DELTA. See below.
 				return nil
 			})
+
+			// Run tool calls from the ACCUMULATOR, once the stream is complete.
+			//
+			// They used to be run from each chunk's Delta.ToolCalls, and that
+			// silently never worked. A streamed tool call arrives in fragments
+			// — `{"rea`, `son":"`, `wants a per`, … — so json.Unmarshal failed
+			// on every fragment and `continue` skipped it. No tool ever ran.
+			//
+			// The failure was invisible and looked nothing like its cause. With
+			// no tool result, toolMsgs stayed empty; with the model emitting a
+			// tool call, Message.Content stayed empty too, so neither branch
+			// below ever set isToolCalls, the outer loop spun on its previous
+			// value, and the turn died at "too many tool calls" having queued
+			// no text at all. On the phone that is the agent going silent
+			// mid-sentence — which is exactly how it was reported, twice, as a
+			// transfer that "went mute".
+			//
+			// The accumulator exists for precisely this: it reassembles the
+			// fragments and hands back whole tool calls with complete
+			// arguments. Running them here also runs each one exactly once,
+			// which per-delta execution could not promise either.
+			if len(acc.Choices) > 0 {
+				for i, tool := range acc.Choices[0].Message.ToolCalls {
+					args, err := parseToolArgs(tool.Function.Arguments)
+					if err != nil {
+						logger.Error("tool arguments unparseable", "err", err,
+							"funcName", tool.Function.Name, "funcArgs", tool.Function.Arguments)
+						continue
+					}
+					result, err := p.execFunc(tool.Function.Name, args)
+					if err != nil {
+						logger.Error("Execute", "err", err, "funcName", tool.Function.Name, "funcArgs", tool.Function.Arguments)
+						continue
+					}
+					logger.Infof("tool call %s(%v) -> %s", tool.Function.Name, args, result)
+					toolMsgs = append(toolMsgs, types.Message{
+						ChatCompletionMessage: openai.ChatCompletionMessage{Role: "tool", Content: result},
+						ToolCallID:            tool.ID,
+					})
+					p.QueueFrame(achatbot_frames.NewFunctionCallFrame(tool.ID, tool.Function.Name, args, i), direction)
+				}
+			}
 			// If there is a was a function call, continue the conversation
 			if len(toolMsgs) > 0 { //call_tools
 				if !p.isHistoryThink {
@@ -341,6 +363,16 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 				msg := types.Message{ChatCompletionMessage: acc.Choices[0].Message}
 				messages = append(messages, msg)
 				p.appendHistoryChatMessages([]types.Message{msg})
+				isToolCalls = false
+			}
+
+			// A turn that produced neither text nor a runnable tool call must
+			// not spin. Nothing was added to `messages`, so going round again
+			// re-sends a request that already failed to produce anything, and
+			// the only thing four more attempts buy the caller is a longer
+			// silence before the loop gives up.
+			if len(toolMsgs) == 0 && (len(acc.Choices) == 0 || acc.Choices[0].Message.Content == "") {
+				logger.Error("chat", "err", "turn produced no content and no runnable tool call")
 				isToolCalls = false
 			}
 		} //end stream
@@ -381,4 +413,23 @@ func (p *LLMOpenAIApiProcessor) execFunc(name string, args map[string]any) (stri
 		return fn.Execute(args)
 	}
 	return functions.RegisterFuncs.Execute(name, args)
+}
+
+// parseToolArgs decodes a tool call's arguments into a map.
+//
+// Empty and "{}" both mean "no arguments" and are NOT errors — a tool whose
+// parameters are all optional is legitimately called with neither. The previous
+// code stripped "{}" out of the string with strings.ReplaceAll and then handed
+// the empty remainder to json.Unmarshal, which fails, so every no-argument tool
+// call was discarded as unparseable.
+func parseToolArgs(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return map[string]any{}, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, err
+	}
+	return args, nil
 }
