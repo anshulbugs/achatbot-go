@@ -28,7 +28,7 @@
 #   sentiment classifier  :11435  (llama3.2:3b via ollama, ~8 cores at 60 calls)
 #
 # Env overrides: GPUS ("0 1 2 3"), HF_CACHE, SKIP_DEPS=1, SKIP_TUNNEL=1,
-# SKIP_SERVER=1, SKIP_SENTIMENT=1, REBUILD=1 (force image + binary rebuild).
+# SKIP_SERVER=1, SKIP_SENTIMENT=1, SKIP_SIDECAR=1, REBUILD=1 (force rebuild).
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
@@ -128,6 +128,17 @@ if [ "${SKIP_SENTIMENT:-0}" != "1" ]; then
     echo "    sentiment-cpu ready on :11435"
   else
     echo "    SKIPPED - ollama not available (see deploy/scripts/sentiment-start.sh)"
+  fi
+fi
+
+if [ "${SKIP_SIDECAR:-0}" != "1" ]; then
+  log "Daily room sidecar (browser calls)"
+  # Only needed for /connection_webrtc. Non-fatal: without it browser calls are
+  # refused up front and phone calls are unaffected.
+  if bash deploy/scripts/sidecar-install.sh >/dev/null 2>&1; then
+    echo "    sidecar venv ready"
+  else
+    echo "    SKIPPED - see deploy/scripts/sidecar-install.sh"
   fi
 fi
 

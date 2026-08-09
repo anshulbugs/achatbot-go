@@ -32,6 +32,11 @@ CF="${CLOUDFLARED:-./cloudflared}"
 # Fall back to a system install, then to the one deps-install.sh puts in $HOME.
 [ -x "$CF" ] || CF="$(command -v cloudflared 2>/dev/null || echo "$HOME/cloudflared")"
 POOL="${POOL:-4}"
+# The Daily sidecar: a Python process per browser call that joins the room
+# and pipes its audio to /room/media. Without it /connection_webrtc refuses
+# rather than handing back a room nobody is in. sidecar-install.sh makes it.
+SIDECAR_PYTHON="${SIDECAR_PYTHON:-$HOME/sidecar-venv/bin/python}"
+SIDECAR_SCRIPT="${SIDECAR_SCRIPT:-$PWD/deploy/sidecar/room_agent.py}"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -82,6 +87,8 @@ ACHATBOT_TTS_POOL_SIZE="$POOL" \
 ACHATBOT_SERVER_MAX_GPU_CALLS="${MAX_GPU_CALLS:-61}" \
 ACHATBOT_SERVER_MAX_TOTAL_CALLS="${MAX_TOTAL_CALLS:-200}" \
 TELNYX_PUBLIC_URL="$PUBLIC" \
+SIDECAR_PYTHON="$SIDECAR_PYTHON" \
+SIDECAR_SCRIPT="$SIDECAR_SCRIPT" \
   nohup setsid "$BIN" -config config.yaml > "rexa-${PORT}.log" 2>&1 < /dev/null &
 disown
 
