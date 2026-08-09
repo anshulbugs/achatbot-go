@@ -495,6 +495,29 @@ same live-listening link as the `join_daily` event in §7a — so an operator
 alerted with "the caller wants a human" is one click from hearing them. Absent
 otherwise. Treat it as optional rather than assuming every call has one.
 
+### Three deliberate differences from the previous agent
+
+Worth knowing when you diff the two, because all three are intentional.
+
+**Voicemail reports `call_status: "voicemail"`, not `"completed"`.** The old
+agent sent `completed` with `end_reason: "voicemail"`. Your own schema comment
+records why that was a problem: the canonical values for `voicemail`,
+`no_answer` and `busy` were added in 2026-05 precisely because tenants
+subscribing to `session.ended` saw `completed` for voicemail drops, since the
+normaliser had nothing to map `call_status='voicemail'` onto. We send both the
+status and the reason, so either path resolves it.
+
+**`end_reason` uses your canonical vocabulary.** `callee_hung_up` outbound,
+`caller_hung_up` inbound, rather than free text like `"call cut by user"`. The
+wire schema accepts any string and your normaliser maps known values, so this
+just means it does not have to guess.
+
+**The transcript does not echo the system prompt.** The old agent included the
+`role: "system"` turn — the entire prompt, often 12 KB — in every end-of-call
+report, and your relay drops it before it reaches a tenant. We send only the
+spoken conversation: `agent` and `user` turns, each with a `t` offset in seconds
+from the start of the call.
+
 ### Transfer initiated
 
 ```json
