@@ -1,6 +1,7 @@
 package common
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,10 @@ type Session struct {
 	llmMu       sync.Mutex
 	llmObserver LLMObserver
 	llmTurns    int
+	// agentTurn accumulates the current reply as it is handed to speech;
+	// agentObserver receives each completed or interrupted turn.
+	agentTurn     strings.Builder
+	agentObserver AgentTurnObserver
 	// funcs are tools scoped to THIS session, checked before the global
 	// registry.
 	//
@@ -68,6 +73,56 @@ func (s *Session) ToolCalls() []map[string]any {
 		out = append(out, fn.GetToolCall())
 	}
 	return out
+}
+
+// AgentTurnObserver receives the agent's side of the conversation as it is
+// handed to speech, one completed turn at a time.
+type AgentTurnObserver func(text string)
+
+// SetAgentTurnObserver installs the callback that records what the agent said.
+//
+// Separate from the chat-history observer for one reason: chat history holds
+// what the MODEL PRODUCED, and after an interruption that is not what the
+// caller HEARD. The model runs ahead of the voice, so a turn cut off after one
+// sentence still leaves three in the history, and reporting those as spoken
+// puts words in the agent's mouth.
+func (s *Session) SetAgentTurnObserver(fn AgentTurnObserver) {
+	if s == nil {
+		return
+	}
+	s.llmMu.Lock()
+	s.agentObserver = fn
+	s.llmMu.Unlock()
+}
+
+// RecordAgentChunk accumulates one piece of the agent's current turn, at the
+// point it is handed downstream to be spoken.
+func (s *Session) RecordAgentChunk(text string) {
+	if s == nil || text == "" {
+		return
+	}
+	s.llmMu.Lock()
+	s.agentTurn.WriteString(text)
+	s.llmMu.Unlock()
+}
+
+// FlushAgentTurn reports the turn accumulated so far and starts a new one.
+//
+// Called both when a turn finishes normally and when one is cut short, because
+// the answer to "what did the agent say" is the same in both cases: whatever
+// reached this point before it stopped.
+func (s *Session) FlushAgentTurn() {
+	if s == nil {
+		return
+	}
+	s.llmMu.Lock()
+	text := strings.TrimSpace(s.agentTurn.String())
+	s.agentTurn.Reset()
+	fn := s.agentObserver
+	s.llmMu.Unlock()
+	if fn != nil && text != "" {
+		fn(text)
+	}
 }
 
 // SetLLMObserver installs the callback for per-turn LLM timing. nil disables

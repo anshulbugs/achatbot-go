@@ -82,6 +82,10 @@ func (p *LLMOpenAIApiProcessor) ProcessFrame(frame frames.Frame, direction proce
 		// lands in the end-of-call transcript as if it had been spoken, and a
 		// cancelled turn keeps consuming LLM capacity that live calls need.
 		p.cancelTurn()
+		// Close the turn at the point it was cut. Whatever had been handed to
+		// speech by now is the honest answer to "what did the agent say"; the
+		// rest was generated and never heard.
+		p.session.FlushAgentTurn()
 		p.PushFrame(f, direction)
 	case *frames.TextFrame:
 		logger.Infof("STAGE llm_recv %q", f.Text)
@@ -180,6 +184,10 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 	// turn fast that the caller heard as a long silence.
 	turnCtx, endTurn := p.beginTurn()
 	defer endTurn()
+	// A turn that ends normally is reported here; one cut short is reported by
+	// the interruption handler. Flushing twice is harmless — the second finds
+	// nothing left.
+	defer p.session.FlushAgentTurn()
 
 	turnStart := time.Now()
 	turnObserved := false
@@ -241,6 +249,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 				}
 				if resp.Choices[0].Message.Content != "" {
 					observeTurn()
+					p.session.RecordAgentChunk(resp.Choices[0].Message.Content)
 					isToolCalls = false
 					if !p.isHistoryThink {
 						resp.Choices[0].Message.Reasoning = ""
@@ -271,6 +280,11 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 						firstToken = false
 						observeTurn()
 					}
+					// Record it at the moment it is handed downstream to be
+					// spoken. Reading the finished message off chat history
+					// instead reports everything the model produced, which
+					// after an interruption is not what the caller heard.
+					p.session.RecordAgentChunk(chunk.Choices[0].Delta.Content)
 					p.QueueFrame(frames.NewTextFrame(chunk.Choices[0].Delta.Content), direction)
 				}
 

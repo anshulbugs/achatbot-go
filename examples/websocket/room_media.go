@@ -219,7 +219,7 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 	// lookup, so the caller hears the first word as soon as they are in.
 	ser := &roomSerializer{}
 	if p.Hello != "" {
-		if pcm := announcements.get(p.Hello, p.VoiceID, p.Speed); len(pcm) > 0 {
+		if pcm := announcements.get(p.Hello, p.VoiceID, p.Speed, p.Volume); len(pcm) > 0 {
 			rate, _, _ := ttsSampleInfo()
 			// Suppress interrupts for as long as the greeting plays, plus a
 			// little: the sidecar holds it until the caller is in the room, so
@@ -245,9 +245,11 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var chatObserver func(map[string]any)
+	var agentObserver func(string)
 	if p.platform != nil && p.platform.transcript != nil {
 		p.platform.transcript.SeedGreeting(p.Hello)
 		chatObserver = p.platform.transcript.ObserveChatHistory()
+		agentObserver = p.platform.transcript.ObserveAgentTurns()
 	}
 	if obs := sentimentObserver(sessionID, p.platform); obs != nil {
 		chatObserver = chainObservers(chatObserver, obs)
@@ -256,15 +258,16 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 	runVoiceSession(&roomConn{Conn: conn}, ser, sessionConfig{
 		clientID: "room_" + sessionID,
 		// Played out of band above; without this the model greets again.
-		spokenGreeting: p.Hello,
-		callID:         sessionID,
-		call:           p,
-		chatObserver:   chatObserver,
-		systemPrompt:   p.SystemPrompt,
-		voiceID:        p.VoiceID,
-		speed:          p.Speed,
-		volume:         p.Volume,
-		llmModel:       p.LLMModel,
+		spokenGreeting:    p.Hello,
+		callID:            sessionID,
+		call:              p,
+		chatObserver:      chatObserver,
+		agentTurnObserver: agentObserver,
+		systemPrompt:      p.SystemPrompt,
+		voiceID:           p.VoiceID,
+		speed:             p.Speed,
+		volume:            p.Volume,
+		llmModel:          p.LLMModel,
 		// Empty on purpose — the greeting is played below from the copy already
 		// rendered at dispatch. Left set, runVoiceSession re-synthesizes it at
 		// session start, and the caller waits through a TTS render of the whole

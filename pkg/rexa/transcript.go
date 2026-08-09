@@ -157,6 +157,21 @@ func (t *Transcript) ObserveChatHistory() func(map[string]any) {
 	return func(item map[string]any) {
 		role, _ := item["role"].(string)
 		content, _ := item["content"].(string)
+		// AGENT turns are deliberately ignored here. Chat history holds what the
+		// model PRODUCED; after an interruption that is more than the caller
+		// heard, because the model runs ahead of the voice. The spoken side
+		// arrives through ObserveAgentTurns instead, recorded as it is handed to
+		// speech and closed off at the moment of interruption.
+		if mapRole(role) == RoleAgent {
+			return
+		}
 		t.Add(role, content)
+	}
+}
+
+// ObserveAgentTurns adapts Transcript to the session's agent-turn observer.
+func (t *Transcript) ObserveAgentTurns() func(string) {
+	return func(text string) {
+		t.Add(RoleAgent, text)
 	}
 }

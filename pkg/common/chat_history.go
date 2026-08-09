@@ -1,8 +1,8 @@
 package common
 
 import (
-	"maps"
 	"encoding/json"
+	"maps"
 )
 
 // ChatHistory buffers the local chat history with limit size to avoid LLM context too long

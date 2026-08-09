@@ -174,22 +174,48 @@ func TestConcurrentAddAndRead(t *testing.T) {
 	}
 }
 
-// The observer adapter must pull role + content out of the pipeline's message
-// maps, and survive a malformed one rather than panicking mid-call.
-func TestObserveChatHistory(t *testing.T) {
+// The chat-history observer records the CALLER only, and survives a malformed
+// message rather than panicking mid-call.
+//
+// Agent turns deliberately do not come from here: chat history holds what the
+// model produced, and after an interruption that is more than the caller heard.
+func TestObserveChatHistoryRecordsCallerOnly(t *testing.T) {
 	tr := NewTranscript(time.Now())
 	obs := tr.ObserveChatHistory()
 	obs(map[string]any{"role": "user", "content": "hello"})
-	obs(map[string]any{"role": "assistant", "content": "hi there"})
+	obs(map[string]any{"role": "assistant", "content": "generated, maybe not spoken"})
 	obs(map[string]any{"role": "assistant"})             // tool-call turn, no text
 	obs(map[string]any{"content": "orphaned"})           // no role
 	obs(map[string]any{"role": 42, "content": []int{1}}) // wrong types
 
 	turns := tr.Turns()
-	if len(turns) != 2 {
-		t.Fatalf("len = %d, want 2: %+v", len(turns), turns)
+	if len(turns) != 1 {
+		t.Fatalf("len = %d, want 1 (caller only): %+v", len(turns), turns)
 	}
-	if turns[0].Content != "hello" || turns[1].Content != "hi there" {
+	if turns[0].Role != RoleUser || turns[0].Content != "hello" {
 		t.Errorf("turns = %+v", turns)
+	}
+}
+
+// The agent side arrives through its own observer, fed as text is handed to
+// speech and closed off at an interruption — so the report says what the caller
+// heard rather than what the model wrote.
+func TestObserveAgentTurns(t *testing.T) {
+	tr := NewTranscript(time.Now())
+	chat, agent := tr.ObserveChatHistory(), tr.ObserveAgentTurns()
+
+	agent("Hello, how can I help?")
+	chat(map[string]any{"role": "user", "content": "I have a question"})
+	agent("Of course") // cut short by the caller
+
+	turns := tr.Turns()
+	if len(turns) != 3 {
+		t.Fatalf("len = %d, want 3: %+v", len(turns), turns)
+	}
+	if turns[0].Role != RoleAgent || turns[1].Role != RoleUser || turns[2].Role != RoleAgent {
+		t.Fatalf("roles = %v/%v/%v", turns[0].Role, turns[1].Role, turns[2].Role)
+	}
+	if turns[2].Content != "Of course" {
+		t.Errorf("interrupted turn = %q, want only what was spoken", turns[2].Content)
 	}
 }

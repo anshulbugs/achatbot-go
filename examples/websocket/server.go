@@ -657,6 +657,9 @@ type sessionConfig struct {
 	// chatObserver receives every chat turn as it is appended, for the
 	// platform's end-of-call transcript. nil on the demo path.
 	chatObserver func(map[string]any)
+	// agentTurnObserver receives each agent turn as it is handed to speech,
+	// truncated at an interruption.
+	agentTurnObserver func(string)
 	// callID is the carrier call-control id, used to move this call's capacity
 	// state to on_gpu. Empty for browser sessions, which hold pool slots but
 	// are not part of the platform's call accounting.
@@ -799,6 +802,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// turns are gone. nil on the demo path, which keeps no transcript.
 	if sc.chatObserver != nil {
 		session.GetChatHistory().SetObserver(sc.chatObserver)
+	}
+	// The agent's own side of the conversation, recorded as it is spoken rather
+	// than as it is generated. See Session.SetAgentTurnObserver.
+	if sc.agentTurnObserver != nil {
+		session.SetAgentTurnObserver(sc.agentTurnObserver)
 	}
 	// Report per-turn LLM latency. The first turn of each call drives
 	// backpressure on its own — see pkg/rexa/metrics.go.

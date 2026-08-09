@@ -766,7 +766,7 @@ func prerenderAnnouncements(p *callParams) {
 	}
 	for _, text := range []string{p.Hello, p.VoicemailMessage} {
 		if text != "" {
-			announcements.get(text, p.VoiceID, p.Speed)
+			announcements.get(text, p.VoiceID, p.Speed, p.Volume)
 		}
 	}
 }
@@ -788,11 +788,18 @@ var announcements = &announceCache{m: map[string][]byte{}}
 // get returns PCM for text in the given voice, synthesizing on first use. The
 // key includes voice and speed because the same words in a different voice are
 // different audio.
-func (a *announceCache) get(text string, voiceID int, speed float32) []byte {
+// get returns PCM for text, synthesizing on first use.
+//
+// gain is part of the key AND applied to the provider. Leaving it out was a
+// real bug: the greeting was rendered at whatever gain the pooled instance
+// happened to carry from the last session, so it played quieter than every
+// other word on the call while the configured gain was applied faithfully
+// everywhere else.
+func (a *announceCache) get(text string, voiceID int, speed, gain float32) []byte {
 	if text == "" {
 		return nil
 	}
-	key := fmt.Sprintf("%d|%.2f|%s", voiceID, speed, text)
+	key := fmt.Sprintf("%d|%.2f|%.2f|%s", voiceID, speed, gain, text)
 	a.mu.Lock()
 	pcm, ok := a.m[key]
 	a.mu.Unlock()
@@ -807,6 +814,9 @@ func (a *announceCache) get(text string, voiceID int, speed float32) []byte {
 	defer ttsPool.Put(info)
 	prov := info.GetInstance().(tts.VoiceProvider)
 	prov.SetVoice(voiceID, speed)
+	if gain > 0 {
+		prov.SetGain(gain)
+	}
 	pcm = prov.Synthesize(text)
 	a.mu.Lock()
 	a.m[key] = pcm
@@ -923,7 +933,7 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 		_ = p.tc().Hangup(context.Background(), id)
 		return
 	}
-	pcm := announcements.get(msg, p.VoiceID, p.Speed)
+	pcm := announcements.get(msg, p.VoiceID, p.Speed, p.Volume)
 	if len(pcm) == 0 {
 		_ = p.tc().Hangup(context.Background(), id)
 		return
@@ -994,7 +1004,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	helloText := p.Hello
 	amdOn := amdModeFor(p) != "disabled" && len(demoVoices) == 0
 	if amdOn && helloText != "" {
-		pcm := announcements.get(helloText, p.VoiceID, p.Speed)
+		pcm := announcements.get(helloText, p.VoiceID, p.Speed, p.Volume)
 		if len(pcm) > 0 {
 			tw := achatbot_processors.NewWebsocketTransportWriter(conn, &params.WebsocketServerParams{
 				AudioCameraParams: params.NewAudioCameraParams(),
@@ -1042,11 +1052,13 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 
 	// Platform calls record a transcript; demo calls do not.
 	var chatObserver func(map[string]any)
+	var agentObserver func(string)
 	if p.platform != nil && p.platform.transcript != nil {
 		// The greeting was spoken straight from TTS and never reached the
 		// model, so nothing else will ever put it in the transcript.
 		p.platform.transcript.SeedGreeting(p.Hello)
 		chatObserver = p.platform.transcript.ObserveChatHistory()
+		agentObserver = p.platform.transcript.ObserveAgentTurns()
 	}
 	// Sentiment rides the same observer: it needs exactly what the transcript
 	// needs — every turn as it happens — and adding a second observation point
@@ -1068,6 +1080,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		callID:             id,
 		call:               p,
 		chatObserver:       chatObserver,
+		agentTurnObserver:  agentObserver,
 		systemPrompt:       p.SystemPrompt,
 		voiceID:            p.VoiceID,
 		speed:              p.Speed,
