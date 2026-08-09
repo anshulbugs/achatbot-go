@@ -447,7 +447,11 @@ holding the report back for it would delay every disposition you act on. Only
 sent when recording is enabled on the agent.
 
 **This is the carrier's own payload, forwarded unchanged apart from `type`,
-`session_id` and `tenant_id`.** Whatever Telnyx sends is what you get: the same
+`session_id`, `tenant_id` — and `status`, which Telnyx does not send at all.
+Your schema requires it, so we add an empty string when the carrier omits one
+and leave any value it does send alone.** Empty rather than invented: your
+handler already infers the outcome from whether URLs are present, and two
+systems guessing the same thing independently is how they come to disagree. Whatever Telnyx sends is what you get: the same
 field names, the same URL forms (including `s3://`), and `status` exactly as
 reported — which is sometimes an empty string. We do not rewrite URLs, re-host
 recordings, or infer a status from whether URLs are present.

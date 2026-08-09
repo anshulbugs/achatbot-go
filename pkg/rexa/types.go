@@ -349,12 +349,27 @@ type RecordingSavedEvent map[string]any
 
 // NewRecordingSaved wraps a carrier payload for delivery.
 //
-// The three added keys are set AFTER the copy, so a carrier payload that
-// happened to contain them cannot overwrite the ids the platform routes on.
+// The ids are set AFTER the copy, so a carrier payload that happened to contain
+// them cannot overwrite what the platform routes on.
+//
+// `status` is added when the carrier omits it, which Telnyx always does — its
+// call.recording.saved payload carries format, channels, timings and URLs and
+// no status at all. The platform's schema requires the field, so a pure
+// pass-through was rejected outright:
+//
+//	path ["status"] expected "string" received "undefined" — event dropped
+//
+// Empty rather than invented: the platform's handler already infers the outcome
+// from whether URLs are present, and two systems guessing the same thing
+// independently is how they end up disagreeing. Empty is also exactly what the
+// previous agent sent, so this cannot surprise the consumer.
 func NewRecordingSaved(payload map[string]any, sessionID, tenantID string) RecordingSavedEvent {
-	out := make(RecordingSavedEvent, len(payload)+3)
+	out := make(RecordingSavedEvent, len(payload)+4)
 	for k, v := range payload {
 		out[k] = v
+	}
+	if _, ok := out["status"]; !ok {
+		out["status"] = ""
 	}
 	out["type"] = "recording_saved"
 	out["session_id"] = sessionID

@@ -98,3 +98,56 @@ func TestSourcePayloadIsNotMutated(t *testing.T) {
 		t.Fatal("the carrier payload was mutated in place")
 	}
 }
+
+// The exact payload Telnyx sent on a real call. Note what is NOT in it: there
+// is no `status` field, and the platform's schema requires one. A pure
+// pass-through was rejected with
+//
+//	path ["status"] expected "string" received "undefined" — event dropped
+//
+// and both recordings for that call were lost after being delivered.
+const telnyxPayloadNoStatus = `{
+  "type": "recording_saved",
+  "format": "wav",
+  "channels": "single",
+  "end_time": "2026-08-09T14:00:06.288441Z",
+  "start_time": "2026-08-09T13:58:14.568482Z",
+  "call_leg_id": "5b1a1c6a-93fa-11f1-9349-02420a0df31f",
+  "client_state": null,
+  "recording_id": "bd345af4-6c1b-42a6-b78c-8b350efff00a",
+  "connection_id": "2580092767426316174",
+  "recording_urls": {"wav": "s3://rexa-recordings/2026-08-09/x.wav"},
+  "call_control_id": "v3:i7GbeXWAYMKTLreblOfJD25xhp4ZfbKJ",
+  "flow_destination": "non_telnyx_pstn_number",
+  "recording_ended_at": "2026-08-09T14:00:06.288441Z",
+  "recording_started_at": "2026-08-09T13:58:14.568482Z",
+  "public_recording_urls": {}
+}`
+
+func TestStatusIsAlwaysPresent(t *testing.T) {
+	var src map[string]any
+	if err := json.Unmarshal([]byte(telnyxPayloadNoStatus), &src); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := src["status"]; present {
+		t.Fatal("the fixture is meant to lack status — that is the whole point of it")
+	}
+
+	evt := NewRecordingSaved(src, "sess", "tenant")
+	status, ok := evt["status"]
+	if !ok {
+		t.Fatal("status missing — the platform rejects the event and drops the recording")
+	}
+	if _, isString := status.(string); !isString {
+		t.Fatalf("status is %T, and the schema requires a string", status)
+	}
+}
+
+func TestCarrierStatusIsNotOverwritten(t *testing.T) {
+	// When Telnyx does report one, it wins: inventing a value over a real one
+	// would make us disagree with the carrier about what happened.
+	evt := NewRecordingSaved(map[string]any{"status": "completed"}, "s", "t")
+	if evt["status"] != "completed" {
+		t.Fatalf("status = %v, want the carrier's own value", evt["status"])
+	}
+}
