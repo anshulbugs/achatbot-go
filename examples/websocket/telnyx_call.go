@@ -903,13 +903,20 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 	// stream and the CPU to play audio down it.
 	markVoicemail(id)
 
-	// Flush whatever of the greeting Telnyx still has buffered, so the message
-	// does not trail the interrupted hello.
-	// ForceClear, not Serialize: the greeting is committed to Telnyx in full now,
-	// and the interrupt hold that protects it from the pipeline must not also
-	// stop the machine-detection path from cutting it.
-	if b, err := ser.ForceClear(); err == nil && len(b) > 0 {
-		_ = tw.SendPayload(frames.NewAudioRawFrame(nil, rate, 1, 2)) // no-op keeps the writer warm
+	// Flush the greeting out of Telnyx's buffer, or the voicemail message plays
+	// behind the rest of it and lands long after the beep.
+	//
+	// This has to go through the TRANSPORT. The previous version serialized a
+	// clear and then threw the bytes away, sending an empty audio frame in
+	// their place — harmless while the greeting was paced, because the unsent
+	// remainder simply never went out, and a real bug the moment the whole
+	// greeting started going to Telnyx at once.
+	//
+	// AllowInterrupts first: the hold that stops the pipeline flushing a
+	// playing greeting must not also stop machine detection from cutting it.
+	ser.AllowInterrupts()
+	if err := tw.SendPayload(&frames.StartInterruptionFrame{}); err != nil {
+		log.Printf("telnyx amd: could not flush the greeting on call=%s: %v", id, err)
 	}
 
 	msg := p.VoicemailMessage
@@ -933,10 +940,19 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 		log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
 	}
 
-	log.Printf("telnyx amd: playing voicemail message call=%s (%d bytes, no gpu)", id, len(pcm))
+	spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(rate)
+	log.Printf("telnyx amd: playing voicemail message call=%s (%d bytes, %.1fs, no gpu)",
+		id, len(pcm), spoken.Seconds())
 	playAnnouncement(tw, pcm, rate, make(chan struct{}))
-	// Let the tail drain out of Telnyx's buffer before tearing the call down.
-	time.Sleep(time.Duration(len(pcm)/2/rate)*time.Second/4 + 700*time.Millisecond)
+
+	// Wait for the message to actually PLAY before hanging up.
+	//
+	// It is handed to Telnyx in one chunk and buffered there, so the send
+	// returns in milliseconds and tells us nothing about when the machine has
+	// heard it. The old quarter-of-the-duration wait worked only because
+	// sending used to take the duration itself; kept as-is it would cut every
+	// voicemail message off a few words in.
+	time.Sleep(spoken + 900*time.Millisecond)
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
