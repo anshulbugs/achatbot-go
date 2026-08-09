@@ -247,12 +247,24 @@ class RoomAgent:
             return True
 
         rms = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
-        # Track the loudest echo seen while speaking, decaying slowly so one
-        # loud moment does not deafen the gate for the rest of the call.
-        self.echo_floor = max(ECHO_FLOOR_MIN, self.echo_floor * 0.995, rms * 0.6)
-        if rms > self.echo_floor * ECHO_GATE_MULT:
+
+        # Decide against the floor as it stands BEFORE this frame, and never let
+        # a frame raise the bar it is itself being judged against.
+        #
+        # The first version did exactly that: it folded every frame into the
+        # floor, including the caller's own voice. Speaking at volume X pushed
+        # the floor to 0.6X and the bar to 1.8X, so the caller could never
+        # exceed it — and the louder they spoke the higher the bar went.
+        # Barge-in was impossible by construction.
+        bar = max(ECHO_FLOOR_MIN, self.echo_floor) * ECHO_GATE_MULT
+        if rms > bar:
             self.gate_open_until = now + GATE_HOLD
             return True
+
+        # Quiet while we are speaking: this is our own echo, or room noise, and
+        # it is the only thing that should define the floor. Decayed so one loud
+        # moment does not deafen the gate for the rest of the call.
+        self.echo_floor = max(ECHO_FLOOR_MIN, self.echo_floor * 0.98, rms)
         return False
 
     def _pump_pipeline_to_room(self):
