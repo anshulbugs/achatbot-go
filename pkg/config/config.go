@@ -195,6 +195,14 @@ type ServerConfig struct {
 	// waits for and nothing the capacity gate counts.
 	SentimentBaseURL string `mapstructure:"sentiment_base_url"`
 	// SentimentModel is the model name at SentimentBaseURL.
+	//
+	// Must be a NON-REASONING model. qwen3:0.6b was the obvious pick on size
+	// and is wrong here: it emits <think> before answering, so a small
+	// max_tokens truncates the reply to nothing at all, and giving it room to
+	// think costs ~220 tokens a turn and still scored 4/10 — with both errors
+	// false "wants_human", which pages a human over a salary question.
+	// llama3.2:3b answers in one word, scored 10/10 on the same probes, and
+	// takes ~420 ms.
 	SentimentModel string `mapstructure:"sentiment_model"`
 	// SGLangMetricsURLs are the SGLang server base URLs (NOT the /v1 path)
 	// whose /metrics endpoint is polled in the background for cache hit rate
@@ -358,7 +366,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.first_turn_cooldown_secs", 0)
 	v.SetDefault("server.sglang_metrics_urls", []string{})
 	v.SetDefault("server.sentiment_base_url", "")
-	v.SetDefault("server.sentiment_model", "qwen3:0.6b")
+	v.SetDefault("server.sentiment_model", "llama3.2:3b")
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)

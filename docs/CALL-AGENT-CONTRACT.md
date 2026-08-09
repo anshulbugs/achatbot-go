@@ -711,7 +711,7 @@ Mid-call sentiment, in `config.yaml`:
 ```yaml
 server:
   sentiment_base_url: "http://127.0.0.1:11434/v1"   # empty disables it
-  sentiment_model: "qwen3:0.6b"
+  sentiment_model: "llama3.2:3b"                    # must NOT be a reasoning model
 ```
 
 Point this at a SMALL model on its own endpoint, never at the conversation LLM.
