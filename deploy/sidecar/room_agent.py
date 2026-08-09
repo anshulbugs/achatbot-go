@@ -26,7 +26,7 @@ import sys
 import threading
 
 import numpy as np
-from daily import CallClient, Daily, VirtualMicrophoneDevice, VirtualSpeakerDevice
+from daily import CallClient, Daily
 from websocket import WebSocketApp
 
 log = logging.getLogger("room-agent")
@@ -77,12 +77,20 @@ class RoomAgent:
         self.out_rate = 24000
 
         Daily.init()
-        self.speaker = VirtualSpeakerDevice(
-            "speaker", sample_rate=DAILY_RATE, channels=1)
-        self.mic = VirtualMicrophoneDevice(
-            "mic", sample_rate=DAILY_RATE, channels=1)
-        Daily.select_speaker_device("speaker")
+        # Virtual devices are created through the factory, never constructed
+        # directly — the classes exist for typing and refuse instantiation.
+        #
+        # Names must be unique per process. They are per-session so several
+        # sidecars could share one process later without fighting over a device.
+        self.speaker = Daily.create_speaker_device(
+            f"spk-{session[:8]}", sample_rate=DAILY_RATE, channels=1)
+        self.mic = Daily.create_microphone_device(
+            f"mic-{session[:8]}", sample_rate=DAILY_RATE, channels=1)
+        # Selecting the speaker is what routes the room's mixed audio into it.
+        # Without this read_frames blocks forever on silence.
+        Daily.select_speaker_device(f"spk-{session[:8]}")
         self.client = CallClient()
+        self.mic_name = f"mic-{session[:8]}"
 
     # ── websocket ──────────────────────────────────────────────────
 
@@ -192,7 +200,7 @@ class RoomAgent:
                     "camera": False,
                     "microphone": {
                         "isEnabled": True,
-                        "settings": {"deviceId": "mic"},
+                        "settings": {"deviceId": self.mic_name},
                     },
                 }
             },
