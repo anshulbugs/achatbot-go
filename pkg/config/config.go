@@ -157,6 +157,38 @@ type ServerConfig struct {
 	// drop them. Suspect this setting first if transfers connect unreliably.
 	// `from_display_name` carries the contact's name under either setting.
 	TransferCallerID string `mapstructure:"transfer_caller_id"`
+	// FirstTurnSaturatedMs is the p95 first-token latency of a call's FIRST
+	// reply at which /health stops accepting work, in milliseconds.
+	//
+	// First turn is tracked apart from every other turn because it is the only
+	// one that pays a cold prefill, so it is where KV-cache pressure appears
+	// first and largest: measured at 60 concurrent calls, sharing one campaign
+	// prompt gave 1853 ms while a distinct prompt per call gave 9903 ms — a
+	// pooled average of all turns read 6252 ms and would not have fired.
+	//
+	// This can refuse traffic on its own, with plenty of room left under
+	// max_gpu_calls. That is deliberate: 61 was measured under one prompt size
+	// and one degree of prefix sharing, and a heavier workload invalidates it.
+	// Serving six calls well beats accepting sixty-one and serving all of them
+	// badly. 0 uses the built-in default.
+	FirstTurnSaturatedMs int `mapstructure:"first_turn_saturated_ms"`
+	// FirstTurnCriticalMs trips the gate on a SINGLE first turn this slow,
+	// without waiting for enough samples to form a percentile. Ten calls with
+	// ten unrelated prompts produce ten samples in total; waiting to be
+	// statistically comfortable means answering "send more" twice before
+	// reacting. 0 uses the built-in default.
+	FirstTurnCriticalMs int `mapstructure:"first_turn_critical_ms"`
+	// FirstTurnCooldownSecs is how long the gate stays shut after tripping.
+	//
+	// A duty cycle, not a latch. The measurement is fed only by new calls, so a
+	// gate that stayed shut until the numbers recovered would cut off the
+	// samples that could show recovery and never reopen. 0 uses the default.
+	FirstTurnCooldownSecs int `mapstructure:"first_turn_cooldown_secs"`
+	// SGLangMetricsURLs are the SGLang server base URLs (NOT the /v1 path)
+	// whose /metrics endpoint is polled in the background for cache hit rate
+	// and queue depth. Reported on /health and /dashboard, never acted on.
+	// Empty disables polling.
+	SGLangMetricsURLs []string `mapstructure:"sglang_metrics_urls"`
 }
 
 // VADConfig selects the voice-activity-detection model and its provider pool.
@@ -306,6 +338,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.max_total_calls", 0)
 	v.SetDefault("server.human_answer_weight", "1.0")
 	v.SetDefault("server.transfer_caller_id", "contact")
+	// 0 means "use the package default" rather than "disabled": a first-turn
+	// gate that switched itself off when unconfigured would be off everywhere
+	// it matters most.
+	v.SetDefault("server.first_turn_saturated_ms", 0)
+	v.SetDefault("server.first_turn_critical_ms", 0)
+	v.SetDefault("server.first_turn_cooldown_secs", 0)
+	v.SetDefault("server.sglang_metrics_urls", []string{})
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)

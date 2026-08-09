@@ -63,6 +63,34 @@ server:
   #
   # Read measured.answer_rate off /dashboard before moving off 1.0.
   human_answer_weight: 1.0
+  # Latency backpressure on the FIRST turn of each call -- the pause the caller
+  # hears after saying hello. Tracked apart from every other turn because it is
+  # the only one that pays a cold prefill, so KV-cache pressure shows up here
+  # first and largest. Measured at 60 concurrent calls with 3k-token prompts:
+  #
+  #                          one campaign   a different prompt per call
+  #   p95 across all turns       1725 ms             6252 ms
+  #   p95 of TURN 1              1853 ms             9903 ms
+  #
+  # The pooled number is what a naive threshold watches, and it would have let
+  # those calls through. These two can turn accepting=false with the GPU ceiling
+  # nowhere near reached, which is the point: max_gpu_calls 61 was measured
+  # under one prompt size and one degree of prefix sharing, and a heavier
+  # workload invalidates it. Serving 6 calls well beats accepting 61 and serving
+  # all of them badly.
+  #
+  # STARTING POINTS, NOT MEASURED CROSSOVERS. Ramp with
+  # `deploy/loadtest/turnbench.py <port> <calls> 8 12.4 3000 distinct` and move
+  # them to where first-turn latency stops being acceptable. 0 = built-in
+  # default (4000 / 8000 / 30).
+  first_turn_saturated_ms: 4000   # p95 over >=4 calls that shuts admission
+  first_turn_critical_ms: 8000    # ONE first turn this slow shuts it immediately
+  first_turn_cooldown_secs: 30    # then reopen and re-measure on fresh calls
+  # SGLang base URLs (not the /v1 path) whose /metrics is polled every 5s for
+  # prefix-cache hit rate and queue depth. Shown on /dashboard and /health;
+  # nothing here refuses traffic. Empty disables it.
+  sglang_metrics_urls: []
+  # sglang_metrics_urls: ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
   # The greeting/first message is spoken directly via TTS and never sent to the

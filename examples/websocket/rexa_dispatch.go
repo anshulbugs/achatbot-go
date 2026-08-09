@@ -52,6 +52,29 @@ func markOnGPU(callID string) {
 	}
 }
 
+// observeLLMTurn feeds one turn's time-to-first-token into the capacity
+// signals, and logs when the first-turn gate shuts.
+//
+// Every session reports, including browser demo sessions: they run the same
+// pipeline against the same GPUs, so a demo call is load like any other and
+// pretending otherwise would leave the platform dispatching into it.
+func observeLLMTurn(sessionID string, ttft time.Duration, turn int) {
+	if rexaMetrics == nil {
+		return
+	}
+	before, _ := rexaMetrics.FirstTurnBlocked()
+	rexaMetrics.ObserveLLMTurn(ttft, turn)
+	if turn != 1 {
+		return
+	}
+	// Log the transition, not the state, so a sustained block produces one line
+	// per trip rather than one per call.
+	if after, d := rexaMetrics.FirstTurnBlocked(); after && !before {
+		log.Printf("rexa: first-turn TTFT %dms on session %s — refusing new calls for %s",
+			ttft.Milliseconds(), sessionID, d.Round(time.Second))
+	}
+}
+
 // markVoicemail releases a call's GPU capacity: with AMD enabled the pipeline
 // never started, so it holds no pool slots and only the announcement remains.
 func markVoicemail(callID string) {
@@ -105,6 +128,19 @@ func initRexaTelemetry() {
 		weight = 1.0
 	}
 	rexaMetrics.SetHumanWeight(weight)
+	rexaMetrics.SetFirstTurnThresholds(rexa.FirstTurnThresholds{
+		SaturatedMs: cfg.Server.FirstTurnSaturatedMs,
+		CriticalMs:  cfg.Server.FirstTurnCriticalMs,
+		Cooldown:    time.Duration(cfg.Server.FirstTurnCooldownSecs) * time.Second,
+	})
+
+	// Poll the LLM server's own cache and queue metrics on a background clock.
+	// Never from the health handler: /health is probed every 5 s fleet-wide,
+	// and fanning out to a downstream service there would take the agent out of
+	// rotation whenever that service was merely slow.
+	if urls := cfg.Server.SGLangMetricsURLs; len(urls) > 0 {
+		go rexaMetrics.PollSGLang(context.Background(), urls, 5*time.Second)
+	}
 
 	// Reap leaked reservations. Without this a lost hangup webhook removes a
 	// slot permanently, and enough of them silently stop the agent accepting

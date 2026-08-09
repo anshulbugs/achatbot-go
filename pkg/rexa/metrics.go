@@ -84,9 +84,18 @@ func DefaultThresholds(tier string) TierThresholds {
 		// Transcription of one utterance; the shortest of the three.
 		return TierThresholds{DegradedMs: 400, SaturatedMs: 900}
 	case TierLLM:
-		// Prefill + decode of a whole reply, and the largest share of the
-		// budget.
-		return TierThresholds{DegradedMs: 900, SaturatedMs: 2000}
+		// TIME TO FIRST TOKEN, pooled across all turns of all calls — not the
+		// HTTP round trip. With SSE the round trip returns when the response
+		// headers arrive, before the model has produced anything, so transport
+		// timing reports single-digit milliseconds while the caller waits.
+		// ObserveLLMTurn feeds this instead.
+		//
+		// Calibrated against the pooled figures from turnbench.py at 60
+		// concurrent calls: 1725 ms p95 when prompts share a campaign prefix,
+		// 6252 ms when every call carries a different prompt. These sit between
+		// the two. They are deliberately looser than the first-turn gate, which
+		// is the sharper instrument for the same failure.
+		return TierThresholds{DegradedMs: 2500, SaturatedMs: 4500}
 	case TierTTS:
 		// One request per sentence, so a four-sentence reply is four requests;
 		// this is the per-request figure, not the per-reply total.
@@ -97,19 +106,39 @@ func DefaultThresholds(tier string) TierThresholds {
 }
 
 // tierWindow is a fixed-size ring of recent latency samples for one tier.
+//
+// The capacity is per-window rather than a constant because the first-turn
+// window measures one sample per CALL, not one per request: at the same traffic
+// a 256-sample window there would span an hour and never react.
 type tierWindow struct {
-	samples [latencyWindowSize]float64
-	next    int
-	filled  int
-	th      TierThresholds
+	samples    []float64
+	next       int
+	filled     int
+	minSamples int
+	th         TierThresholds
+}
+
+func newWindow(size, minSamples int, th TierThresholds) *tierWindow {
+	return &tierWindow{samples: make([]float64, size), minSamples: minSamples, th: th}
 }
 
 func (w *tierWindow) add(ms float64) {
+	if len(w.samples) == 0 {
+		return
+	}
 	w.samples[w.next] = ms
-	w.next = (w.next + 1) % latencyWindowSize
-	if w.filled < latencyWindowSize {
+	w.next = (w.next + 1) % len(w.samples)
+	if w.filled < len(w.samples) {
 		w.filled++
 	}
+}
+
+// reset forgets every sample. Used when a gate trips, so the recovery decision
+// is made on measurements taken AFTER the load was shed rather than on the ones
+// that caused the trip.
+func (w *tierWindow) reset() {
+	w.next = 0
+	w.filled = 0
 }
 
 // p95 returns the 95th percentile of the window, or 0 when empty.
@@ -132,7 +161,7 @@ func (w *tierWindow) p95() float64 {
 }
 
 func (w *tierWindow) state() string {
-	if w.filled < minSamplesForState {
+	if w.filled < w.minSamples {
 		return TierUnknown
 	}
 	switch p := w.p95(); {
@@ -142,6 +171,84 @@ func (w *tierWindow) state() string {
 		return TierDegraded
 	default:
 		return TierOK
+	}
+}
+
+// First-turn backpressure.
+//
+// The tier windows above pool every LLM request together, and that pooling is
+// exactly what hides the failure this gate exists to catch. Measured at 60
+// concurrent calls with 3k-token prompts (deploy/loadtest/turnbench.py):
+//
+//	                       one campaign   a different prompt per call
+//	 overall TTFT p95         1725 ms              6252 ms
+//	 TURN 1 p95               1853 ms              9903 ms
+//	 turn 8 p95                727 ms              4035 ms
+//
+// Turn 1 is the only turn that pays a cold prefill, so it is where KV-cache
+// pressure shows first and worst — and it is the turn the caller feels, the
+// pause after they say "hello". Averaged in with cheap warm turns it drops
+// below any threshold that would have fired.
+//
+// So first-turn TTFT is tracked on its own and can refuse traffic BY ITSELF,
+// regardless of how few calls are in flight. The operating rule, stated by the
+// operator and worth repeating because it inverts the usual instinct:
+//
+//	Serving 6 calls well beats accepting 61 and serving all of them badly.
+//
+// max_gpu_calls was measured under one prompt size and one degree of prefix
+// sharing. A workload heavier than the one it was measured under invalidates
+// it, and continuing to advertise it is not optimism, it is a false claim.
+const (
+	// firstTurnWindowSize is small because samples arrive once per call, not
+	// once per request.
+	firstTurnWindowSize = 32
+	// firstTurnMinSamples is deliberately low. The bad case is not subtle —
+	// 9903 ms against 2471 ms — so waiting for a statistically comfortable
+	// sample count would mean accepting dozens more calls into a stack that has
+	// already stopped coping.
+	firstTurnMinSamples = 4
+)
+
+// FirstTurnThresholds configures the first-turn gate, in milliseconds.
+//
+// IMPORTANT: like TierThresholds these are calibration starting points. The
+// measured good case was 2471 ms and the measured bad case 9903 ms, which is
+// where the defaults come from, but the crossover between them has not been
+// ramped. Calibrate with `turnbench.py ... distinct` before trusting them.
+type FirstTurnThresholds struct {
+	// DegradedMs only colours the dashboard; it does not refuse traffic.
+	DegradedMs int
+	// SaturatedMs is the p95 at which the gate trips, once there are
+	// firstTurnMinSamples to compute it from.
+	SaturatedMs int
+	// CriticalMs trips the gate on a SINGLE sample, with no minimum count.
+	//
+	// This is what makes the response immediate rather than statistical: ten
+	// calls with ten unrelated prompts produce ten samples, and by the time a
+	// p95 over four of them is meaningful the platform has had two more health
+	// probes telling it to keep going. One first turn this slow is already a
+	// caller sitting in silence; there is nothing to average.
+	CriticalMs int
+	// Cooldown is how long the gate stays shut after tripping.
+	//
+	// A duty cycle rather than a latch, and the distinction is load-bearing:
+	// the window is fed only by NEW calls, so a gate that stayed shut until the
+	// numbers improved would stop receiving the samples that could improve
+	// them, and never reopen. Instead it shuts for the cooldown, reopens, and
+	// re-measures on fresh calls — tripping again immediately if the workload
+	// is still too heavy. Under sustained overload that settles into admitting
+	// a trickle, which is the intended behaviour.
+	Cooldown time.Duration
+}
+
+// DefaultFirstTurnThresholds returns the starting configuration.
+func DefaultFirstTurnThresholds() FirstTurnThresholds {
+	return FirstTurnThresholds{
+		DegradedMs:  2500,
+		SaturatedMs: 4000,
+		CriticalMs:  8000,
+		Cooldown:    30 * time.Second,
 	}
 }
 
@@ -235,6 +342,18 @@ type Metrics struct {
 
 	tiers map[string]*tierWindow
 
+	// firstTurn holds one TTFT sample per call: the wait between the caller
+	// finishing their first utterance and the first token of our reply.
+	firstTurn   *tierWindow
+	firstTurnTh FirstTurnThresholds
+	// firstTurnBlockUntil is when the gate reopens. Zero means open.
+	firstTurnBlockUntil time.Time
+	firstTurnTrips      int64
+
+	// sglang is the last successful poll of the LLM server's own metrics.
+	// Reported, never acted on — see sglang.go.
+	sglang SGLangSnapshot
+
 	draining bool
 
 	// outcomes is a ring of recent resolutions (true = became a live
@@ -243,8 +362,8 @@ type Metrics struct {
 	outcomeNext int
 	outcomeLen  int
 
-	// ringMs is a ring of measured dial-to-answer times.
-	ringWindow tierWindow
+	// ringWindow is a ring of measured dial-to-answer times.
+	ringWindow *tierWindow
 
 	totalCalls     int64
 	totalVoicemail int64
@@ -264,11 +383,95 @@ func NewMetrics(maxGPUCalls int) *Metrics {
 		humanWeight:        1.0,
 		minHumanWeight:     0.15,
 		weightSafetyFactor: 2.0,
+		firstTurnTh:        DefaultFirstTurnThresholds(),
+		ringWindow:         newWindow(latencyWindowSize, minSamplesForState, TierThresholds{}),
 	}
 	for _, t := range []string{TierLLM, TierASR, TierTTS} {
-		m.tiers[t] = &tierWindow{th: DefaultThresholds(t)}
+		m.tiers[t] = newWindow(latencyWindowSize, minSamplesForState, DefaultThresholds(t))
 	}
+	m.firstTurn = newWindow(firstTurnWindowSize, firstTurnMinSamples, TierThresholds{
+		DegradedMs:  m.firstTurnTh.DegradedMs,
+		SaturatedMs: m.firstTurnTh.SaturatedMs,
+	})
 	return m
+}
+
+// SetFirstTurnThresholds overrides the first-turn gate configuration. Zero
+// fields keep the current value, so a partly-configured file cannot silently
+// disable the gate.
+func (m *Metrics) SetFirstTurnThresholds(th FirstTurnThresholds) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if th.DegradedMs > 0 {
+		m.firstTurnTh.DegradedMs = th.DegradedMs
+	}
+	if th.SaturatedMs > 0 {
+		m.firstTurnTh.SaturatedMs = th.SaturatedMs
+	}
+	if th.CriticalMs > 0 {
+		m.firstTurnTh.CriticalMs = th.CriticalMs
+	}
+	if th.Cooldown > 0 {
+		m.firstTurnTh.Cooldown = th.Cooldown
+	}
+	m.firstTurn.th = TierThresholds{
+		DegradedMs:  m.firstTurnTh.DegradedMs,
+		SaturatedMs: m.firstTurnTh.SaturatedMs,
+	}
+}
+
+// ObserveLLMTurn records the time a caller waited for the first token of one
+// reply. turn counts from 1.
+//
+// This is the honest measure of LLM latency for a streaming call, and it
+// replaces transport timing for this tier: with SSE the HTTP round trip returns
+// when the response HEADERS arrive, which happens before the model has produced
+// anything, so a transport-timed LLM tier reports a few milliseconds while the
+// caller waits ten seconds.
+//
+// Turn 1 additionally feeds the first-turn gate and can shut admission on its
+// own.
+func (m *Metrics) ObserveLLMTurn(ttft time.Duration, turn int) {
+	ms := float64(ttft.Milliseconds())
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.tiers[TierLLM]; ok {
+		w.add(ms)
+	}
+	if turn != 1 {
+		return
+	}
+	m.firstTurn.add(ms)
+
+	critical := m.firstTurnTh.CriticalMs > 0 && ms >= float64(m.firstTurnTh.CriticalMs)
+	sustained := m.firstTurn.state() == TierSaturated
+	if !critical && !sustained {
+		return
+	}
+	m.firstTurnBlockUntil = time.Now().Add(m.firstTurnTh.Cooldown)
+	m.firstTurnTrips++
+	// Judge recovery on calls admitted after the trip, not on the ones that
+	// caused it.
+	m.firstTurn.reset()
+}
+
+// FirstTurnBlocked reports whether the first-turn gate is currently shut, and
+// for how much longer. Exposed for logging: a trip is the single most useful
+// thing to see in the log when the platform reports being throttled.
+func (m *Metrics) FirstTurnBlocked() (bool, time.Duration) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.firstTurnBlockedLocked()
+}
+
+func (m *Metrics) firstTurnBlockedLocked() (bool, time.Duration) {
+	if m.firstTurnBlockUntil.IsZero() {
+		return false, 0
+	}
+	if d := time.Until(m.firstTurnBlockUntil); d > 0 {
+		return true, d
+	}
+	return false, 0
 }
 
 // SetMaxTotalCalls sets the absolute in-flight ceiling. 0 = unlimited.
@@ -544,6 +747,17 @@ func (m *Metrics) acceptingLocked() bool {
 	if m.draining {
 		return false
 	}
+
+	// The first-turn gate comes before every count, because it is the one
+	// condition that must be able to refuse a workload the counters think there
+	// is ample room for. Ten calls carrying ten unrelated prompts can exhaust
+	// the KV cache while on_gpu reads 10 against a ceiling of 61; answering
+	// "yes, send more" there is how a stack ends up serving sixty-one calls
+	// badly instead of six well.
+	if blocked, _ := m.firstTurnBlockedLocked(); blocked {
+		return false
+	}
+
 	reserved, onGPU, voicemail := m.countsLocked()
 
 	// The absolute ceiling comes first: it stands in for the limits our
@@ -587,6 +801,23 @@ type TierSnapshot struct {
 	State string `json:"state"`
 	// Samples lets a reader tell "healthy" from "no traffic yet".
 	Samples int `json:"samples"`
+}
+
+// FirstTurnSnapshot is the state of the first-turn gate.
+type FirstTurnSnapshot struct {
+	// P95Ms is the 95th-percentile wait for the first token of the first reply
+	// of a call — the pause the caller hears after saying hello.
+	P95Ms   int    `json:"p95_ms"`
+	State   string `json:"state"`
+	Samples int    `json:"samples"`
+	// Blocked is true while the gate is refusing admission on its own.
+	Blocked bool `json:"blocked"`
+	// BlockedForSecs is how much longer the cooldown runs.
+	BlockedForSecs int `json:"blocked_for_secs"`
+	// Trips is how many times the gate has shut since start. A climbing count
+	// with calls still flowing means the workload is heavier than the
+	// configured ceiling assumes — the prompts are not sharing prefixes.
+	Trips int64 `json:"trips"`
 }
 
 // CallsSnapshot separates the three in-flight states.
@@ -650,6 +881,8 @@ type HealthSnapshot struct {
 	Capacity  CapacitySnapshot        `json:"capacity"`
 	Measured  MeasuredSnapshot        `json:"measured"`
 	Tiers     map[string]TierSnapshot `json:"tiers"`
+	FirstTurn FirstTurnSnapshot       `json:"first_turn"`
+	SGLang    SGLangSnapshot          `json:"sglang"`
 	Totals    TotalsSnapshot          `json:"totals"`
 }
 
@@ -691,6 +924,28 @@ func (m *Metrics) Snapshot() HealthSnapshot {
 		answerRate = float64(live) / float64(m.outcomeLen)
 	}
 
+	sg := m.sglang
+	if !sg.at.IsZero() {
+		sg.AgeSecs = int(time.Since(sg.at).Round(time.Second) / time.Second)
+	}
+
+	blocked, blockedFor := m.firstTurnBlockedLocked()
+	ftState := m.firstTurn.state()
+	if blocked {
+		// While the cooldown runs the window has just been reset, so its own
+		// state reads "unknown". Report what the gate is DOING, not what the
+		// empty window would say.
+		ftState = TierSaturated
+	}
+	ft := FirstTurnSnapshot{
+		P95Ms:          int(m.firstTurn.p95()),
+		State:          ftState,
+		Samples:        m.firstTurn.filled,
+		Blocked:        blocked,
+		BlockedForSecs: int(blockedFor.Round(time.Second) / time.Second),
+		Trips:          m.firstTurnTrips,
+	}
+
 	return HealthSnapshot{
 		// status stays true while draining: the process is alive and finishing
 		// its calls. `accepting` is the field that says stop sending work.
@@ -714,7 +969,9 @@ func (m *Metrics) Snapshot() HealthSnapshot {
 			RingMsP95:  int(m.ringWindow.p95()),
 			Samples:    m.outcomeLen,
 		},
-		Tiers: tiers,
+		Tiers:     tiers,
+		FirstTurn: ft,
+		SGLang:    sg,
 		Totals: TotalsSnapshot{
 			Calls: m.totalCalls, Voicemail: m.totalVoicemail,
 			Rejected: m.totalRejected, Reaped: m.totalReaped,

@@ -1,10 +1,30 @@
 package common
 
+import (
+	"sync"
+	"time"
+)
+
+// LLMObserver receives the time a caller waited for the first token of one
+// reply, with turn numbered from 1.
+//
+// The turn number is the point of it. Turn 1 is the only turn that pays a cold
+// prefill, so it is where KV-cache pressure shows up first and by far the
+// largest margin; pooled with warm turns it disappears into the average.
+type LLMObserver func(ttft time.Duration, turn int)
+
 // Session represents a chat session with chat history
 type Session struct {
 	chatRound   int
 	sessionID   string
 	chatHistory *ChatHistory
+
+	// llmMu guards the observer and turn counter. The observer is installed on
+	// the goroutine that builds the session and called on the pipeline
+	// goroutine that runs the LLM.
+	llmMu       sync.Mutex
+	llmObserver LLMObserver
+	llmTurns    int
 	// funcs are tools scoped to THIS session, checked before the global
 	// registry.
 	//
@@ -48,6 +68,37 @@ func (s *Session) ToolCalls() []map[string]any {
 		out = append(out, fn.GetToolCall())
 	}
 	return out
+}
+
+// SetLLMObserver installs the callback for per-turn LLM timing. nil disables
+// it, which is the default: a session that nobody is measuring costs nothing.
+func (s *Session) SetLLMObserver(fn LLMObserver) {
+	if s == nil {
+		return
+	}
+	s.llmMu.Lock()
+	s.llmObserver = fn
+	s.llmMu.Unlock()
+}
+
+// ObserveLLMTTFT reports one turn's time to first token, counting the turn.
+//
+// Called once per conversational turn — not once per HTTP request. A turn that
+// runs a tool makes several requests before any token reaches the caller, and
+// the caller waits for all of them, so timing the requests individually would
+// report a turn as fast when the person on the phone heard a long silence.
+func (s *Session) ObserveLLMTTFT(d time.Duration) {
+	if s == nil {
+		return
+	}
+	s.llmMu.Lock()
+	s.llmTurns++
+	turn := s.llmTurns
+	fn := s.llmObserver
+	s.llmMu.Unlock()
+	if fn != nil {
+		fn(d, turn)
+	}
 }
 
 // NewSession creates a new Session instance

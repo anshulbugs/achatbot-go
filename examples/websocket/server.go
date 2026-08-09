@@ -747,6 +747,12 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	if sc.chatObserver != nil {
 		session.GetChatHistory().SetObserver(sc.chatObserver)
 	}
+	// Report per-turn LLM latency. The first turn of each call drives
+	// backpressure on its own — see pkg/rexa/metrics.go.
+	sessionID := sc.clientID
+	session.SetLLMObserver(func(ttft time.Duration, turn int) {
+		observeLLMTurn(sessionID, ttft, turn)
+	})
 	// Bind per-call tools. Registered on the session rather than globally
 	// because they act on THIS call, and a global handler could not tell which
 	// of the calls in flight invoked it.

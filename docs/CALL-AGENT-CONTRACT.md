@@ -230,9 +230,13 @@ drop the agent from rotation whenever one was merely slow.
   "capacity": { "max_gpu_calls": 61, "max_total_calls": 200,
                 "gpu_cost": 41.0, "human_weight": 1.0, "headroom": 0.33 },
   "measured": { "answer_rate": 0.28, "ring_ms_p95": 11200, "samples": 143 },
-  "tiers":    { "llm": {"p95_ms": 890, "state": "ok", "samples": 256},
+  "tiers":    { "llm": {"p95_ms": 1890, "state": "ok", "samples": 256},
                 "asr": {"p95_ms": 310, "state": "ok", "samples": 256},
                 "tts": {"p95_ms": 1180, "state": "degraded", "samples": 256} },
+  "first_turn": { "p95_ms": 2100, "state": "ok", "samples": 32,
+                  "blocked": false, "blocked_for_secs": 0, "trips": 0 },
+  "sglang":   { "ok": true, "replicas": 2, "running_reqs": 14, "queued_reqs": 0,
+                "cache_hit_rate": 0.83, "token_usage": 0.41, "age_secs": 3 },
   "totals":   { "calls": 1204, "voicemail": 380, "rejected": 4, "reaped": 0 }
 }
 ```
@@ -250,7 +254,52 @@ mark the URL unhealthy and stop routing to it entirely, when all that was wanted
 was backpressure.
 
 `accepting` goes false when any of: draining · `gpu_cost >= max_gpu_calls` ·
-`total >= max_total_calls` · any tier `saturated`.
+`total >= max_total_calls` · any tier `saturated` · **`first_turn.blocked`**.
+
+### `first_turn` — why `accepting` can go false with the ceiling nowhere near full
+
+Expect to see `accepting: false` while `calls.on_gpu` reads 10 against a ceiling
+of 61. That is not a bug, and it is the single most important thing to understand
+about this endpoint.
+
+`first_turn` measures one thing: the wait between the caller finishing their
+first sentence and the first word of our reply. It is tracked apart from every
+other turn because it is the only turn that pays a cold prefill, so it is where
+KV-cache pressure appears first and by the largest margin. Measured at 60
+concurrent calls with 3k-token prompts:
+
+| | prompts share a campaign prefix | a different prompt per call |
+|---|---|---|
+| p95 across all turns | 1725 ms | 6252 ms |
+| **p95 of turn 1** | **1853 ms** | **9903 ms** |
+
+The pooled number is what a naive threshold would watch — and at 6252 ms it
+would have let those calls through. So turn 1 gets its own gate, and that gate
+can refuse traffic by itself.
+
+The reasoning is worth stating plainly, because it is a deliberate trade: our
+61-call ceiling was measured under one prompt size and one degree of prefix
+sharing. A workload heavier than that invalidates the number, and continuing to
+advertise it is not optimism, it is a false claim. **Serving 6 calls well beats
+accepting 61 and serving all of them badly.**
+
+What to do about it:
+
+- **Treat it exactly like any other `accepting: false`** — hold dispatch, retry
+  the health check. Nothing special is required on your side.
+- **It is a duty cycle, not a latch.** The gate shuts for ~30 s, reopens, and
+  re-measures on the next calls admitted. Under sustained overload that settles
+  into admitting a trickle rather than stopping dead.
+- **`trips` climbing while calls flow is a diagnosis, not noise.** It means the
+  prompts being dispatched are not sharing prefixes. The two asks in §9 —
+  per-contact block last, and batching per campaign — are what fix it at source;
+  this gate is the safety net for when they are not honoured.
+
+`sglang` is the LLM server's own cache and queue telemetry, polled in the
+background. Informational only — nothing in it refuses traffic. A falling
+`cache_hit_rate` points at prompt layout; a growing `queued_reqs` points at
+volume. Ignore any reading with a large `age_secs`; it means polling has stopped
+and the numbers are fossils.
 
 ### Call states
 

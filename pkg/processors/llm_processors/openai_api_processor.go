@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/google/uuid"
@@ -103,6 +104,21 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 		logger.Error("chat", "err", err)
 	}
 
+	// Time the whole turn, from the caller's utterance being handed to the LLM
+	// to the first token we can speak. Started outside the tool loop on
+	// purpose: a turn that calls a tool makes several requests and the caller
+	// waits for all of them, so timing each request separately would call a
+	// turn fast that the caller heard as a long silence.
+	turnStart := time.Now()
+	turnObserved := false
+	observeTurn := func() {
+		if turnObserved {
+			return
+		}
+		turnObserved = true
+		p.session.ObserveLLMTTFT(time.Since(turnStart))
+	}
+
 	isToolCalls := true
 	cnToolCalls := 0
 	for isToolCalls {
@@ -152,6 +168,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 					p.QueueFrame(achatbot_frames.NewThinkTextFrame(resp.Choices[0].Message.Reasoning), direction)
 				}
 				if resp.Choices[0].Message.Content != "" {
+					observeTurn()
 					isToolCalls = false
 					if !p.isHistoryThink {
 						resp.Choices[0].Message.Reasoning = ""
@@ -180,6 +197,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 					if firstToken {
 						logger.Infof("STAGE llm_first_token")
 						firstToken = false
+						observeTurn()
 					}
 					p.QueueFrame(frames.NewTextFrame(chunk.Choices[0].Delta.Content), direction)
 				}

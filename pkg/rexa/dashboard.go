@@ -126,6 +126,40 @@ const dashboardHTML = `<!doctype html>
   </tbody>
 </table>
 
+<h2>First turn — the pause after the caller says hello</h2>
+<table>
+  <tbody>
+    <tr><td>State</td><td class="n" id="ft-state">–</td></tr>
+    <tr><td>First-token p95 <span class="sub">— first reply of a call only</span></td>
+        <td class="n" id="ft-p95">–</td></tr>
+    <tr><td>Calls measured</td><td class="n" id="ft-n">–</td></tr>
+    <tr><td>Times it refused traffic <span class="sub">— climbing means prompts are not sharing prefixes</span></td>
+        <td class="n" id="ft-trips">–</td></tr>
+  </tbody>
+</table>
+<p class="sub">
+  Tracked apart from every other turn because it is the only one that pays a cold prefill:
+  at 60 calls, sharing a campaign prompt gave 1.85s here while a distinct prompt per call gave 9.9s —
+  and the average across all turns read 6.3s, low enough to pass. This can refuse work on its own,
+  with the GPU ceiling nowhere near reached.
+</p>
+
+<h2>SGLang — the LLM server's own view</h2>
+<table>
+  <tbody>
+    <tr><td>Prefix cache hit rate <span class="sub">— collapses when prompts are unrelated</span></td>
+        <td class="n" id="sg-hit">–</td></tr>
+    <tr><td>KV pool in use</td><td class="n" id="sg-tok">–</td></tr>
+    <tr><td>Running requests</td><td class="n" id="sg-run">–</td></tr>
+    <tr><td>Queued <span class="sub">— sustained non-zero means the LLM is the bottleneck</span></td>
+        <td class="n" id="sg-q">–</td></tr>
+    <tr><td>Reading age</td><td class="n" id="sg-age">–</td></tr>
+  </tbody>
+</table>
+<p class="sub">Reported, never acted on — no threshold here refuses traffic. Read it next to
+  first turn: a falling hit rate says cache thrash (fix the prompt layout), a growing queue
+  says too many requests (send fewer).</p>
+
 <h2>Tiers — p95 of our own requests</h2>
 <table>
   <thead><tr><th>Tier</th><th>State</th><th class="n">p95</th><th class="n">Samples</th></tr></thead>
@@ -159,7 +193,11 @@ let misses = 0;
 function fmtMs(ms){ return ms >= 1000 ? (ms/1000).toFixed(2)+"s" : ms+"ms"; }
 
 function render(d){
-  $("verdict").textContent = d.accepting ? "accepting calls" : "not accepting";
+  // Say WHY when we are refusing. "not accepting" alone sends whoever is
+  // watching to read code to find out which of five conditions fired.
+  $("verdict").textContent = d.accepting ? "accepting calls"
+    : d.first_turn && d.first_turn.blocked ? "not accepting — first turn too slow"
+    : "not accepting";
   $("verdict").className = "verdict " + (d.accepting ? "yes" : "no");
 
   $("ongpu").textContent = d.calls.on_gpu;
@@ -195,6 +233,26 @@ function render(d){
   $("ring").textContent   = meas.ring_ms_p95 > 0 ? fmtMs(meas.ring_ms_p95) : "—";
   $("weight").textContent = d.capacity.human_weight.toFixed(2);
   $("samples").textContent = meas.samples;
+
+  const ft = d.first_turn || {};
+  $("ft-state").innerHTML = "<span class='pill s-" + (ft.state||"unknown") + "'>" +
+    (ft.blocked ? "refusing for " + ft.blocked_for_secs + "s" : (ft.state||"unknown")) + "</span>";
+  $("ft-p95").textContent   = ft.samples > 0 ? fmtMs(ft.p95_ms) : "—";
+  $("ft-n").textContent     = ft.samples || 0;
+  $("ft-trips").textContent = ft.trips || 0;
+
+  const sg = d.sglang || {};
+  const pct = v => (v*100).toFixed(0) + "%";
+  // Never show a stale reading as current: a poller that stopped answering
+  // leaves the last good numbers in place, and they look perfectly healthy.
+  const sgLive = sg.ok && sg.age_secs < 30;
+  $("sg-hit").textContent = sgLive ? pct(sg.cache_hit_rate) : "—";
+  $("sg-tok").textContent = sgLive ? pct(sg.token_usage) : "—";
+  $("sg-run").textContent = sgLive ? sg.running_reqs : "—";
+  $("sg-q").textContent   = sgLive ? sg.queued_reqs : "—";
+  $("sg-age").textContent = sg.ok
+    ? (sgLive ? sg.age_secs + "s ago (" + sg.replicas + " replicas)" : "stale — " + sg.age_secs + "s old")
+    : "not polling";
 
   const order = ["llm","asr","tts"];
   $("tiers").innerHTML = order.filter(k => d.tiers[k]).map(k => {
