@@ -134,11 +134,46 @@ func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd stri
 			return amd
 		}(),
 	}
+	if cfg := amdConfigFor(amd); cfg != nil {
+		body["answering_machine_detection_config"] = cfg
+	}
 	var res DialResult
 	if err := c.do(ctx, http.MethodPost, "/calls", body, &res); err != nil {
 		return "", err
 	}
 	return res.Data.CallControlID, nil
+}
+
+// amdConfigFor returns the detection tuning to send with a dial, or nil to
+// accept Telnyx's defaults.
+//
+// Set explicitly for `premium` because Telnyx's own documentation contradicts
+// itself on what the default is: the OpenAPI spec gives
+// total_analysis_time_millis a default of 3500, while the prose on the premium
+// page says "by default, the timeout is set to 30 seconds" and their sample
+// request passes 30000. Those are not close enough to guess between — one
+// judges on three and a half seconds of audio, the other can take half a minute
+// to answer.
+//
+// 10s is chosen against OUR call, not against either default. The agent plays a
+// pre-rendered greeting of roughly fifteen seconds and waits out that audio for
+// a verdict before committing a pipeline, so a verdict inside ten seconds
+// arrives with margin to spare and can still route the call to voicemail and
+// leave the message. A verdict at thirty seconds would land after the pipeline
+// had started, where the best available outcome is hanging up on the machine
+// without leaving anything. Ten seconds also gives premium detection nearly
+// three times the audio that standard AMD's 3.5s default allows it.
+//
+// Only for premium: the standard modes have consistent documented defaults and
+// their own well-tested tuning, and overriding those would be changing
+// something that is not in question.
+func amdConfigFor(amd string) map[string]any {
+	if amd != "premium" {
+		return nil
+	}
+	return map[string]any{
+		"total_analysis_time_millis": 10000,
+	}
 }
 
 // DialSIP places a call to a SIP URI and returns its call-control id.
