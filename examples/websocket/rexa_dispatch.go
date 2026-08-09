@@ -151,6 +151,7 @@ func initRexaTelemetry() {
 
 	initSentiment(cfg.Server.SentimentBaseURL, cfg.Server.SentimentModel)
 	initDaily(os.Getenv("DAILY_API_KEY"))
+	initSidecar(os.Getenv("SIDECAR_PYTHON"), os.Getenv("SIDECAR_SCRIPT"))
 	// Covers the window before the platform's dispatch schema carries
 	// redis_password. Managed Redis refuses unauthenticated connections, and
 	// publishing is fire-and-forget, so without a password the live event
@@ -382,12 +383,9 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
 			"browser rooms need DAILY_API_KEY configured on the agent")
 	}
-	// No telecom_credentials on this payload — a browser room has no PSTN leg,
-	// so the SIP leg runs on OUR carrier account rather than a tenant's.
-	client := telnyxClient
-	if client == nil || d.publicURL == "" {
+	if !sidecarReady() {
 		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
-			"browser rooms need a carrier account and a public URL on the agent")
+			"browser rooms need the Daily sidecar installed (deploy/sidecar)")
 	}
 
 	room, err := dailyClient.CreateRoom(ctx, webrtcRoomTTL)
@@ -427,98 +425,55 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 			tenantID:   req.TenantID,
 			webhookURL: req.WebhookURL,
 			direction:  "webrtc",
-			client:     client,
-			transcript: rexa.NewTranscript(time.Now()),
-			roomName:   room.Name,
-			joinURL:    room.JoinURL,
+			// No carrier client: nothing about a browser call touches a carrier
+			// now that the sidecar joins the room directly.
+			transcript:       rexa.NewTranscript(time.Now()),
+			roomName:         room.Name,
+			joinURL:          room.JoinURL,
+			sentimentWebhook: "",
 		},
 	}
-	prerenderAnnouncements(p)
 
-	// The agent joins AFTER the browser, not before.
-	//
-	// Daily refuses a SIP participant that would be alone in the room
-	// (`allow_sip_only_in_room` is false on this domain) and rejects the call
-	// with SIP 480, which reads like a network fault rather than a policy. It
-	// is also the right order on its own terms: the browser is the caller, and
-	// dialling first would burn a carrier leg for every dispatch nobody opens.
-	//
-	// So return the room now — the platform is waiting on this response to hand
-	// the link to a browser — and join in the background once someone arrives.
-	go joinBrowserRoom(req.SessionID, room.Name, room.SIPURI, p, d.publicURL)
+	// Register under the session id: the sidecar identifies itself that way
+	// when it connects to /room/media, and unlike a phone call there is no
+	// carrier id to key on.
+	calls.put(req.SessionID, p)
+
+	// The sidecar joins the room and pipes its audio to us. It waits for the
+	// browser itself, so starting it now costs one idle process rather than a
+	// carrier leg — and it means the agent is already in the room when the
+	// caller arrives instead of dialling in after them.
+	if err := startSidecar(req.SessionID, room.URL, room.Token, sidecarAgentWS()); err != nil {
+		calls.del(req.SessionID)
+		_ = dailyClient.DeleteRoom(ctx, room.Name)
+		log.Printf("rexa: session=%s sidecar failed to start: %v", req.SessionID, err)
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeInternal,
+			"could not start the room agent: %v", err)
+	}
+	log.Printf("rexa: session=%s browser room %s ready, sidecar joining",
+		req.SessionID, room.Name)
 
 	return rexa.WebrtcDispatchResponse{
 		RoomURL: room.URL,
 		Token:   room.Token,
-		// No agent_session_id: the carrier leg does not exist until the browser
-		// joins, and the platform's schema makes it optional precisely so an
-		// agent that cannot name the call yet is not forced to invent one.
+		// The session id doubles as the call id here — there is no carrier leg
+		// to name it after.
+		AgentSessionID:  req.SessionID,
 		TokenTTLSeconds: int(room.TokenTTL.Seconds()),
 	}, nil
 }
 
-// browserJoinTimeout is how long the agent waits for someone to open the room.
+// sidecarAgentWS is where the sidecar sends the room's audio.
 //
-// Generous, because the link has to travel from our response, through the
-// platform, to a person who then clicks it. Nobody arriving is a real outcome
-// — the session is reported failed rather than left in_progress for the
-// platform's reconciler to sweep half an hour later.
-const browserJoinTimeout = 2 * time.Minute
-
-// joinBrowserRoom waits for the browser and then dials the agent in.
-func joinBrowserRoom(sessionID, roomName, sipURI string, p *callParams, publicURL string) {
-	ctx, cancel := context.WithTimeout(context.Background(), browserJoinTimeout+30*time.Second)
-	defer cancel()
-
-	if !dailyClient.WaitForParticipant(ctx, roomName, browserJoinTimeout, 2*time.Second) {
-		log.Printf("rexa: session=%s nobody joined room %s within %s — giving up",
-			sessionID, roomName, browserJoinTimeout)
-		_ = dailyClient.DeleteRoom(ctx, roomName)
-		releaseCall(sessionID)
-		rc := p.platform
-		reportSessionFailed(rc, "no_answer")
-		return
+// Loopback, always. The sidecar runs beside the agent, so routing its audio out
+// through the public tunnel and back would add a round trip to every utterance
+// and make browser calls fail whenever the tunnel blinked.
+func sidecarAgentWS() string {
+	addr := cfg.Server.Addr
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
 	}
-
-	// Our own webhook, so call.answered starts the media fork exactly as it
-	// does for a phone call. Without it the leg connects and stays silent.
-	ccid, err := p.platform.client.DialSIP(ctx, sipURI, publicURL+"/telnyx/webhook", "")
-	if err != nil {
-		log.Printf("rexa: session=%s SIP dial into room %s failed: %v", sessionID, roomName, err)
-		_ = dailyClient.DeleteRoom(ctx, roomName)
-		releaseCall(sessionID)
-		reportSessionFailed(p.platform, "provider_failure")
-		return
-	}
-	if rexaMetrics != nil {
-		rexaMetrics.Rekey(sessionID, ccid)
-	}
-	calls.put(ccid, p)
-	log.Printf("rexa: session=%s browser joined room %s, agent dialling in as call=%s",
-		sessionID, roomName, ccid)
-}
-
-// reportDispatchFailure tells the platform a call never got off the ground.
-//
-// Without this the session sits in_progress until the platform's reconciler
-// marks it failed half an hour later, with no cause recorded.
-func (d *platformDispatcher) reportDispatchFailure(sessionID, tenantID, webhookURL, direction string) {
-	if rexaPoster == nil {
-		return
-	}
-	status, reason := rexa.Outcome{DispatchFailed: true, Direction: direction}.Report()
-	report := rexa.EndOfCallReport{
-		SessionID:  sessionID,
-		TenantID:   tenantID,
-		CallStatus: status,
-		EndReason:  reason,
-		EndedAt:    rexa.ISOTime(time.Now()),
-	}
-	go func() {
-		if err := rexaPoster.PostEndOfCall(context.Background(), webhookURL, report); err != nil {
-			log.Printf("rexa: dispatch-failure report FAILED for session=%s: %v", sessionID, err)
-		}
-	}()
+	return "ws://" + addr + "/room/media"
 }
 
 // reportSessionFailed ends a browser session that never became a call.

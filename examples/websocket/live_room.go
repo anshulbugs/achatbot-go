@@ -13,6 +13,10 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
 	"time"
 
 	"achatbot/pkg/daily"
@@ -37,6 +41,93 @@ func initDaily(apiKey string) {
 	dailyClient = daily.New(apiKey)
 	if dailyClient != nil {
 		log.Printf("rexa: live listening enabled (Daily rooms for dispatches carrying redis details)")
+	}
+}
+
+// The Daily sidecar: a Python process that joins a room and pipes its audio to
+// /room/media. See deploy/sidecar/room_agent.py.
+//
+// Python because Daily has no Go SDK. The alternative — having Telnyx dial the
+// room's SIP endpoint — works and sounds like a phone call, because it is one:
+// G.711 at 8 kHz. This keeps browser calls wideband and drops the carrier leg
+// they used to burn.
+var (
+	sidecarPython string
+	sidecarScript string
+
+	sidecarMu sync.Mutex
+	// sidecars tracks one process per session so a call that ends early does
+	// not leave a process sitting in an empty room. The script leaves on its
+	// own when the room empties; this is the belt to that braces.
+	sidecars = map[string]*exec.Cmd{}
+)
+
+// initSidecar locates the interpreter and script. Both must exist or browser
+// calls are refused up front rather than returning a room nobody joins.
+func initSidecar(python, script string) {
+	if python == "" || script == "" {
+		return
+	}
+	if _, err := os.Stat(python); err != nil {
+		log.Printf("rexa: sidecar python not found at %s — browser calls disabled", python)
+		return
+	}
+	if _, err := os.Stat(script); err != nil {
+		log.Printf("rexa: sidecar script not found at %s — browser calls disabled", script)
+		return
+	}
+	sidecarPython, sidecarScript = python, script
+	log.Printf("rexa: browser rooms enabled (sidecar %s)", script)
+}
+
+// sidecarReady reports whether browser calls can be served.
+func sidecarReady() bool { return sidecarPython != "" && sidecarScript != "" }
+
+// startSidecar launches the room agent for one session.
+//
+// agentWS is where it sends the room's audio. Always loopback: the sidecar runs
+// beside the agent, so routing its audio out through the public tunnel and back
+// would add latency and a dependency on the tunnel being up.
+func startSidecar(sessionID, roomURL, token, agentWS string) error {
+	cmd := exec.Command(sidecarPython, sidecarScript,
+		"--room-url", roomURL,
+		"--token", token,
+		"--session", sessionID,
+		"--agent-ws", agentWS)
+	// Its logs are the only view into what happened inside the room, so they go
+	// to ours rather than to a file nobody reads.
+	cmd.Stdout = log.Writer()
+	cmd.Stderr = log.Writer()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	sidecarMu.Lock()
+	sidecars[sessionID] = cmd
+	sidecarMu.Unlock()
+
+	go func() {
+		err := cmd.Wait()
+		sidecarMu.Lock()
+		delete(sidecars, sessionID)
+		sidecarMu.Unlock()
+		if err != nil && !strings.Contains(err.Error(), "signal: terminated") {
+			log.Printf("rexa: sidecar for session=%s exited: %v", sessionID, err)
+		}
+	}()
+	return nil
+}
+
+// stopSidecar ends the room agent for a session, if one is running.
+func stopSidecar(sessionID string) {
+	sidecarMu.Lock()
+	cmd := sidecars[sessionID]
+	delete(sidecars, sessionID)
+	sidecarMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		// SIGTERM, not Kill: the script leaves the room cleanly on it, and a
+		// participant that vanishes without leaving takes Daily a while to time
+		// out — during which the room still bills.
+		_ = cmd.Process.Signal(os.Interrupt)
 	}
 }
 

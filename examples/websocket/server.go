@@ -1083,6 +1083,11 @@ func main() {
 		http.HandleFunc("/telnyx/media", handleTelnyxMedia)
 	}
 
+	// The Daily sidecar's media bridge. Registered unconditionally: it is
+	// harmless without a dispatch behind it (404s) and the contract endpoints
+	// are wired separately.
+	http.HandleFunc("/room/media", handleRoomMedia)
+
 	// Browser voice WS moves to /ws so the UI can be served at /.
 	http.Handle("/ws", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
 
