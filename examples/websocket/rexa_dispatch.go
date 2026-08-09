@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"achatbot/pkg/common"
 	"achatbot/pkg/modules/llm"
 	"achatbot/pkg/modules/speech/asr"
 	"achatbot/pkg/modules/speech/tts"
@@ -223,18 +224,29 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	}
 
 	p := &callParams{
-		To:               req.ToNumber,
-		Hello:            req.HelloMessage,
-		SystemPrompt:     req.SystemPrompt,
-		VoicemailMessage: req.VoicemailMessage,
-		TransferNumber:   req.TransferNumber,
-		DisplayName:      req.DisplayName,
-		VoiceID:          voiceID,
-		Speed:            cfg.TTS.Speed,
-		Volume:           cfg.TTS.Gain,
-		LLMModel:         cfg.LLM.Model,
-		amdCh:            make(chan string, 2),
-		beepCh:           make(chan string, 2),
+		To: req.ToNumber,
+		// Stripped HERE, once, before anything renders or prompts. The greeting
+		// is turned into audio before the phone rings, so an unsubstituted
+		// {{contact_first_name}} is not an awkward greeting — it is a speech
+		// engine reading the token aloud to a customer. The same text is also
+		// given to the model as "what you have already said", so cleaning it at
+		// one point keeps the two in agreement.
+		Hello:        common.StripPlaceholders(req.HelloMessage),
+		SystemPrompt: req.SystemPrompt,
+		// Falls back to the server default, exactly as the demo path does.
+		// Without this a dispatch that omits the field detects the machine
+		// correctly, spends nothing on it, and then hangs up with nothing to
+		// say — the one outcome answering-machine detection exists to avoid.
+		VoicemailMessage: common.StripPlaceholders(
+			firstNonEmpty(req.VoicemailMessage, cfg.Server.VoicemailMessage)),
+		TransferNumber: req.TransferNumber,
+		DisplayName:    req.DisplayName,
+		VoiceID:        voiceID,
+		Speed:          cfg.TTS.Speed,
+		Volume:         cfg.TTS.Gain,
+		LLMModel:       cfg.LLM.Model,
+		amdCh:          make(chan string, 2),
+		beepCh:         make(chan string, 2),
 		platform: &rexaCall{
 			sessionID:  req.SessionID,
 			tenantID:   req.TenantID,
@@ -630,4 +642,16 @@ func parseVoiceOverrides() map[string]int {
 		out[strings.TrimSpace(name)] = id
 	}
 	return out
+}
+
+// firstNonEmpty returns the first argument that is not the empty string, or ""
+// when there is none. Used where a per-dispatch field falls back to a
+// server-wide default.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/weedge/pipeline-go/pkg/frames"
 
+	"achatbot/pkg/common"
 	"achatbot/pkg/consts"
 	"achatbot/pkg/modules/speech/tts"
 	"achatbot/pkg/params"
@@ -434,6 +435,10 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	if p.VoicemailMessage == "" {
 		p.VoicemailMessage = cfg.Server.VoicemailMessage
 	}
+	// Same reason as the platform path: both of these become audio before the
+	// phone rings, so a leftover {{token}} gets spoken rather than seen.
+	p.Hello = common.StripPlaceholders(p.Hello)
+	p.VoicemailMessage = common.StripPlaceholders(p.VoicemailMessage)
 	// Render both announcements before the line is even ringing. Doing it here
 	// rather than mid-call means the greeting is ready the instant the callee
 	// answers, and a call that turns out to be a machine never waits on -- or
