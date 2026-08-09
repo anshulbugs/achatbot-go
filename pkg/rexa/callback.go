@@ -122,6 +122,12 @@ func (p *Poster) postWithSchedule(ctx context.Context, url string, payload any, 
 	for attempt := 0; ; attempt++ {
 		err := p.postOnce(ctx, url, body, nonce)
 		if err == nil {
+			// Log the DELIVERY, not just failures. "No error in the log" is a
+			// terrible way to answer "did the platform get it?", and that is
+			// the question asked every time an event appears to go missing —
+			// the answer needs to be greppable by session id.
+			log.Printf("rexa: callback delivered to %s (%d bytes, attempt %d)",
+				url, len(body), attempt+1)
 			return nil
 		}
 		lastErr = err
