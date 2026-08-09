@@ -846,12 +846,23 @@ func truncate(s string, n int) string {
 // send until we are announceLead ahead of the wall clock, then only top up.
 // That absorbs jitter while keeping at most announceLead of audio committed,
 // which is how quickly a machine verdict can still cut the greeting.
-// 1500ms was tuned on a four-second greeting and held. A real call with a
-// SIXTEEN-second greeting brought the gap back: the longer the announcement,
-// the more chances there are for one scheduling stall to exceed the lead, and
-// one is all it takes. 3s costs nothing on a human call and only means up to
-// 3s of greeting is already committed when a machine verdict arrives.
-const announceLead = 3 * time.Second
+// Both too little AND too much lead produce the same symptom, which is what
+// made this hard to pin down.
+//
+// Too little: sending 100ms of audio every 100ms leaves Telnyx no cushion, one
+// scheduling hiccup arrives late, its buffer underruns and the caller hears a
+// hole in the middle of a word.
+//
+// Too much: Telnyx buffers a bounded amount of inbound media. Pushed 3 seconds
+// ahead it dropped the excess, and playback resumed only when our sender caught
+// up — a pause in the middle of the greeting that then continued mid-word. Our
+// own sender never fell behind on those calls (nothing logged), which is what
+// ruled out the underrun explanation and pointed here.
+//
+// 600ms absorbs an ordinary stall while staying well inside what the carrier
+// will hold. It also bounds how much greeting is already committed when a
+// machine verdict arrives, which is the other thing this number controls.
+const announceLead = 600 * time.Millisecond
 
 func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
 	const chunkMS = 100

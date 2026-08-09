@@ -54,7 +54,12 @@ const interruptMute = 400 * time.Millisecond
 // clearly louder. We track the echo floor and let audio through only when it
 // exceeds both an absolute floor and a multiple of that echo level.
 const (
-	bargeAbsFloor = 550.0 // min inbound RMS (int16) to count as speech at all
+	// Lowered from 550 with the same intent as bargeFactor below: the agent was
+	// still talking a beat after the caller started. A phone handset delivers
+	// ordinary speech well above this, and the echo it has to reject is bounded
+	// separately by bargeFactor, so this floor exists to ignore line noise
+	// rather than to judge loudness.
+	bargeAbsFloor = 420.0 // min inbound RMS (int16) to count as speech at all
 	// Lowered from 2.0 after a live call: the agent kept talking for a
 	// noticeable moment after the caller started. Echo returns attenuated by
 	// the handset, so 1.6 still clears it, and the pre-roll buffer below means
