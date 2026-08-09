@@ -19,6 +19,7 @@ import (
 	"achatbot/pkg/params"
 	achatbot_processors "achatbot/pkg/processors"
 	"achatbot/pkg/rexa"
+	"achatbot/pkg/sentiment"
 	"achatbot/pkg/telnyx"
 )
 
@@ -92,6 +93,16 @@ type rexaCall struct {
 	// pipeline's ChatHistory, which trims to a rolling window mid-call.
 	transcript *rexa.Transcript
 
+	// sentimentWebhook is a DIFFERENT url from webhookURL, and empty unless the
+	// tenant opted in. Mid-call alerts go there; the end-of-call report does
+	// not.
+	sentimentWebhook string
+	sentiment        sentiment.Tracker
+
+	// live publishes call state to the tenant's own Redis. nil when the
+	// dispatch carried no Redis details, and every method is nil-safe.
+	live *rexa.LivePublisher
+
 	// startedAt anchors both the report's duration and the transcript's turn
 	// timings. Set when the call is answered, not when it was dispatched.
 	startedAt time.Time
@@ -160,6 +171,12 @@ func (r *callRegistry) recordAMD(id, verdict string) {
 	defer r.mu.Unlock()
 	if p := r.m[id]; p != nil && p.platform != nil {
 		p.platform.amdVerdict = verdict
+		if isMachineVerdict(verdict) {
+			// A watcher should see a voicemail drop as its own state, not as a
+			// call that went quiet: no pipeline ever runs, so nothing else on
+			// this path would report anything.
+			p.platform.live.Status(rexa.LiveStatusVoicemail)
+		}
 	}
 }
 
@@ -180,6 +197,17 @@ func (r *callRegistry) markAgentEnded(id string) {
 	if p := r.m[id]; p != nil && p.platform != nil {
 		p.platform.agentEnded = true
 	}
+}
+
+// platformOf returns the call's contract state without claiming it, for events
+// that are not once-per-call. nil for demo calls.
+func (r *callRegistry) platformOf(id string) *rexaCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil {
+		return p.platform
+	}
+	return nil
 }
 
 // claimReport returns the call's contract state exactly once, so the report is
@@ -467,6 +495,12 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// beep_detected is the real cue; "ended" (greeting_end mode) and
 		// "not_sure" (30s beep timeout) both mean it is safe to start talking.
 		calls.signalBeep(id, ev.Data.Payload.Result)
+	case "call.recording.saved":
+		// Emitted separately from the end-of-call report, and deliberately
+		// after it: the carrier finalises a recording tens of seconds after the
+		// call ends, and holding the report back for it would delay every
+		// disposition the platform acts on.
+		reportRecordingSaved(id, ev)
 	case "call.hangup":
 		// The report is emitted from HERE, on the carrier's lifecycle, rather
 		// than from pipeline teardown. Voicemail, no-answer and busy calls all
@@ -527,12 +561,57 @@ func reportCallEnded(id string) {
 	if rc.transcript != nil {
 		report.Messages = rc.transcript.Turns()
 	}
+	// Close the live view here rather than on pipeline teardown, for the same
+	// reason the report is emitted here: a no-answer or a busy never reaches a
+	// pipeline, and a wallboard showing it as still ringing is worse than one
+	// showing nothing.
+	rc.live.Close()
 
 	log.Printf("rexa: reporting session=%s status=%s reason=%s turns=%d",
 		rc.sessionID, status, reason, len(report.Messages))
 	go func() {
 		if err := rexaPoster.PostEndOfCall(context.Background(), rc.webhookURL, report); err != nil {
 			log.Printf("rexa: end-of-call report FAILED for session=%s: %v", rc.sessionID, err)
+		}
+	}()
+}
+
+// reportRecordingSaved posts the recording event for a platform-dispatched
+// call. No-op for demo calls.
+//
+// Read from the registry rather than claimed, because unlike the end-of-call
+// report this is not once-per-call state — but it does arrive AFTER
+// call.hangup has deleted the registry entry, which is why the lookup runs
+// before the entry is gone. Telnyx sends recording.saved either side of hangup
+// depending on how the call ended, so a missing entry is expected and simply
+// means there is nobody to report to.
+func reportRecordingSaved(id string, ev *telnyx.WebhookEnvelope) {
+	rc := calls.platformOf(id)
+	if rc == nil || rexaPoster == nil {
+		return
+	}
+	p := ev.Data.Payload
+	evt := rexa.NewRecordingSaved(rc.sessionID, rc.tenantID, id, p.RecordingID)
+	evt.Channels = p.Channels
+	evt.RecordingStartedAt = p.RecordingStarted
+	evt.RecordingEndedAt = p.RecordingEnded
+	if p.RecordingURLs != nil {
+		evt.RecordingURLs = &rexa.RecordingURLs{MP3: p.RecordingURLs.MP3, WAV: p.RecordingURLs.WAV}
+	}
+	if p.PublicURLs != nil {
+		evt.PublicRecordingURLs = &rexa.RecordingURLs{MP3: p.PublicURLs.MP3, WAV: p.PublicURLs.WAV}
+	}
+	// The platform infers a failure from absent URLs, but saying so explicitly
+	// is cheaper than making it guess.
+	if evt.RecordingURLs == nil && evt.PublicRecordingURLs == nil {
+		evt.Status = "failed"
+	}
+
+	log.Printf("rexa: recording saved session=%s recording=%s status=%s",
+		rc.sessionID, evt.RecordingID, evt.Status)
+	go func() {
+		if err := rexaPoster.PostRecordingSaved(context.Background(), rc.webhookURL, evt); err != nil {
+			log.Printf("rexa: recording report FAILED for session=%s: %v", rc.sessionID, err)
 		}
 	}()
 }
@@ -864,6 +943,15 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	var chatObserver func(map[string]any)
 	if p.platform != nil && p.platform.transcript != nil {
 		chatObserver = p.platform.transcript.ObserveChatHistory()
+	}
+	// Sentiment rides the same observer: it needs exactly what the transcript
+	// needs — every turn as it happens — and adding a second observation point
+	// in the pipeline would be a second thing to keep in sync.
+	if obs := sentimentObserver(id, p.platform); obs != nil {
+		chatObserver = chainObservers(chatObserver, obs)
+	}
+	if p.platform != nil {
+		p.platform.live.Status(rexa.LiveStatusInProgress)
 	}
 
 	runVoiceSession(conn, ser, sessionConfig{

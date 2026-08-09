@@ -76,6 +76,20 @@ func observeLLMTurn(sessionID string, ttft time.Duration, turn int) {
 	}
 }
 
+// sentimentTargetFor returns the webhook to post sentiment changes to, or ""
+// when this call should not be classified.
+//
+// Both signals must agree. The platform's builder sends them as a pair, but a
+// flag with no destination would mean paying for classification and throwing it
+// away, and a destination with the flag off would mean sending events the
+// tenant did not ask for.
+func sentimentTargetFor(enabled bool, webhook string) string {
+	if !enabled || webhook == "" {
+		return ""
+	}
+	return webhook
+}
+
 // markVoicemail releases a call's GPU capacity: with AMD enabled the pipeline
 // never started, so it holds no pool slots and only the announcement remains.
 func markVoicemail(callID string) {
@@ -134,6 +148,8 @@ func initRexaTelemetry() {
 		CriticalMs:  cfg.Server.FirstTurnCriticalMs,
 		Cooldown:    time.Duration(cfg.Server.FirstTurnCooldownSecs) * time.Second,
 	})
+
+	initSentiment(cfg.Server.SentimentBaseURL, cfg.Server.SentimentModel)
 
 	// Poll the LLM server's own cache and queue metrics on a background clock.
 	// Never from the health handler: /health is probed every 5 s fleet-wide,
@@ -221,8 +237,23 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 			// Anchored provisionally at dispatch; markAnswered resets it to
 			// the pickup time so turn timings start from the conversation.
 			transcript: rexa.NewTranscript(time.Now()),
+			// Both are required together: analysis with nowhere to send the
+			// result is pure cost, so the webhook's presence is what enables it.
+			sentimentWebhook: sentimentTargetFor(req.SentimentAnalysis, req.SentimentWebhook),
+			live: rexa.NewLivePublisher(req.Redis(), rexa.LiveCallState{
+				SessionID:  req.SessionID,
+				TenantID:   req.TenantID,
+				Status:     rexa.LiveStatusDialing,
+				ToNumber:   req.ToNumber,
+				FromNumber: req.FromNumber,
+				StartedAt:  rexa.ISOTime(time.Now()),
+			}),
 		},
 	}
+	// Publish "dialing" before the carrier is asked, so a watcher sees the call
+	// during the ring rather than only once someone picks up — the ring is most
+	// of a dispatch's life and the part an operator most often asks about.
+	p.platform.live.Status(rexa.LiveStatusDialing)
 
 	// Pre-render the greeting and voicemail message before the line rings, so
 	// neither costs a TTS slot once the call is live and a machine-answered
@@ -249,6 +280,8 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	if rexaMetrics != nil {
 		rexaMetrics.Rekey(req.SessionID, callControlID)
 	}
+	p.platform.live.CCID(callControlID)
+	p.platform.live.Status(rexa.LiveStatusRinging)
 	calls.put(callControlID, p)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
 	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: callControlID}, nil
@@ -283,14 +316,27 @@ func (d *platformDispatcher) DispatchIncoming(ctx context.Context, req rexa.Inco
 		amdCh:          make(chan string, 2),
 		beepCh:         make(chan string, 2),
 		platform: &rexaCall{
-			sessionID:  req.SessionID,
-			tenantID:   req.TenantID,
-			webhookURL: req.WebhookURL,
-			direction:  "inbound",
-			client:     client,
-			transcript: rexa.NewTranscript(time.Now()),
+			sessionID:        req.SessionID,
+			tenantID:         req.TenantID,
+			webhookURL:       req.WebhookURL,
+			direction:        "inbound",
+			client:           client,
+			transcript:       rexa.NewTranscript(time.Now()),
+			sentimentWebhook: sentimentTargetFor(req.SentimentAnalysis, req.SentimentWebhook),
+			live: rexa.NewLivePublisher(req.Redis(), rexa.LiveCallState{
+				SessionID: req.SessionID,
+				TenantID:  req.TenantID,
+				// No dialing or ringing phase inbound: the leg is already up
+				// and we are answering it.
+				Status:     rexa.LiveStatusInProgress,
+				CCID:       req.CCID,
+				ToNumber:   req.ToNumber,
+				FromNumber: req.FromNumber,
+				StartedAt:  rexa.ISOTime(time.Now()),
+			}),
 		},
 	}
+	p.platform.live.Status(rexa.LiveStatusInProgress)
 	// Register BEFORE answering: the carrier can deliver call.answered before
 	// Answer() returns, and an unregistered call is dropped on the floor.
 	calls.put(req.CCID, p)

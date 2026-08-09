@@ -36,6 +36,18 @@ var RetrySchedule = []time.Duration{
 	12 * time.Minute,
 }
 
+// SentimentRetrySchedule is the ladder for mid-call sentiment events.
+//
+// Short on purpose. A sentiment alert exists so a human can act while the
+// caller is still on the line; a delivery that finally succeeds twelve minutes
+// later has failed at the only thing it was for, and arrives as noise about a
+// call that has long since ended. Two quick retries cover a blip, and then we
+// stop.
+var SentimentRetrySchedule = []time.Duration{
+	1 * time.Second,
+	3 * time.Second,
+}
+
 // callbackTimeout bounds a single POST attempt. The platform's ingress is
 // verify + insert + enqueue with a sub-50ms p95 target, so anything near this
 // bound means it is unhealthy and we are better off retrying than waiting.
@@ -80,6 +92,12 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // must not stall should run it in a goroutine. It returns nil as soon as the
 // platform accepts the callback, and the last error if every attempt failed.
 func (p *Poster) Post(ctx context.Context, url string, payload any) error {
+	return p.postWithSchedule(ctx, url, payload, RetrySchedule)
+}
+
+// postWithSchedule is Post with an explicit retry ladder, so an event whose
+// value expires can give up early instead of retrying into irrelevance.
+func (p *Poster) postWithSchedule(ctx context.Context, url string, payload any, schedule []time.Duration) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		// Unmarshalable payload is a bug in our own struct tags; retrying
@@ -106,17 +124,17 @@ func (p *Poster) Post(ctx context.Context, url string, payload any) error {
 		if errors.As(err, &perm) {
 			return err
 		}
-		if attempt >= len(RetrySchedule) {
+		if attempt >= len(schedule) {
 			break
 		}
-		delay := RetrySchedule[attempt]
+		delay := schedule[attempt]
 		log.Printf("rexa: callback to %s failed (attempt %d/%d): %v — retrying in %s",
-			url, attempt+1, len(RetrySchedule)+1, err, delay)
+			url, attempt+1, len(schedule)+1, err, delay)
 		if serr := p.sleep(ctx, delay); serr != nil {
 			return fmt.Errorf("callback abandoned: %w (last error: %v)", serr, lastErr)
 		}
 	}
-	return fmt.Errorf("callback to %s failed after %d attempts: %w", url, len(RetrySchedule)+1, lastErr)
+	return fmt.Errorf("callback to %s failed after %d attempts: %w", url, len(schedule)+1, lastErr)
 }
 
 // permanentError marks a failure that retrying cannot fix.
@@ -170,4 +188,24 @@ func (p *Poster) PostEndOfCall(ctx context.Context, url string, r EndOfCallRepor
 // PostTransferInitiated delivers a mid-call transfer notification.
 func (p *Poster) PostTransferInitiated(ctx context.Context, url string, e TransferInitiatedEvent) error {
 	return p.Post(ctx, url, e)
+}
+
+// PostRecordingSaved delivers a finalised-recording notification.
+//
+// Goes to the same webhook_url as the end-of-call report and arrives after it,
+// because the carrier finalises a recording tens of seconds after the call
+// ends. The full retry ladder applies: a recording link the platform never
+// receives is a recording the tenant cannot play.
+func (p *Poster) PostRecordingSaved(ctx context.Context, url string, e RecordingSavedEvent) error {
+	return p.Post(ctx, url, e)
+}
+
+// PostSentiment delivers a mid-call sentiment change to the dispatch's
+// sentiment_webhook — a DIFFERENT url from the end-of-call report.
+//
+// Uses a short-ladder poster: the platform's whole reason for this event is to
+// alert a human while the caller is still on the line, so a delivery that
+// succeeds twelve minutes later has failed at the only thing it was for.
+func (p *Poster) PostSentiment(ctx context.Context, url string, e SentimentEvent) error {
+	return p.postWithSchedule(ctx, url, e, SentimentRetrySchedule)
 }

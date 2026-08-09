@@ -21,8 +21,27 @@ type WebhookEnvelope struct {
 			// call.machine.*.ended events: human, machine, not_sure, silence,
 			// fax_detected, beep_detected, ended.
 			Result string `json:"result"`
+
+			// Recording fields, present on call.recording.saved.
+			//
+			// RecordingURLs are pre-signed and EXPIRE — Telnyx documents ten
+			// minutes. Anything that wants the audio later has to fetch and
+			// re-host it; passing the link on unchanged produces a 403 for
+			// whoever opens it an hour after the call.
+			RecordingID      string         `json:"recording_id"`
+			Channels         string         `json:"channels"`
+			RecordingURLs    *RecordingURLs `json:"recording_urls"`
+			PublicURLs       *RecordingURLs `json:"public_recording_urls"`
+			RecordingStarted string         `json:"recording_started_at"`
+			RecordingEnded   string         `json:"recording_ended_at"`
 		} `json:"payload"`
 	} `json:"data"`
+}
+
+// RecordingURLs is Telnyx's per-format link set for one recording.
+type RecordingURLs struct {
+	MP3 string `json:"mp3"`
+	WAV string `json:"wav"`
 }
 
 // ParseWebhook decodes a Telnyx webhook body.

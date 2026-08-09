@@ -102,6 +102,17 @@ type PhoneDispatchRequest struct {
 	SentimentAnalysis bool   `json:"sentiment_analysis,omitempty"`
 	SentimentWebhook  string `json:"sentiment_webhook,omitempty"`
 	DisplayName       string `json:"display_name,omitempty"`
+	// Redis connection for live call state. Optional and per-tenant: when
+	// absent nothing is published and the call is unaffected.
+	RedisHost     string `json:"redis_host,omitempty"`
+	RedisPort     int    `json:"redis_port,omitempty"`
+	RedisDB       int    `json:"redis_db,omitempty"`
+	RedisPassword string `json:"redis_password,omitempty"`
+}
+
+// Redis extracts the live-state target from a dispatch.
+func (r PhoneDispatchRequest) Redis() RedisTarget {
+	return RedisTarget{Host: r.RedisHost, Port: r.RedisPort, DB: r.RedisDB, Password: r.RedisPassword}
 }
 
 // IncomingDispatchRequest is the body of POST /incoming — a call already
@@ -125,6 +136,15 @@ type IncomingDispatchRequest struct {
 	WebhookURL        string `json:"webhook_url"`
 	SentimentAnalysis bool   `json:"sentiment_analysis,omitempty"`
 	SentimentWebhook  string `json:"sentiment_webhook,omitempty"`
+	RedisHost         string `json:"redis_host,omitempty"`
+	RedisPort         int    `json:"redis_port,omitempty"`
+	RedisDB           int    `json:"redis_db,omitempty"`
+	RedisPassword     string `json:"redis_password,omitempty"`
+}
+
+// Redis extracts the live-state target from an inbound dispatch.
+func (r IncomingDispatchRequest) Redis() RedisTarget {
+	return RedisTarget{Host: r.RedisHost, Port: r.RedisPort, DB: r.RedisDB, Password: r.RedisPassword}
 }
 
 // WebrtcDispatchRequest is the body of POST /connection_webrtc.
@@ -311,4 +331,81 @@ func NewTransferInitiated(sessionID, tenantID, number string, at time.Time) Tran
 		TransferNumber: number,
 		TransferredAt:  ISOTime(at),
 	}
+}
+
+// RecordingURLs is the per-format set of links to one recording.
+type RecordingURLs struct {
+	MP3 string `json:"mp3,omitempty"`
+	WAV string `json:"wav,omitempty"`
+}
+
+// RecordingSavedEvent is POSTed to webhook_url once the carrier has finalised a
+// recording.
+//
+// Separate from the end-of-call report because finalisation lags the call's end
+// by tens of seconds — transcoding and upload — and holding the report back for
+// it would delay every disposition the platform acts on. The platform re-emits
+// this to tenants as `session.recording_completed`.
+type RecordingSavedEvent struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	TenantID  string `json:"tenant_id"`
+	// CallControlID is provider-internal; the platform strips it before
+	// relaying to a tenant.
+	CallControlID string `json:"call_control_id,omitempty"`
+	RecordingID   string `json:"recording_id"`
+	// Status is "completed" or "failed". The platform tolerates an empty
+	// string and infers from URL presence, but we always set it.
+	Status string `json:"status"`
+	// Channels is "single" or "dual" as the carrier reports it.
+	Channels           string `json:"channels,omitempty"`
+	RecordingStartedAt string `json:"recording_started_at,omitempty"`
+	RecordingEndedAt   string `json:"recording_ended_at,omitempty"`
+	// RecordingURLs are the carrier's own links. Telnyx's are pre-signed and
+	// expire, which is why the platform prefers PublicRecordingURLs when we
+	// have somewhere to host them.
+	RecordingURLs *RecordingURLs `json:"recording_urls,omitempty"`
+	// PublicRecordingURLs are tenant-fetchable links. Empty until the agent
+	// mirrors recordings to storage of its own — see §6 of the contract.
+	PublicRecordingURLs *RecordingURLs `json:"public_recording_urls,omitempty"`
+}
+
+// NewRecordingSaved builds a recording event with the discriminator set.
+func NewRecordingSaved(sessionID, tenantID, ccid, recordingID string) RecordingSavedEvent {
+	return RecordingSavedEvent{
+		Type:          "recording_saved",
+		SessionID:     sessionID,
+		TenantID:      tenantID,
+		CallControlID: ccid,
+		RecordingID:   recordingID,
+		Status:        "completed",
+	}
+}
+
+// Sentiment values the mid-call classifier may report. Closed set — the
+// platform's Zod enum rejects anything else, and a rejected event is a silently
+// missed alert.
+const (
+	SentimentWantsHuman       = "wants_human"
+	SentimentHighlyInterested = "highly_interested"
+	SentimentUserAnnoyed      = "user_annoyed"
+)
+
+// SentimentEvent is POSTed MID-CALL to the dispatch's sentiment_webhook — a
+// different URL from the end-of-call report, and the only agent callback that
+// is worth nothing after the call ends.
+//
+// The platform jumps it to the front of its delivery queue and fires operator
+// alerts from it, so an alert saying "the caller wants a human" reaches someone
+// while the caller is still on the line.
+type SentimentEvent struct {
+	SessionID string `json:"session_id"`
+	TenantID  string `json:"tenant_id"`
+	// CallStatus is the call's state at the moment of detection ("in_progress").
+	CallStatus string `json:"call_status,omitempty"`
+	CCID       string `json:"CCID,omitempty"`
+	Sentiment  string `json:"sentiment_value"`
+	// DailyRoomURL lets an operator join the live call. Empty until the WebRTC
+	// path exists; the platform's alert template degrades to no join link.
+	DailyRoomURL string `json:"daily_room_url,omitempty"`
 }

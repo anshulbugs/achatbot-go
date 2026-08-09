@@ -180,10 +180,10 @@ func (w *tierWindow) state() string {
 // exactly what hides the failure this gate exists to catch. Measured at 60
 // concurrent calls with 3k-token prompts (deploy/loadtest/turnbench.py):
 //
-//	                       one campaign   a different prompt per call
-//	 overall TTFT p95         1725 ms              6252 ms
-//	 TURN 1 p95               1853 ms              9903 ms
-//	 turn 8 p95                727 ms              4035 ms
+//	                      one campaign   a different prompt per call
+//	overall TTFT p95         1725 ms              6252 ms
+//	TURN 1 p95               1853 ms              9903 ms
+//	turn 8 p95                727 ms              4035 ms
 //
 // Turn 1 is the only turn that pays a cold prefill, so it is where KV-cache
 // pressure shows first and worst — and it is the turn the caller feels, the

@@ -184,6 +184,18 @@ type ServerConfig struct {
 	// gate that stayed shut until the numbers recovered would cut off the
 	// samples that could show recovery and never reopen. 0 uses the default.
 	FirstTurnCooldownSecs int `mapstructure:"first_turn_cooldown_secs"`
+	// SentimentBaseURL is an OpenAI-compatible endpoint used ONLY for mid-call
+	// sentiment classification. Empty disables the feature regardless of what
+	// a dispatch asks for.
+	//
+	// Point this at a SMALL model on its own endpoint, never at the
+	// conversation LLM. First-turn latency on that model is what decides how
+	// many calls the fleet can carry, and classifying on it spends the exact
+	// resource capacity is measured in. A 0.6B model costs nothing the caller
+	// waits for and nothing the capacity gate counts.
+	SentimentBaseURL string `mapstructure:"sentiment_base_url"`
+	// SentimentModel is the model name at SentimentBaseURL.
+	SentimentModel string `mapstructure:"sentiment_model"`
 	// SGLangMetricsURLs are the SGLang server base URLs (NOT the /v1 path)
 	// whose /metrics endpoint is polled in the background for cache hit rate
 	// and queue depth. Reported on /health and /dashboard, never acted on.
@@ -345,6 +357,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.first_turn_critical_ms", 0)
 	v.SetDefault("server.first_turn_cooldown_secs", 0)
 	v.SetDefault("server.sglang_metrics_urls", []string{})
+	v.SetDefault("server.sentiment_base_url", "")
+	v.SetDefault("server.sentiment_model", "qwen3:0.6b")
 	v.SetDefault("server.idle_prompt_secs", 0)
 	v.SetDefault("server.idle_prompt_text", "Are you still there?")
 	v.SetDefault("server.turn_gate_enabled", false)

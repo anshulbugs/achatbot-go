@@ -126,6 +126,12 @@ func (t *transferTool) Execute(args map[string]any) (string, error) {
 	}
 
 	log.Printf("transfer: call=%s handed to %s", t.callID, t.to)
+	// Only on success. `transfer_initiated` fires on attempt by design, but a
+	// live view showing "transferred" for a call still sitting with the agent
+	// would be simply wrong.
+	if rc := calls.platformOf(t.callID); rc != nil {
+		rc.live.Status(rexa.LiveStatusTransferred)
+	}
 	// Release the pipeline: the carrier owns the conversation now and our
 	// media fork is not part of that bridge, so holding a GPU slot for it
 	// would consume capacity nobody is using.
