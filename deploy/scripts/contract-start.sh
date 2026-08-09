@@ -41,7 +41,30 @@ SIDECAR_SCRIPT="${SIDECAR_SCRIPT:-$PWD/deploy/sidecar/room_agent.py}"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
 
-[ -x "$BIN" ]      || die "$BIN missing — build it: go build -o rexa-server ./examples/websocket"
+# BUILD HERE, always.
+#
+# This script used to only CHECK that the binary existed, and take a stale one
+# without comment. That is a silent failure with no symptom: `git pull` and
+# `go build -o /tmp/somewhere` both succeed, the script prints "Up", /health
+# answers — and the process is running code from hours earlier. Three separate
+# fixes were "deployed" that way and none of them were, which was only caught
+# because a log line that should have been there was not.
+#
+# The build is the deploy. SKIP_BUILD=1 for the rare case where the binary was
+# deliberately built elsewhere.
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+	[ -x "$BIN" ] || die "$BIN missing and SKIP_BUILD=1 — build it: go build -o rexa-server ./examples/websocket"
+	log "Skipping build (SKIP_BUILD=1) — running $BIN as it stands"
+else
+	log "Building $BIN from $(git rev-parse --short HEAD 2>/dev/null || echo 'working tree')"
+	# Build beside it, then rename. Writing straight to $BIN fails with "text
+	# file busy" while the old one is running, and building AFTER the stop
+	# would mean a failed build leaves nothing serving. Rename replaces the
+	# directory entry; the running process keeps its own inode until it exits.
+	CGO_ENABLED=1 go build -o "$BIN.new" ./examples/websocket \
+		|| die "build failed — not restarting, the running agent is untouched"
+	mv -f "$BIN.new" "$BIN" || die "could not put the new binary in place at $BIN"
+fi
 [ -f "$SECRETS" ]  || die "$SECRETS missing — it holds the two HMAC secrets shared with the platform"
 [ -f "config.yaml" ] || die "config.yaml missing — cp deploy/config.yaml.example config.yaml"
 
