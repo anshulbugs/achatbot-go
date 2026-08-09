@@ -85,7 +85,7 @@ func (p *LLMOpenAIApiProcessor) ProcessFrame(frame frames.Frame, direction proce
 		// Close the turn at the point it was cut. Whatever had been handed to
 		// speech by now is the honest answer to "what did the agent say"; the
 		// rest was generated and never heard.
-		p.session.FlushAgentTurn()
+		p.session.FlushAgentTurn(true)
 		p.PushFrame(f, direction)
 	case *frames.TextFrame:
 		logger.Infof("STAGE llm_recv %q", f.Text)
@@ -187,7 +187,7 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 	// A turn that ends normally is reported here; one cut short is reported by
 	// the interruption handler. Flushing twice is harmless — the second finds
 	// nothing left.
-	defer p.session.FlushAgentTurn()
+	defer p.session.FlushAgentTurn(false)
 
 	turnStart := time.Now()
 	turnObserved := false

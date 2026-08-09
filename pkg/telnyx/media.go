@@ -142,6 +142,11 @@ type Serializer struct {
 	lastSpeechAt time.Time
 	awaitingBot  bool
 	onLatency    func(time.Duration)
+	// onSpoken reports each chunk of audio actually sent to the caller, which
+	// is the only measure of what they heard. Text is generated far faster than
+	// it is spoken, so an interrupted turn's transcript can only be trimmed
+	// honestly with this.
+	onSpoken func(time.Duration)
 
 	// Post-interruption fence. Sending Telnyx a "clear" flushes only what it has
 	// already buffered; it does nothing about TTS audio for the interrupted turn
@@ -229,6 +234,10 @@ func (s *Serializer) applyClarity(pcm8 []byte) {
 // SetLatencyHook registers a callback fired once per turn with the measured
 // time from the caller's last speech to the bot's first reply audio.
 func (s *Serializer) SetLatencyHook(fn func(time.Duration)) { s.onLatency = fn }
+
+// SetSpokenHook registers a callback fired with the duration of every chunk of
+// outbound audio.
+func (s *Serializer) SetSpokenHook(fn func(time.Duration)) { s.onSpoken = fn }
 
 // NewSerializer builds a Telnyx media serializer for the given pipeline sample
 // rate (typically 16000), with half-duplex echo suppression enabled.
@@ -346,7 +355,11 @@ func (s *Serializer) noteOutbound(samples int) {
 		s.awaitingBot = false
 	}
 	hook := s.onLatency
+	spokenHook := s.onSpoken
 	s.mu.Unlock()
+	if spokenHook != nil {
+		spokenHook(dur)
+	}
 	if latency > 0 && hook != nil {
 		hook(latency)
 	}

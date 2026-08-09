@@ -30,6 +30,10 @@ type Session struct {
 	// agentObserver receives each completed or interrupted turn.
 	agentTurn     strings.Builder
 	agentObserver AgentTurnObserver
+	// spokenSecs is audio actually sent for the current turn; charsPerSec
+	// converts it back to a position in the text.
+	spokenSecs  float64
+	charsPerSec float64
 	// funcs are tools scoped to THIS session, checked before the global
 	// registry.
 	//
@@ -106,23 +110,85 @@ func (s *Session) RecordAgentChunk(text string) {
 	s.llmMu.Unlock()
 }
 
+// RecordSpokenAudio adds the duration of audio actually sent to the caller for
+// the current turn.
+//
+// This is the only honest measure of what was said. Text is generated far
+// faster than it is spoken — the model finishes a reply in a second or two
+// while the voice takes ten — so "what the model produced" and "what the caller
+// heard" diverge the moment anyone interrupts.
+func (s *Session) RecordSpokenAudio(d time.Duration) {
+	if s == nil || d <= 0 {
+		return
+	}
+	s.llmMu.Lock()
+	s.spokenSecs += d.Seconds()
+	s.llmMu.Unlock()
+}
+
+// SetSpeakingRate calibrates characters per second for the voice in use, used
+// to cut an interrupted turn at the point speech reached.
+func (s *Session) SetSpeakingRate(charsPerSec float64) {
+	if s == nil || charsPerSec <= 0 {
+		return
+	}
+	s.llmMu.Lock()
+	s.charsPerSec = charsPerSec
+	s.llmMu.Unlock()
+}
+
 // FlushAgentTurn reports the turn accumulated so far and starts a new one.
 //
-// Called both when a turn finishes normally and when one is cut short, because
-// the answer to "what did the agent say" is the same in both cases: whatever
-// reached this point before it stopped.
-func (s *Session) FlushAgentTurn() {
+// interrupted decides whether the text is trimmed to what was actually spoken.
+// A turn that ends normally is reported in full — the audio is still playing
+// but all of it will be heard, so trimming it would under-report. A turn cut
+// short is trimmed, because the rest was generated and never reached anyone.
+func (s *Session) FlushAgentTurn(interrupted bool) {
 	if s == nil {
 		return
 	}
 	s.llmMu.Lock()
 	text := strings.TrimSpace(s.agentTurn.String())
+	spoken, rate := s.spokenSecs, s.charsPerSec
 	s.agentTurn.Reset()
+	s.spokenSecs = 0
 	fn := s.agentObserver
 	s.llmMu.Unlock()
+
+	if interrupted {
+		text = trimToSpoken(text, spoken, rate)
+	}
 	if fn != nil && text != "" {
 		fn(text)
 	}
+}
+
+// trimToSpoken cuts text at the word boundary nearest to what the caller heard.
+//
+// Deliberately generous by one word: over-trimming drops something that WAS
+// said, which is worse than including one word that was not — a transcript
+// missing the caller's answer reads as a different conversation.
+func trimToSpoken(text string, spokenSecs, charsPerSec float64) string {
+	if text == "" || spokenSecs <= 0 || charsPerSec <= 0 {
+		return ""
+	}
+	limit := int(spokenSecs * charsPerSec)
+	if limit >= len(text) {
+		return text
+	}
+	cut := strings.LastIndexByte(text[:limit], ' ')
+	if cut <= 0 {
+		// Interrupted inside the first word: nothing meaningful was heard.
+		return ""
+	}
+	// Include the word the cut landed in — the caller almost certainly heard
+	// its beginning, and half a word is not something to report either way.
+	if next := strings.IndexByte(text[cut+1:], ' '); next > 0 {
+		cut = cut + 1 + next
+	} else {
+		cut = len(text)
+	}
+	return strings.TrimSpace(text[:cut])
 }
 
 // SetLLMObserver installs the callback for per-turn LLM timing. nil disables
@@ -165,6 +231,9 @@ func NewSession(sessionID string, chatHistorySize *int) *Session {
 		chatRound:   0,
 		sessionID:   sessionID,
 		chatHistory: chatHistory,
+		// A reasonable default for kokoro at normal speed; callers that know
+		// the voice and speed override it with SetSpeakingRate.
+		charsPerSec: 14,
 	}
 }
 

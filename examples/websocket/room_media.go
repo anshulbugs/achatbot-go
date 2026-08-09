@@ -59,6 +59,9 @@ type roomSerializer struct {
 	// only place that knows what has been queued but not yet spoken.
 	lastInterrupt time.Time
 	awaitingReply bool
+	// onSpoken reports audio actually sent, so an interrupted turn's transcript
+	// can be trimmed to what the caller heard.
+	onSpoken func(time.Duration)
 
 	// greetingUntil is when the pre-rendered greeting finishes playing.
 	//
@@ -72,6 +75,13 @@ type roomSerializer struct {
 	// meaningfully barge in on a greeting they have not heard yet, and if they
 	// talk over it the turn that follows still picks them up.
 	greetingUntil time.Time
+}
+
+// SetSpokenHook registers a callback fired with the duration of outbound audio.
+func (s *roomSerializer) SetSpokenHook(fn func(time.Duration)) {
+	s.mu.Lock()
+	s.onSpoken = fn
+	s.mu.Unlock()
 }
 
 // HoldInterrupts suppresses interrupt messages for d, while the pre-rendered
@@ -118,7 +128,12 @@ func (s *roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
 			log.Printf("room: reply latency ~%dms",
 				time.Since(s.lastInterrupt).Milliseconds())
 		}
+		hook := s.onSpoken
 		s.mu.Unlock()
+		if hook != nil {
+			// consts.DefaultRate mono s16: two bytes a sample.
+			hook(time.Duration(len(f.Audio)/2) * time.Second / time.Duration(f.SampleRate))
+		}
 		return f.Audio, nil
 	case *frames.StartInterruptionFrame:
 		s.mu.Lock()

@@ -600,16 +600,37 @@ Delivery rules for this call, which override any conflicting instruction above:
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
 
-// withCallStyle appends the delivery rules to a system prompt.
+// withCallStyle appends the delivery rules, and the greeting already spoken, to
+// a system prompt.
 //
-// Applies to every session — phone, browser room and the demo page alike.
-// A rule that held on one path and not another would show up as "the agent
-// says 'um' only on browser calls", which is a miserable thing to track down.
-func withCallStyle(prompt string) string {
-	if prompt == "" {
-		return strings.TrimSpace(callStyleRules)
+// ORDER MATTERS TWICE OVER. The tenant's prompt comes first and the per-contact
+// greeting last, so everything two calls of one campaign have in common sits at
+// the front where the LLM's prefix cache can share it — the same reason §9 of
+// the contract asks the platform to put contact details last.
+//
+// And the greeting goes in the PROMPT rather than into chat history as an
+// assistant turn. History is a record of the conversation; the greeting was
+// spoken by a speech engine the model never saw. Stating it plainly in the
+// instructions is both more honest and easier for the model to act on — with it
+// there the model answers the caller instead of opening with a preamble of its
+// own.
+func withCallStyle(prompt, spokenGreeting string) string {
+	out := prompt
+	if out == "" {
+		out = strings.TrimSpace(callStyleRules)
+	} else {
+		out += "\n" + callStyleRules
 	}
-	return prompt + "\n" + callStyleRules
+	if spokenGreeting != "" {
+		out += "\n\n## What has already happened on this call\n" +
+			"You have ALREADY said this opening line, out loud, and the person has just " +
+			"replied to it:\n\n\"" + spokenGreeting + "\"\n\n" +
+			"The call is under way. Do not say any of it again, do not reintroduce " +
+			"yourself, and do not open with a fresh greeting. Answer what they just said " +
+			"and carry the conversation forward. If they only said \"hello\", acknowledge " +
+			"it in a few words and put your first real question to them."
+	}
+	return out
 }
 
 // firstChars returns up to n runes of s on a single line, for log lines that
@@ -807,6 +828,15 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// than as it is generated. See Session.SetAgentTurnObserver.
 	if sc.agentTurnObserver != nil {
 		session.SetAgentTurnObserver(sc.agentTurnObserver)
+		// Feed back how much audio actually reached the caller, so a turn cut
+		// short is reported as what they heard rather than what was generated.
+		if h, ok := serializer.(interface{ SetSpokenHook(func(time.Duration)) }); ok {
+			h.SetSpokenHook(session.RecordSpokenAudio)
+		}
+		// Characters per second for this voice and speed. Kokoro runs at about
+		// 14 at normal pace; speed scales it near enough for cutting a sentence
+		// at a word boundary.
+		session.SetSpeakingRate(14 * float64(sc.speed))
 	}
 	// Report per-turn LLM latency. The first turn of each call drives
 	// backpressure on its own — see pkg/rexa/metrics.go.
@@ -821,23 +851,9 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		registerTransferTool(session, sc.call, sc.callID)
 	}
 	session.InitChatMessage(map[string]any{
-		"role": "system", "content": withCallStyle(sc.systemPrompt),
+		"role": "system", "content": withCallStyle(sc.systemPrompt, sc.spokenGreeting),
 	})
-	// Tell the model what it already said.
-	//
-	// The greeting is synthesized straight to speech and never goes near the
-	// model, so as far as the model is concerned the conversation has not
-	// started — and its first reply greets the caller all over again. On both
-	// the phone and browser paths, the caller says hello and is greeted twice.
-	//
-	// Seeded as an assistant turn, which is exactly what it was. The transcript
-	// records it separately (SeedGreeting) and drops agent turns arriving
-	// before the caller speaks, so this does not double up there.
-	if sc.spokenGreeting != "" {
-		session.GetChatHistory().Append(map[string]any{
-			"role": "assistant", "content": sc.spokenGreeting,
-		})
-	}
+
 	// Log which prompt this session actually got. Answering "did my prompt
 	// apply?" previously meant reading code and guessing, because an override
 	// that was rejected looked identical to one that was never sent.
