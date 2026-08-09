@@ -22,6 +22,7 @@ import argparse
 import logging
 import queue
 import signal
+import time
 import sys
 import threading
 
@@ -30,6 +31,11 @@ from daily import CallClient, Daily
 from websocket import WebSocketApp
 
 log = logging.getLogger("room-agent")
+
+# How long to sit in an empty room before giving up. The link has to reach a
+# person and be clicked, so this is generous — but a sidecar per abandoned room
+# is how a box quietly fills with processes.
+JOIN_TIMEOUT = 120
 
 DAILY_RATE = 48000
 PIPELINE_IN_RATE = 16000
@@ -210,11 +216,24 @@ class RoomAgent:
         threading.Thread(target=self._pump_room_to_pipeline, daemon=True).start()
         threading.Thread(target=self._pump_pipeline_to_room, daemon=True).start()
 
+        # Two different waits, and conflating them was a bug: at startup the room
+        # is empty because the caller has not arrived YET, which looks identical
+        # to the room being empty because they have LEFT. Leaving on the first
+        # reading meant the sidecar quit a second after joining, every time.
+        deadline = time.monotonic() + JOIN_TIMEOUT
+        seen_caller = False
         while not self.stopping.wait(timeout=1.0):
-            # Leave when the caller does. Nobody else is coming, and a process
-            # per abandoned room is how a box runs out of memory overnight.
-            if self._room_empty():
+            others = self._other_participants()
+            if others > 0:
+                if not seen_caller:
+                    log.info("the caller joined")
+                seen_caller = True
+                continue
+            if seen_caller:
                 log.info("the caller left; shutting down")
+                break
+            if time.monotonic() > deadline:
+                log.info("nobody joined within %ds; shutting down", JOIN_TIMEOUT)
                 break
         self.shutdown()
         return 0
@@ -226,13 +245,15 @@ class RoomAgent:
         else:
             log.info("joined the room")
 
-    def _room_empty(self) -> bool:
+    def _other_participants(self) -> int:
+        """How many participants besides us are in the room."""
         try:
             counts = self.client.participant_counts()
         except Exception:  # noqa: BLE001
-            return False
-        # We are always present, so "one participant" means only us.
-        return counts.get("present", 0) <= 1
+            # Treat an unreadable count as "someone is there": guessing empty
+            # would end a live call over a transient API error.
+            return 1
+        return max(0, counts.get("present", 0) - 1)
 
     def shutdown(self):
         self.stopping.set()
