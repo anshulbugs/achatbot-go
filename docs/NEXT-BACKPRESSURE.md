@@ -1,7 +1,7 @@
-# Latency-driven backpressure — built, not yet calibrated
+# Latency-driven backpressure — built and calibrated
 
-Was a spec; now a status page. The mechanism is in and tested. The thresholds
-are still estimates, and that is the one thing left.
+Was a spec; now a status page. The mechanism is in, tested, and the thresholds
+come from a ramp rather than a guess.
 
 ## The requirement, stated by the operator
 
@@ -69,21 +69,44 @@ ASR and TTS need no new plumbing. Their limiting parameter is throughput
 exceeding it is queueing, which the existing transport timing already captures.
 They need calibrated thresholds, same as everything else here.
 
-## What is left: calibration
+## Calibration — done
 
-`first_turn_saturated_ms: 4000`, `first_turn_critical_ms: 8000` and the tier
-thresholds are derived from two measured points — 2471 ms good, 9903 ms bad —
-not from a ramp across the crossover. Too high and the gate fires after callers
-have already been dropped; too low and it turns away work the stack can serve.
+At 60 calls through two replicas behind the prefix-hashing balancer, 3k prompts:
 
-Ramp with the tool that reproduces the bad case on demand:
+| workload | turn-1 p95 | verdict |
+|---|---:|---|
+| one campaign, contact block last | 2286 ms | must not trip |
+| 12 independent campaigns | 3550 ms | must not trip |
+| 30 independent campaigns | 5400 ms | should trip |
+| 60 unique prompts, varying part first | 5906 ms | must trip |
 
-```
-python3 deploy/loadtest/turnbench.py <port> <calls> 8 12.4 3000 distinct
-```
+`saturated: 4500` sits in the gap, `critical: 7000` above every measured p95.
+Rerun `deploy/loadtest/calibrate.sh` whenever prompt size, model or replica
+count changes — every number is specific to all three.
 
-Raise `<calls>` until first-turn p95 crosses from acceptable to not, and set the
-thresholds from where that happens rather than from where they are now.
+Both workloads are ramped together on purpose. The bad case alone says where to
+trip; only the good case says the threshold will not fire on healthy traffic,
+and a gate that refuses work the stack can serve is worse than no gate, because
+it reads as a capacity problem and sends you optimising the wrong thing.
+
+## Related finding: the balancer was splitting the cache
+
+`least_conn` routes on connection count and cannot know two calls share a
+campaign prompt, so it split them across replicas and each prefilled the same
+prefix. The agent now tags requests with a prompt-prefix hash and nginx routes
+on it (`pkg/rexa/route.go`, `deploy/llm/nginx-llm-lb.conf`).
+
+Alternating rounds, so drift on the box cannot fake the result:
+
+| 60 calls | prefix hash | least_conn |
+|---|---:|---:|
+| 12 campaigns | 3731 / 3369 ms | 5036 / 4755 ms |
+| 30 campaigns | 5482 / 5374 ms | 5341 / 5209 ms |
+
+27% at 12 campaigns, a wash at 30 — the cache benefit thins once twice as many
+prefixes have to stay resident, while hashing's load imbalance (measured 35/25,
+not 30/30) does not. Hashing is the better default, but it is a trade, not a
+free win: one large campaign across two replicas would pin to one GPU.
 
 ## Related
 
