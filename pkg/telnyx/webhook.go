@@ -15,6 +15,10 @@ type WebhookEnvelope struct {
 			From          string `json:"from"`
 			To            string `json:"to"`
 			HangupCause   string `json:"hangup_cause"`
+			// SIPHangupCause is the carrier-side SIP response code. On a SIP URI
+			// dial it is the only thing that says whether the far end rejected
+			// us, was unreachable, or refused the codec.
+			SIPHangupCause string `json:"sip_hangup_cause"`
 			// Direction is "incoming" for calls dialed *to* one of our numbers.
 			Direction string `json:"direction"`
 			// Result carries the answering-machine-detection outcome on

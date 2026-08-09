@@ -410,7 +410,15 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := ev.Data.Payload.CallControlID
-	log.Printf("telnyx event: %s call=%s", ev.Data.EventType, id)
+	// The hangup cause is the first thing anyone asks for when a call dies
+	// early, and logging it here beats reconstructing it from the end-of-call
+	// report. The SIP code is the only useful signal on a SIP URI dial.
+	if cause := ev.Data.Payload.HangupCause; cause != "" {
+		log.Printf("telnyx event: %s call=%s cause=%s sip=%s", ev.Data.EventType, id,
+			cause, ev.Data.Payload.SIPHangupCause)
+	} else {
+		log.Printf("telnyx event: %s call=%s", ev.Data.EventType, id)
+	}
 
 	switch ev.Data.EventType {
 	case "call.initiated":
