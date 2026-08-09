@@ -7,6 +7,7 @@ import (
 	"achatbot/pkg/modules/functions"
 	"achatbot/pkg/types"
 	"context"
+	"net/http"
 	"os"
 
 	"github.com/openai/openai-go/v3"
@@ -35,12 +36,24 @@ const (
 	OpenRouterAIAPIProviderModelQwen2_5_72b_free = "qwen/qwen-2.5-72b-instruct:free"
 )
 
+// HTTPClient, when set, is used by every OpenAI-compatible client built here.
+//
+// The hook exists so the application can wrap the transport — routing headers,
+// timing — without this package knowing what any of that is for. Set it before
+// the provider pool is constructed: the client is captured at construction and
+// a later change has no effect on providers already built.
+var HTTPClient *http.Client
+
 func NewOpenAIAPIProvider(name, baseUrl, model string, toolNames []string) *OpenAIAPIProvider {
 	apiKey := os.Getenv("OPENAI_API_KEY")
-	client := openai.NewClient(
+	opts := []option.RequestOption{
 		option.WithAPIKey(apiKey),
 		option.WithBaseURL(baseUrl),
-	)
+	}
+	if HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(HTTPClient))
+	}
+	client := openai.NewClient(opts...)
 
 	tools := []openai.ChatCompletionToolUnionParam{}
 	if len(toolNames) > 0 {

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"achatbot/pkg/modules/llm"
 	"achatbot/pkg/modules/speech/asr"
 	"achatbot/pkg/modules/speech/tts"
 	"achatbot/pkg/rexa"
@@ -158,6 +159,13 @@ func initRexaTelemetry() {
 	// and the providers never learn that metrics exist.
 	asr.Transport = rexaMetrics.Tripper(rexa.TierASR, nil)
 	tts.Transport = rexaMetrics.Tripper(rexa.TierTTS, nil)
+
+	// Tag LLM requests so the load balancer can route by prompt prefix instead
+	// of connection count. Without it, calls sharing a campaign prompt are
+	// split across replicas and each replica prefills the same prefix again.
+	// Harmless when the balancer ignores the header. Must be set BEFORE the
+	// provider pool is built — the HTTP client is captured at construction.
+	llm.HTTPClient = &http.Client{Transport: rexa.PrefixRouter(nil)}
 }
 
 // platformDispatcher places calls on behalf of the platform.
