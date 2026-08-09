@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -82,30 +83,35 @@ type roomResp struct {
 //
 // eject_at_room_exp is set as well as exp — expiry alone stops new joins but
 // leaves anyone already inside connected, and billing with them.
-func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration) (*Room, error) {
+// record turns on cloud recording for the room. Only browser calls pass true:
+// a phone call is already recorded by the carrier, and its Daily room exists
+// solely so an operator can listen in, so recording that too would bill twice
+// for two copies of the same conversation.
+func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration, record bool) (*Room, error) {
 	if c == nil {
 		return nil, nil
 	}
 	exp := time.Now().Add(ttl).Unix()
-	body := map[string]any{
-		"privacy": "private",
-		"properties": map[string]any{
-			"exp":               exp,
-			"eject_at_room_exp": true,
-			// An operator dropping in on a live call wants to be listening
-			// immediately, not reading a device-setup screen while the moment
-			// they joined for passes.
-			"enable_prejoin_ui": false,
-			"start_video_off":   true,
-			"enable_chat":       false,
-			"sip": map[string]any{
-				"display_name":  "caller",
-				"sip_mode":      "dial-in",
-				"num_endpoints": 1,
-				"video":         false,
-			},
+	props := map[string]any{
+		"exp":               exp,
+		"eject_at_room_exp": true,
+		// An operator dropping in on a live call wants to be listening
+		// immediately, not reading a device-setup screen while the moment
+		// they joined for passes.
+		"enable_prejoin_ui": false,
+		"start_video_off":   true,
+		"enable_chat":       false,
+		"sip": map[string]any{
+			"display_name":  "caller",
+			"sip_mode":      "dial-in",
+			"num_endpoints": 1,
+			"video":         false,
 		},
 	}
+	if record {
+		props["enable_recording"] = "cloud"
+	}
+	body := map[string]any{"privacy": "private", "properties": props}
 	var out roomResp
 	if err := c.do(ctx, http.MethodPost, "/rooms", body, &out); err != nil {
 		return nil, err
@@ -119,7 +125,7 @@ func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration) (*Room, erro
 	// A token failure is not fatal for listening: an operator with the bare URL
 	// can still be let in manually, which beats failing a call over it. It IS
 	// fatal for a browser dispatch, so that caller checks Token itself.
-	if tok, err := c.meetingToken(ctx, out.Name, exp); err == nil && tok != "" {
+	if tok, err := c.meetingToken(ctx, out.Name, exp, record); err == nil && tok != "" {
 		room.Token = tok
 		room.JoinURL = out.URL + "?t=" + tok
 	}
@@ -127,17 +133,27 @@ func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration) (*Room, erro
 }
 
 // meetingToken mints an owner token scoped to one room and expiring with it.
-func (c *Client) meetingToken(ctx context.Context, room string, exp int64) (string, error) {
-	body := map[string]any{
-		"properties": map[string]any{
-			"room_name": room,
-			"exp":       exp,
-			// Owner so the operator can unmute and speak to the caller, which
-			// is the point of joining rather than reading a transcript.
-			"is_owner":  true,
-			"user_name": "operator",
-		},
+//
+// record puts start_cloud_recording on the token rather than starting the
+// recording over the API afterwards. Daily has no REST call that starts a cloud
+// recording in an empty room — recording is a participant action — and the
+// token is the one hook that fires the instant somebody joins. The sidecar
+// holds this token and joins before the browser does, so recording begins
+// ahead of the greeting rather than a second or two into it.
+func (c *Client) meetingToken(ctx context.Context, room string, exp int64, record bool) (string, error) {
+	props := map[string]any{
+		"room_name": room,
+		"exp":       exp,
+		// Owner so the operator can unmute and speak to the caller, which
+		// is the point of joining rather than reading a transcript.
+		"is_owner":  true,
+		"user_name": "operator",
 	}
+	if record {
+		props["enable_recording"] = "cloud"
+		props["start_cloud_recording"] = true
+	}
+	body := map[string]any{"properties": props}
 	var out struct {
 		Token string `json:"token"`
 	}
@@ -237,4 +253,68 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// Recording is one cloud recording of a room.
+//
+// Only the fields the platform's recording event needs. StartTS is unix
+// seconds and Duration is whole seconds — Daily reports both that way, and
+// converting them here keeps the arithmetic in one place rather than at each
+// call site.
+type Recording struct {
+	ID         string `json:"id"`
+	RoomName   string `json:"room_name"`
+	StartTS    int64  `json:"start_ts"`
+	Status     string `json:"status"`
+	Duration   int    `json:"duration"`
+	S3Key      string `json:"s3key"`
+	ShareToken string `json:"share_token"`
+}
+
+// Finished reports whether the recording has been written out and is safe to
+// hand to the platform. Daily reports "in-progress" while the call is live and
+// "finished" once the file is complete; anything else (notably "canceled") is
+// not something to send a URL for.
+func (r *Recording) Finished() bool { return r != nil && r.Status == "finished" }
+
+// LatestRecording returns the most recent recording for a room, or nil when the
+// room has none.
+//
+// Nil-and-no-error for "none yet" rather than an error: a room with no
+// recording is the normal state for the first seconds after a call ends, and
+// for every call where recording was never enabled. The caller polls.
+func (c *Client) LatestRecording(ctx context.Context, room string) (*Recording, error) {
+	if c == nil || room == "" {
+		return nil, nil
+	}
+	var out struct {
+		Data []Recording `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/recordings?limit=1&room_name="+url.QueryEscape(room), nil, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Data) == 0 {
+		return nil, nil
+	}
+	rec := out.Data[0]
+	return &rec, nil
+}
+
+// AccessLink returns a time-limited download URL for a recording.
+//
+// ttl is clamped by Daily itself; passing a long one is not a way to get a
+// permanent link, and it should not be treated as one. The platform is expected
+// to fetch and re-host if it wants the recording to outlive the link.
+func (c *Client) AccessLink(ctx context.Context, id string, ttl time.Duration) (string, error) {
+	if c == nil || id == "" {
+		return "", nil
+	}
+	var out struct {
+		DownloadLink string `json:"download_link"`
+	}
+	path := fmt.Sprintf("/recordings/%s/access-link?valid_for_secs=%d", url.PathEscape(id), int(ttl.Seconds()))
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return "", err
+	}
+	return out.DownloadLink, nil
 }

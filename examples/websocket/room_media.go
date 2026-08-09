@@ -350,4 +350,88 @@ func reportSessionFailedOrEnded(rc *rexaCall) {
 			log.Printf("rexa: browser end-of-call report FAILED for session=%s: %v", rc.sessionID, err)
 		}
 	}()
+	// Read the room name HERE, on this goroutine. endLiveRoom runs a couple of
+	// lines after this call returns and clears it, so a goroutine that read it
+	// later would find an empty string and silently skip the recording.
+	go reportRoomRecording(rc, rc.roomName)
+}
+
+// reportRoomRecording waits for Daily to finish writing this call's recording
+// and then sends the platform the same recording_saved event the phone path
+// sends.
+//
+// Polled, not pushed. Daily can push a recording.ready-to-download webhook, but
+// registering one needs a stable public callback URL and ours is a cloudflared
+// tunnel whose hostname changes on every restart — a webhook registered on
+// Monday points at nothing on Tuesday. Polling a handful of times per call is
+// the cheaper correctness.
+//
+// Deliberately after the end-of-call report and never blocking it, for the
+// reason the contract gives for the carrier's own recording event: the file is
+// finalised tens of seconds after the call ends, and holding the disposition
+// back for it would delay every decision the platform makes.
+func reportRoomRecording(rc *rexaCall, room string) {
+	if rc == nil || room == "" || dailyClient == nil || rexaPoster == nil {
+		return
+	}
+	// Long enough for a finished recording to appear, short enough that a call
+	// that was never recorded stops costing anything within a couple of
+	// minutes.
+	const (
+		attempts = 20
+		interval = 6 * time.Second
+		linkTTL  = 24 * time.Hour
+	)
+	ctx := context.Background()
+	for i := 0; i < attempts; i++ {
+		time.Sleep(interval)
+		rec, err := dailyClient.LatestRecording(ctx, room)
+		if err != nil {
+			log.Printf("rexa: recording lookup failed for session=%s room=%s: %v", rc.sessionID, room, err)
+			continue
+		}
+		if !rec.Finished() {
+			continue
+		}
+		link, err := dailyClient.AccessLink(ctx, rec.ID, linkTTL)
+		if err != nil {
+			log.Printf("rexa: recording access link failed for session=%s recording=%s: %v", rc.sessionID, rec.ID, err)
+		}
+		started := time.Unix(rec.StartTS, 0).UTC()
+		payload := map[string]any{
+			// Empty rather than absent. A browser call has no carrier and so no
+			// call control id, but the platform's schema rejected a
+			// recording_saved once already for a field it expected and did not
+			// find, and an empty string is the honest way to say "there is no
+			// such id here" without inventing one.
+			"call_control_id": "",
+			"recording_id":    rec.ID,
+			"status":          "completed",
+			// One mixed track, not the carrier's dual-channel split: Daily
+			// records the room, not the two legs of a phone call.
+			"channels":             "single",
+			"recording_started_at": rexa.ISOTime(started),
+			"recording_ended_at":   rexa.ISOTime(started.Add(time.Duration(rec.Duration) * time.Second)),
+			// m4a, checked rather than assumed — the domain records audio-only
+			// and the signed link serves an ISO/MP4 audio file. Naming the key
+			// "mp3" because the phone path happens to use it would hand the
+			// platform a file its player would refuse.
+			"recording_urls":        map[string]any{"m4a": link},
+			"public_recording_urls": map[string]any{},
+			// The signed link expires. These do not, so a platform that wants
+			// the recording to outlive the link can fetch it itself.
+			"s3_key":    rec.S3Key,
+			"room_name": rec.RoomName,
+			"source":    "daily",
+		}
+		evt := rexa.NewRecordingSaved(payload, rc.sessionID, rc.tenantID)
+		log.Printf("rexa: browser recording saved session=%s recording=%s (%ds, %s)",
+			rc.sessionID, rec.ID, rec.Duration, rec.S3Key)
+		if err := rexaPoster.PostRecordingSaved(ctx, rc.webhookURL, evt); err != nil {
+			log.Printf("rexa: browser recording report FAILED for session=%s: %v", rc.sessionID, err)
+		}
+		return
+	}
+	log.Printf("rexa: no finished recording for session=%s room=%s after %s -- giving up",
+		rc.sessionID, room, time.Duration(attempts)*interval)
 }

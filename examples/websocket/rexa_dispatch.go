@@ -388,7 +388,9 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 			"browser rooms need the Daily sidecar installed (deploy/sidecar)")
 	}
 
-	room, err := dailyClient.CreateRoom(ctx, webrtcRoomTTL)
+	// Recorded: a browser call has no carrier, so nothing else records it. This
+	// is the only copy that will ever exist of these conversations.
+	room, err := dailyClient.CreateRoom(ctx, webrtcRoomTTL, true)
 	if err != nil || room == nil {
 		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
 			"could not create a room: %v", err)

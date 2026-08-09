@@ -144,7 +144,10 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 	if dailyClient == nil || rc == nil || !redisConfigured {
 		return ""
 	}
-	room, err := dailyClient.CreateRoom(ctx, roomTTL)
+	// No recording: this room exists so an operator can listen to a PHONE call,
+	// and Telnyx is already recording that call end to end. A second copy would
+	// bill twice and give the platform two recordings of one conversation.
+	room, err := dailyClient.CreateRoom(ctx, roomTTL, false)
 	if err != nil || room == nil {
 		// Never fail the call over the listening feature. The call is the
 		// product; this is a window onto it.
