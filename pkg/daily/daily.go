@@ -53,6 +53,12 @@ type Room struct {
 	URL string
 	// JoinURL carries a meeting token, so it grants access by itself.
 	JoinURL string
+	// Token is the meeting token on its own. The platform's WebRTC response
+	// takes room_url and token as separate fields and hands them to a browser
+	// SDK, which wants them apart rather than glued into a URL.
+	Token string
+	// TokenTTL is how long both remain valid.
+	TokenTTL time.Duration
 	// SIPURI is the address a carrier dials to put a phone leg into the room.
 	SIPURI string
 }
@@ -105,11 +111,16 @@ func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration) (*Room, erro
 		return nil, err
 	}
 
-	room := &Room{Name: out.Name, URL: out.URL, JoinURL: out.URL, SIPURI: out.Config.SIPURI.Endpoint}
+	room := &Room{
+		Name: out.Name, URL: out.URL, JoinURL: out.URL,
+		SIPURI: out.Config.SIPURI.Endpoint, TokenTTL: ttl,
+	}
 
-	// A token failure is not fatal: an operator with the bare URL can still be
-	// let in manually, which beats failing the call over a listening feature.
+	// A token failure is not fatal for listening: an operator with the bare URL
+	// can still be let in manually, which beats failing a call over it. It IS
+	// fatal for a browser dispatch, so that caller checks Token itself.
 	if tok, err := c.meetingToken(ctx, out.Name, exp); err == nil && tok != "" {
+		room.Token = tok
 		room.JoinURL = out.URL + "?t=" + tok
 	}
 	return room, nil

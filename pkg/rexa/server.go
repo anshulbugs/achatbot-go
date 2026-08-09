@@ -205,8 +205,17 @@ func (s *Server) handleWebrtc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, Errorf(ErrCodeInvalidRequest, "missing required field: %s", missing))
 		return
 	}
+	// A browser room runs the same pipeline as a phone call and costs the same
+	// GPU, so it goes through the same admission gate. Skipping it would let
+	// browser traffic quietly push the fleet past a ceiling measured on calls.
+	if !s.admit(w, req.SessionID) {
+		return
+	}
 	resp, err := s.dispatcher.DispatchWebrtc(r.Context(), req)
 	if err != nil {
+		// The slot was reserved a moment ago and no room exists, so give it
+		// back rather than waiting for the reaper to notice in 75 seconds.
+		s.metrics.Release(req.SessionID)
 		log.Printf("rexa: /connection_webrtc session=%s failed: %v", req.SessionID, err)
 		writeErr(w, err)
 		return

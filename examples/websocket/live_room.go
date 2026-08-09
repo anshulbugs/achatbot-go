@@ -29,6 +29,10 @@ var dailyClient *daily.Client
 // billing the same hour. Rooms are also deleted explicitly when the call ends.
 const roomTTL = 2 * time.Hour
 
+// webrtcRoomTTL bounds a browser room. Same reasoning as roomTTL, and the same
+// value: the ceiling on a room's life should not depend on who is calling.
+const webrtcRoomTTL = 2 * time.Hour
+
 func initDaily(apiKey string) {
 	dailyClient = daily.New(apiKey)
 	if dailyClient != nil {

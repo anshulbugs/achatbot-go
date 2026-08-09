@@ -363,15 +363,102 @@ func (d *platformDispatcher) DispatchIncoming(ctx context.Context, req rexa.Inco
 	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: req.CCID}, nil
 }
 
-// DispatchWebrtc is not implemented yet.
+// DispatchWebrtc provisions a Daily room and puts the agent in it.
 //
-// The chosen design is a Daily room joined over SIP, with Telnyx bridging the
-// leg into the existing media path. Until that lands this fails loudly rather
-// than returning a room that nobody is in — a browser joining an empty room
-// hears silence and looks exactly like a broken agent.
-func (d *platformDispatcher) DispatchWebrtc(context.Context, rexa.WebrtcDispatchRequest) (rexa.WebrtcDispatchResponse, error) {
-	return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
-		"WebRTC rooms are not yet available on this agent")
+// The browser is the caller here, which is the only thing that differs from a
+// phone call. The agent still needs a seat in the room, and Daily has no Go
+// SDK — so Telnyx takes the seat on our behalf: we dial the room's SIP endpoint
+// and that leg's audio forks into the same media bridge every phone call uses.
+// From the pipeline's point of view this is an ordinary call whose far end
+// happens to be a browser.
+//
+//	browser ──► Daily room ◄── SIP leg ──► Telnyx ──► our media bridge ──► pipeline
+//
+// Costs a carrier leg and Daily minutes for the whole conversation, with no
+// natural gate the way live listening has one. It runs only when the platform
+// asks for a browser room.
+func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.WebrtcDispatchRequest) (rexa.WebrtcDispatchResponse, error) {
+	if dailyClient == nil {
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
+			"browser rooms need DAILY_API_KEY configured on the agent")
+	}
+	// No telecom_credentials on this payload — a browser room has no PSTN leg,
+	// so the SIP leg runs on OUR carrier account rather than a tenant's.
+	client := telnyxClient
+	if client == nil || d.publicURL == "" {
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
+			"browser rooms need a carrier account and a public URL on the agent")
+	}
+
+	room, err := dailyClient.CreateRoom(ctx, webrtcRoomTTL)
+	if err != nil || room == nil {
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
+			"could not create a room: %v", err)
+	}
+	// The platform hands the token to a browser SDK, so a room without one is
+	// a room the caller cannot enter. Fail here rather than returning a link
+	// that 403s — an empty room is indistinguishable from a broken agent.
+	if room.Token == "" || room.SIPURI == "" {
+		_ = dailyClient.DeleteRoom(ctx, room.Name)
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
+			"room %s came back without a token or SIP endpoint", room.Name)
+	}
+
+	voiceID, matched := rexaVoices.Resolve(req.Voice)
+	if !matched {
+		log.Printf("rexa: session=%s voice %q unmapped, using speaker %d",
+			req.SessionID, req.Voice, voiceID)
+	}
+
+	p := &callParams{
+		Hello:        req.HelloMessage,
+		SystemPrompt: req.SystemPrompt,
+		VoiceID:      voiceID,
+		Speed:        cfg.TTS.Speed,
+		Volume:       cfg.TTS.Gain,
+		LLMModel:     cfg.LLM.Model,
+		// A browser never rings, goes to voicemail or plays a beep. The channels
+		// exist because the shared media handler selects on them; nothing ever
+		// sends.
+		amdCh:  make(chan string, 2),
+		beepCh: make(chan string, 2),
+		platform: &rexaCall{
+			sessionID:  req.SessionID,
+			tenantID:   req.TenantID,
+			webhookURL: req.WebhookURL,
+			direction:  "webrtc",
+			client:     client,
+			transcript: rexa.NewTranscript(time.Now()),
+			roomName:   room.Name,
+			joinURL:    room.JoinURL,
+		},
+	}
+	prerenderAnnouncements(p)
+
+	// Our own webhook, so call.answered starts the media fork exactly as it
+	// does for a phone call. Without it the leg connects and stays silent.
+	webhookURL := d.publicURL + "/telnyx/webhook"
+	ccid, err := client.DialSIP(ctx, room.SIPURI, webhookURL, "")
+	if err != nil {
+		_ = dailyClient.DeleteRoom(ctx, room.Name)
+		log.Printf("rexa: session=%s SIP dial into room failed: %v", req.SessionID, err)
+		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
+			"could not join the room: %v", err)
+	}
+
+	if rexaMetrics != nil {
+		rexaMetrics.Rekey(req.SessionID, ccid)
+	}
+	calls.put(ccid, p)
+	log.Printf("rexa: session=%s browser room %s ready, agent joining as call=%s",
+		req.SessionID, room.Name, ccid)
+
+	return rexa.WebrtcDispatchResponse{
+		RoomURL:         room.URL,
+		Token:           room.Token,
+		AgentSessionID:  ccid,
+		TokenTTLSeconds: int(room.TokenTTL.Seconds()),
+	}, nil
 }
 
 // reportDispatchFailure tells the platform a call never got off the ground.
