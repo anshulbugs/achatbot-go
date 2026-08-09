@@ -29,6 +29,8 @@ SECRETS="${SECRETS:-./rexa-secrets.env}"
 TELNYX_ENV="${TELNYX_ENV:-./telnyx.env}"
 BIN="${BIN:-./rexa-server}"
 CF="${CLOUDFLARED:-./cloudflared}"
+# Fall back to a system install, then to the one deps-install.sh puts in $HOME.
+[ -x "$CF" ] || CF="$(command -v cloudflared 2>/dev/null || echo "$HOME/cloudflared")"
 POOL="${POOL:-4}"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }

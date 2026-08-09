@@ -23,8 +23,12 @@
 # barely moves — the median stays fine while the tail falls apart, which a
 # caller experiences as "it broke". Treat 61 as the ceiling, not a target.
 #
-# Env overrides: GPUS ("0 1 2 3"), HF_CACHE, SKIP_TUNNEL=1, SKIP_SERVER=1,
-# REBUILD=1 (force image + binary rebuild).
+# Also brings up, on CPU rather than a GPU:
+#
+#   sentiment classifier  :11435  (llama3.2:3b via ollama, ~8 cores at 60 calls)
+#
+# Env overrides: GPUS ("0 1 2 3"), HF_CACHE, SKIP_DEPS=1, SKIP_TUNNEL=1,
+# SKIP_SERVER=1, SKIP_SENTIMENT=1, REBUILD=1 (force image + binary rebuild).
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
@@ -52,6 +56,11 @@ wait_ready() {
 }
 
 log "Preflight"
+# Installs Go and cloudflared into $HOME if absent, and reports anything needing
+# root with the command to fix it. SKIP_DEPS=1 on a box you know is ready.
+if [ "${SKIP_DEPS:-0}" != "1" ]; then
+  bash deploy/scripts/deps-install.sh || die "dependencies missing (see above)"
+fi
 command -v docker >/dev/null || die "docker not installed"
 docker info 2>/dev/null | grep -qi nvidia || die "nvidia container runtime not available"
 have=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
@@ -101,9 +110,25 @@ if [ ! -f config.yaml ]; then
   sed -i 's#^  base_url: .*#  base_url: "http://127.0.0.1:8011/v1"#' config.yaml
   sed -i 's#^  model: "RedHatAI.*#  model: "google/gemma-4-E4B-it"#' config.yaml
   sed -i 's#^  pool_size: 64#  pool_size: 240#g' config.yaml
-  echo "    wrote config.yaml (LB endpoint, pool_size 240)"
+  # Point the agent at the CPU classifier the step above starts.
+  sed -i 's#^  sentiment_base_url: .*#  sentiment_base_url: "http://127.0.0.1:11435/v1"#' config.yaml
+  sed -i 's#^  sentiment_model: .*#  sentiment_model: "sentiment-cpu"#' config.yaml
+  echo "    wrote config.yaml (LB endpoint, pool_size 240, sentiment on CPU)"
 else
   echo "    config.yaml exists — left untouched"
+fi
+
+if [ "${SKIP_SENTIMENT:-0}" != "1" ]; then
+  log "Sentiment classifier (CPU) -> :11435"
+  # Deliberately not on a GPU: the conversation model's first-turn latency is
+  # what decides fleet capacity, and this runs off the caller's critical path
+  # where latency is nearly free. Non-fatal -- a box without ollama still serves
+  # calls, it just cannot classify sentiment.
+  if bash deploy/scripts/sentiment-start.sh >/dev/null 2>&1; then
+    echo "    sentiment-cpu ready on :11435"
+  else
+    echo "    SKIPPED - ollama not available (see deploy/scripts/sentiment-start.sh)"
+  fi
 fi
 
 if [ "${SKIP_TUNNEL:-0}" != "1" ]; then
@@ -126,3 +151,16 @@ printf '  %-14s %s\n' UI  "http://127.0.0.1:4321"
 echo
 echo "Load test:  python3 deploy/loadtest/ttsbench.py 30 90   (and asrbench.py)"
 echo "Teardown:   docker rm -f sglang sglang2 parakeet kokoro-tts llm-lb"
+
+# The contract instance needs secrets shared with the platform, so it can only
+# start itself on a box that already has them. Printing the command is the
+# right behaviour on a fresh cluster; running it is right on a configured one.
+if [ -f rexa-secrets.env ]; then
+  log "Platform-contract instance -> :4399"
+  bash deploy/scripts/contract-start.sh
+else
+  echo
+  echo "Platform-contract instance (:4399, HMAC endpoints, live rooms, WebRTC):"
+  echo "  1. cp deploy/rexa-secrets.env.example rexa-secrets.env  # then fill it in"
+  echo "  2. bash deploy/scripts/contract-start.sh"
+fi

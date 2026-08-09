@@ -12,6 +12,8 @@
 set -euo pipefail
 PORT="${SERVER_PORT:-4321}"
 CF="${CLOUDFLARED:-cloudflared}"
+# deps-install.sh drops it in $HOME when the system has none.
+command -v "$CF" >/dev/null 2>&1 || { [ -x "$HOME/cloudflared" ] && CF="$HOME/cloudflared"; }
 
 pkill -f "cloudflared tunnel" 2>/dev/null || true
 sleep 1
