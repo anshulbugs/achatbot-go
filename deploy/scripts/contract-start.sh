@@ -58,6 +58,22 @@ printf '
 ===== agent starting %s =====
 ' "$(date -Is)" >> "rexa-${PORT}.log"
 
+# Refuse to restart into a live call.
+#
+# Restarting kills every call in flight instantly: the media session ends, the
+# sidecar loses its socket, and whoever is on the phone hears silence with no
+# explanation. That happened to a real test call during a redeploy, and the
+# symptom looked exactly like an audio bug — which cost more time than the
+# deploy saved.
+#
+# FORCE=1 to override when the calls in flight are your own.
+if [ "${FORCE:-0}" != "1" ]; then
+  live=$(curl -sf -m 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null     | python3 -c 'import json,sys; print(json.load(sys.stdin)["calls"]["total"])' 2>/dev/null || echo 0)
+  if [ "${live:-0}" -gt 0 ]; then
+    die "$live call(s) in flight — restarting would cut them off. Wait, or FORCE=1 to override."
+  fi
+fi
+
 log "Stopping the previous instance"
 # Match the executable name exactly. `pkill -f rexa-server` would also match
 # this script's own command line and the ssh command that launched it.
