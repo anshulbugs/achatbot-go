@@ -702,7 +702,11 @@ func amdModeFor(p *callParams) string {
 // are cached by text/voice/speed, so unique-per-callee wording is supported at
 // the cost of one render each, while shared wording renders once per campaign.
 func prerenderAnnouncements(p *callParams) {
-	if amdModeFor(p) == "disabled" {
+	// AMD off means no voicemail path, so on a PHONE call there is nothing to
+	// pre-render — the greeting is spoken by the pipeline as its first turn.
+	// A browser call has no AMD at all and still wants its greeting ready
+	// before the caller arrives, which is what the second condition covers.
+	if amdModeFor(p) == "disabled" && p.platform == nil {
 		return
 	}
 	for _, text := range []string{p.Hello, p.VoicemailMessage} {

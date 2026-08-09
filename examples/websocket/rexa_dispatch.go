@@ -433,6 +433,11 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 			sentimentWebhook: "",
 		},
 	}
+	// Synthesize the greeting NOW, while the room is being created and the
+	// sidecar is joining. Without this the first thing the caller hears is a
+	// TTS render starting after they arrive — audible as a pause before the
+	// agent speaks, on a path where nothing else is slow.
+	prerenderAnnouncements(p)
 
 	// Register under the session id: the sidecar identifies itself that way
 	// when it connects to /room/media, and unlike a phone call there is no
