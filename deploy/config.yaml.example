@@ -147,7 +147,7 @@ tts:
   model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
   http_url: "http://127.0.0.1:8880"
   speaker_id: 3              # 3 = Heart (US female). See UI voice list for ids.
-  speed: 1.2                 # 1.0 = normal
+  speed: 1.28                 # 1.0 = normal
   gain: 1.4                  # output loudness multiplier (per-call overridable)
   pool_size: 64
   num_threads: 12            # only used by the CPU sherpa model
