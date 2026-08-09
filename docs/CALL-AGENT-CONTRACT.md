@@ -452,7 +452,92 @@ calls to ring at once, and whatever fraction answers becomes pipelines.
 
 ---
 
-## 9. Integration checklist
+## 9. Dispatch guidance — two asks that are worth more than anything else
+
+Both of these are cheap on the platform side and were measured on this stack.
+Together they are worth more than every other optimisation available to either
+team, and neither changes a word of any tenant's prompt.
+
+The mechanism behind both: SGLang caches KV blocks by PREFIX (RadixAttention).
+Two calls share work only up to the first byte where their prompts differ.
+Everything after that point is re-computed per call, however identical it is.
+
+### 9.1 Put the per-contact part LAST
+
+A campaign's prompt is mostly identical across its calls — position details,
+guardrails, the conversation steps. Only the contact's own details differ. But
+if the contact block sits partway through, everything after it stops being
+shareable, including the conversation steps, which measured **53% of the whole
+prompt**.
+
+Measured, 60 concurrent calls in one campaign, 3k-token prompt, 8 turns each,
+paced at 12.4s — the ONLY difference is where the contact block sits:
+
+| contact block | TTFT p95 | **first turn p95** | turn 8 p95 |
+|---|---|---|---|
+| partway through (current) | 5356ms | **7368ms** | 1542ms |
+| at the very end | 2416ms | **2471ms** | 585ms |
+
+**Three times faster to first word**, same content, same token count.
+
+First-turn latency is the one that matters: it is the pause after the callee
+says "hello", and 7 seconds of silence is where people conclude the line is
+dead and hang up.
+
+**The ask:** when rendering a dispatch, order the prompt as
+`[campaign-invariant content][per-contact content]`. The platform already
+knows which fields it substituted per contact, so this split is exact rather
+than inferred.
+
+Doing it at dispatch — rather than in the tenant-facing template — means API
+users can keep sending prompts in whatever shape they like, and existing call
+agents are unaffected.
+
+### 9.2 Dispatch several calls per campaign, not one per campaign
+
+Round-robin across campaigns for fair allocation is the worst case for prefix
+sharing: every concurrent call carries a different prompt, so nothing is
+shared and `--schedule-policy lpm` has nothing to match on.
+
+Measured, 60 concurrent calls, 3k prompts, 8 turns, 12.4s pacing:
+
+| | TTFT p95 | first turn p95 |
+|---|---|---|
+| all from one campaign | 1725ms | 1853ms |
+| every call a different campaign | **6252ms** | **9903ms** |
+
+Nearly **10 seconds to first word** in the interleaved case.
+
+**The ask:** batch by campaign. If 50 campaigns are running and there is room
+for 50 calls, send **5 calls each from 10 campaigns** rather than 1 call from
+each of 50. Rotate which campaigns get a block on the next pass.
+
+Every campaign still progresses continuously — the allocation guarantee is
+preserved — but the fleet holds a handful of distinct prefixes instead of
+fifty. Larger blocks are better; even 5 recovers most of it.
+
+### 9.3 Keep prompts near 3k tokens
+
+Also measured, and the reason the two asks above are framed at 3k:
+
+| prompt size | first-token latency, 30 concurrent |
+|---|---|
+| 3k tokens | ~250ms |
+| 5k tokens | ~250ms |
+| 20k tokens | **8762ms** even with a perfectly shared prefix |
+
+Under about 5k is comfortable. Past that it degrades sharply, and at 20k it is
+unusable regardless of how well the prefix is shared. If a tenant prompt
+arrives much larger than this, it is worth truncating or rejecting at the
+platform edge rather than letting it reach a live call.
+
+Note the agent's ceiling (`max_gpu_calls`) is measured at ~3k. A materially
+larger prompt invalidates it, and the agent would keep accepting calls it can
+no longer serve well.
+
+---
+
+## 10. Integration checklist
 
 1. Reproduce the §1 test vector. Nothing else works until it passes.
 2. Point dispatch at the agent's base URL. Verify `GET /health` returns 200 with
@@ -467,6 +552,8 @@ calls to ring at once, and whatever fraction answers becomes pipelines.
 7. If using transfer: dispatch with `transfer_number` set, ask the agent for a
    human, and confirm `transfer_initiated` arrives and the leg connects. Note
    the event fires on *attempt*, not success.
+8. Apply §9.1 and §9.2 before any volume test — first-turn latency measured
+   3x worse without them, and they cost the agent side nothing.
 
 Watch `/dashboard` during the first campaign and record `measured.answer_rate`
 and `measured.ring_ms_p95` — those are the numbers that decide whether
