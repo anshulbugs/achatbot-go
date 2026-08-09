@@ -636,14 +636,18 @@ func systemPromptFor(lang string) string {
 
 // sessionConfig fully describes one voice session, independent of transport.
 type sessionConfig struct {
-	clientID           string
-	systemPrompt       string
-	voiceID            int
-	speed              float32
-	volume             float32
-	llmModel           string
-	addWavHeader       bool            // true for the browser; false for raw telephony audio
-	hello              string          // optional greeting synthesized and played on connect
+	clientID     string
+	systemPrompt string
+	voiceID      int
+	speed        float32
+	volume       float32
+	llmModel     string
+	addWavHeader bool   // true for the browser; false for raw telephony audio
+	hello        string // optional greeting synthesized and played on connect
+	// spokenGreeting is the greeting the caller has ALREADY heard, played
+	// before the pipeline started. Distinct from hello, which asks this
+	// function to play one.
+	spokenGreeting     string
 	allowInterruptions bool            // browser: barge-in; telephony: false (half-duplex, echo-safe)
 	idlePrompt         string          // spoken after idleSecs of silence ("" disables)
 	idleSecs           float64         // silence threshold before idlePrompt fires
@@ -811,6 +815,21 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	session.InitChatMessage(map[string]any{
 		"role": "system", "content": withCallStyle(sc.systemPrompt),
 	})
+	// Tell the model what it already said.
+	//
+	// The greeting is synthesized straight to speech and never goes near the
+	// model, so as far as the model is concerned the conversation has not
+	// started — and its first reply greets the caller all over again. On both
+	// the phone and browser paths, the caller says hello and is greeted twice.
+	//
+	// Seeded as an assistant turn, which is exactly what it was. The transcript
+	// records it separately (SeedGreeting) and drops agent turns arriving
+	// before the caller speaks, so this does not double up there.
+	if sc.spokenGreeting != "" {
+		session.GetChatHistory().Append(map[string]any{
+			"role": "assistant", "content": sc.spokenGreeting,
+		})
+	}
 	// Log which prompt this session actually got. Answering "did my prompt
 	// apply?" previously meant reading code and guessing, because an override
 	// that was rejected looked identical to one that was never sent.

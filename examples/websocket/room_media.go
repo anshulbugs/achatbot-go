@@ -59,6 +59,27 @@ type roomSerializer struct {
 	// only place that knows what has been queued but not yet spoken.
 	lastInterrupt time.Time
 	awaitingReply bool
+
+	// greetingUntil is when the pre-rendered greeting finishes playing.
+	//
+	// The greeting is handed to the sidecar as one blob and lives in its
+	// playback buffer — and an interrupt message CLEARS that buffer. The
+	// pipeline emits interruption frames freely in the first seconds of a
+	// session, so the greeting was being cut off wherever it had reached: the
+	// caller heard the opening and then silence, at a consistent point.
+	//
+	// Interrupts are suppressed until it has played. The caller cannot
+	// meaningfully barge in on a greeting they have not heard yet, and if they
+	// talk over it the turn that follows still picks them up.
+	greetingUntil time.Time
+}
+
+// HoldInterrupts suppresses interrupt messages for d, while the pre-rendered
+// greeting plays.
+func (s *roomSerializer) HoldInterrupts(d time.Duration) {
+	s.mu.Lock()
+	s.greetingUntil = time.Now().Add(d)
+	s.mu.Unlock()
 }
 
 // SupportsInterruption reports that barge-in is encoded on the wire, so the
@@ -101,9 +122,15 @@ func (s *roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
 		return f.Audio, nil
 	case *frames.StartInterruptionFrame:
 		s.mu.Lock()
+		holding := time.Now().Before(s.greetingUntil)
 		s.lastInterrupt = time.Now()
 		s.awaitingReply = true
 		s.mu.Unlock()
+		if holding {
+			// Forwarding this would flush the greeting out of the sidecar's
+			// buffer mid-sentence.
+			return nil, nil
+		}
 		return []byte("interrupt"), nil
 	default:
 		return nil, nil
@@ -190,14 +217,21 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 	// Play the greeting from the announcement cache, which was filled while the
 	// room was being created and the sidecar was joining. A cache hit is a map
 	// lookup, so the caller hears the first word as soon as they are in.
+	ser := &roomSerializer{}
 	if p.Hello != "" {
 		if pcm := announcements.get(p.Hello, p.VoiceID, p.Speed); len(pcm) > 0 {
 			rate, _, _ := ttsSampleInfo()
+			// Suppress interrupts for as long as the greeting plays, plus a
+			// little: the sidecar holds it until the caller is in the room, so
+			// playback starts later than this send does.
+			dur := time.Duration(len(pcm)/2) * time.Second / time.Duration(rate)
+			ser.HoldInterrupts(dur + 3*time.Second)
+			log.Printf("room: greeting %d bytes (%.1fs) queued for session=%s",
+				len(pcm), dur.Seconds(), sessionID)
 			go func() {
 				// Straight down the wire: the sidecar paces playback on its own
 				// fixed clock, so there is nothing to pace here.
 				_ = conn.WriteMessage(websocket.BinaryMessage, pcm)
-				_ = rate
 			}()
 		}
 	}
@@ -219,16 +253,18 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 		chatObserver = chainObservers(chatObserver, obs)
 	}
 
-	runVoiceSession(&roomConn{Conn: conn}, &roomSerializer{}, sessionConfig{
-		clientID:     "room_" + sessionID,
-		callID:       sessionID,
-		call:         p,
-		chatObserver: chatObserver,
-		systemPrompt: p.SystemPrompt,
-		voiceID:      p.VoiceID,
-		speed:        p.Speed,
-		volume:       p.Volume,
-		llmModel:     p.LLMModel,
+	runVoiceSession(&roomConn{Conn: conn}, ser, sessionConfig{
+		clientID: "room_" + sessionID,
+		// Played out of band above; without this the model greets again.
+		spokenGreeting: p.Hello,
+		callID:         sessionID,
+		call:           p,
+		chatObserver:   chatObserver,
+		systemPrompt:   p.SystemPrompt,
+		voiceID:        p.VoiceID,
+		speed:          p.Speed,
+		volume:         p.Volume,
+		llmModel:       p.LLMModel,
 		// Empty on purpose — the greeting is played below from the copy already
 		// rendered at dispatch. Left set, runVoiceSession re-synthesizes it at
 		// session start, and the caller waits through a TTS render of the whole

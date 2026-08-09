@@ -1061,7 +1061,10 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runVoiceSession(conn, ser, sessionConfig{
-		clientID:           "telnyx_" + id,
+		clientID: "telnyx_" + id,
+		// The greeting was played from the announcement cache above, so the
+		// model must be told it happened or it greets the caller a second time.
+		spokenGreeting:     p.Hello,
 		callID:             id,
 		call:               p,
 		chatObserver:       chatObserver,

@@ -292,6 +292,17 @@ class RoomAgent:
         nothing to say. The mic then sees one continuous stream and never
         underruns, and speech is simply what fills the buffer between silences.
         """
+        # Nothing is written until someone is there to hear it. The websocket
+        # connects, and the greeting arrives, BEFORE this process has finished
+        # joining the room — about a second and a half on a real call — and a
+        # writer running through that window eats the start of the greeting,
+        # because it consumes its buffer on every tick regardless. Buffered
+        # audio simply waits here and plays from the first tick after the
+        # caller arrives.
+        while not self.caller_present.wait(timeout=0.2):
+            if self.stopping.is_set():
+                return
+
         silence = b"\x00" * FRAME_BYTES
         period = FRAME_MS / 1000.0
         next_tick = time.monotonic()
