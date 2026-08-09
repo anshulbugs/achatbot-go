@@ -511,7 +511,7 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// after it: the carrier finalises a recording tens of seconds after the
 		// call ends, and holding the report back for it would delay every
 		// disposition the platform acts on.
-		reportRecordingSaved(id, ev)
+		reportRecordingSaved(id, body)
 	case "call.hangup":
 		// The report is emitted from HERE, on the carrier's lifecycle, rather
 		// than from pipeline teardown. Voicemail, no-answer and busy calls all
@@ -593,39 +593,40 @@ func reportCallEnded(id string) {
 	}()
 }
 
-// reportRecordingSaved posts the recording event for a platform-dispatched
-// call. No-op for demo calls.
+// reportRecordingSaved forwards Telnyx's recording payload to the platform,
+// with only the session and tenant ids added.
 //
-// Read from the registry rather than claimed, because unlike the end-of-call
-// report this is not once-per-call state — but it does arrive AFTER
-// call.hangup has deleted the registry entry, which is why the lookup runs
-// before the entry is gone. Telnyx sends recording.saved either side of hangup
-// depending on how the call ended, so a missing entry is expected and simply
-// means there is nobody to report to.
-func reportRecordingSaved(id string, ev *telnyx.WebhookEnvelope) {
+// A PASS-THROUGH, deliberately. Re-mapping the carrier's fields into our own
+// struct means every field Telnyx adds is dropped until someone notices, and
+// every field it renames breaks quietly. The platform's schema is a loose
+// passthrough for the same reason, so the useful thing we can do is not get in
+// the way.
+//
+// In particular the URLs are forwarded exactly as received — including Telnyx's
+// `s3://` form. We do not rewrite them, re-host them, or infer a status from
+// whether they are present.
+//
+// Read from the registry rather than claimed: this is not once-per-call state.
+// It can also arrive after call.hangup has deleted the entry, in which case
+// there is nobody to report to and we drop it.
+func reportRecordingSaved(id string, body []byte) {
 	rc := calls.platformOf(id)
 	if rc == nil || rexaPoster == nil {
 		return
 	}
-	p := ev.Data.Payload
-	evt := rexa.NewRecordingSaved(rc.sessionID, rc.tenantID, id, p.RecordingID)
-	evt.Channels = p.Channels
-	evt.RecordingStartedAt = p.RecordingStarted
-	evt.RecordingEndedAt = p.RecordingEnded
-	if p.RecordingURLs != nil {
-		evt.RecordingURLs = &rexa.RecordingURLs{MP3: p.RecordingURLs.MP3, WAV: p.RecordingURLs.WAV}
+	var env struct {
+		Data struct {
+			Payload map[string]any `json:"payload"`
+		} `json:"data"`
 	}
-	if p.PublicURLs != nil {
-		evt.PublicRecordingURLs = &rexa.RecordingURLs{MP3: p.PublicURLs.MP3, WAV: p.PublicURLs.WAV}
-	}
-	// The platform infers a failure from absent URLs, but saying so explicitly
-	// is cheaper than making it guess.
-	if evt.RecordingURLs == nil && evt.PublicRecordingURLs == nil {
-		evt.Status = "failed"
+	if err := json.Unmarshal(body, &env); err != nil || env.Data.Payload == nil {
+		log.Printf("rexa: recording payload unreadable for session=%s: %v", rc.sessionID, err)
+		return
 	}
 
-	log.Printf("rexa: recording saved session=%s recording=%s status=%s",
-		rc.sessionID, evt.RecordingID, evt.Status)
+	evt := rexa.NewRecordingSaved(env.Data.Payload, rc.sessionID, rc.tenantID)
+	log.Printf("rexa: recording saved session=%s recording=%v",
+		rc.sessionID, env.Data.Payload["recording_id"])
 	go func() {
 		if err := rexaPoster.PostRecordingSaved(context.Background(), rc.webhookURL, evt); err != nil {
 			log.Printf("rexa: recording report FAILED for session=%s: %v", rc.sessionID, err)

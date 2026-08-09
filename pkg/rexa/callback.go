@@ -196,6 +196,9 @@ func (p *Poster) PostTransferInitiated(ctx context.Context, url string, e Transf
 // because the carrier finalises a recording tens of seconds after the call
 // ends. The full retry ladder applies: a recording link the platform never
 // receives is a recording the tenant cannot play.
+//
+// The payload is the carrier's own, forwarded unchanged apart from the ids —
+// see RecordingSavedEvent.
 func (p *Poster) PostRecordingSaved(ctx context.Context, url string, e RecordingSavedEvent) error {
 	return p.Post(ctx, url, e)
 }

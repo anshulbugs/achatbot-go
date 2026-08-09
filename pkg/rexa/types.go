@@ -333,53 +333,33 @@ func NewTransferInitiated(sessionID, tenantID, number string, at time.Time) Tran
 	}
 }
 
-// RecordingURLs is the per-format set of links to one recording.
-type RecordingURLs struct {
-	MP3 string `json:"mp3,omitempty"`
-	WAV string `json:"wav,omitempty"`
-}
-
-// RecordingSavedEvent is POSTed to webhook_url once the carrier has finalised a
-// recording.
+// RecordingSavedEvent is the carrier's own recording payload, forwarded with
+// only `type`, `session_id` and `tenant_id` added.
 //
-// Separate from the end-of-call report because finalisation lags the call's end
-// by tens of seconds — transcoding and upload — and holding the report back for
-// it would delay every disposition the platform acts on. The platform re-emits
-// this to tenants as `session.recording_completed`.
-type RecordingSavedEvent struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	TenantID  string `json:"tenant_id"`
-	// CallControlID is provider-internal; the platform strips it before
-	// relaying to a tenant.
-	CallControlID string `json:"call_control_id,omitempty"`
-	RecordingID   string `json:"recording_id"`
-	// Status is "completed" or "failed". The platform tolerates an empty
-	// string and infers from URL presence, but we always set it.
-	Status string `json:"status"`
-	// Channels is "single" or "dual" as the carrier reports it.
-	Channels           string `json:"channels,omitempty"`
-	RecordingStartedAt string `json:"recording_started_at,omitempty"`
-	RecordingEndedAt   string `json:"recording_ended_at,omitempty"`
-	// RecordingURLs are the carrier's own links. Telnyx's are pre-signed and
-	// expire, which is why the platform prefers PublicRecordingURLs when we
-	// have somewhere to host them.
-	RecordingURLs *RecordingURLs `json:"recording_urls,omitempty"`
-	// PublicRecordingURLs are tenant-fetchable links. Empty until the agent
-	// mirrors recordings to storage of its own — see §6 of the contract.
-	PublicRecordingURLs *RecordingURLs `json:"public_recording_urls,omitempty"`
-}
+// A MAP, NOT A STRUCT, deliberately. Re-mapping the carrier's fields into typed
+// ones means every field Telnyx adds is dropped until someone notices, and
+// every field it renames breaks quietly. The platform's schema is a loose
+// passthrough for the same reason: it strips what it must not relay and stores
+// the rest. Typing this would put us in the way of both.
+//
+// URLs are forwarded exactly as received, including Telnyx's `s3://` form. We
+// do not rewrite them, re-host them, or infer a status from their presence —
+// the platform's handler already normalises what it needs.
+type RecordingSavedEvent map[string]any
 
-// NewRecordingSaved builds a recording event with the discriminator set.
-func NewRecordingSaved(sessionID, tenantID, ccid, recordingID string) RecordingSavedEvent {
-	return RecordingSavedEvent{
-		Type:          "recording_saved",
-		SessionID:     sessionID,
-		TenantID:      tenantID,
-		CallControlID: ccid,
-		RecordingID:   recordingID,
-		Status:        "completed",
+// NewRecordingSaved wraps a carrier payload for delivery.
+//
+// The three added keys are set AFTER the copy, so a carrier payload that
+// happened to contain them cannot overwrite the ids the platform routes on.
+func NewRecordingSaved(payload map[string]any, sessionID, tenantID string) RecordingSavedEvent {
+	out := make(RecordingSavedEvent, len(payload)+3)
+	for k, v := range payload {
+		out[k] = v
 	}
+	out["type"] = "recording_saved"
+	out["session_id"] = sessionID
+	out["tenant_id"] = tenantID
+	return out
 }
 
 // Sentiment values the mid-call classifier may report. Closed set — the

@@ -445,11 +445,15 @@ the carrier finalises a recording tens of seconds after the call ends, and
 holding the report back for it would delay every disposition you act on. Only
 sent when recording is enabled on the agent.
 
-`status` is `completed` or `failed`; we set it explicitly rather than leaving
-you to infer it from URL presence. `public_recording_urls` is empty until the
-agent mirrors recordings to its own storage — until then use `recording_urls`,
-and note that **Telnyx's links are pre-signed and expire in ten minutes**, so
-fetch and re-host rather than storing the URL.
+**This is the carrier's own payload, forwarded unchanged apart from `type`,
+`session_id` and `tenant_id`.** Whatever Telnyx sends is what you get: the same
+field names, the same URL forms (including `s3://`), and `status` exactly as
+reported — which is sometimes an empty string. We do not rewrite URLs, re-host
+recordings, or infer a status from whether URLs are present.
+
+That is deliberate. Re-mapping the carrier's fields would mean every field
+Telnyx adds is silently dropped and every field it renames breaks quietly. Your
+schema is a loose passthrough for the same reason.
 
 ### Sentiment change
 
@@ -812,8 +816,8 @@ no longer serve well.
    human, and confirm `transfer_initiated` arrives and the leg connects. Note
    the event fires on *attempt*, not success.
 8. If using recording: confirm `recording_saved` arrives after the end-of-call
-   report, and re-host `recording_urls` rather than storing them — Telnyx's
-   links are pre-signed and expire in ten minutes.
+   report. The payload is Telnyx's own, so fetch the recording rather than
+   storing the URL — its links are pre-signed and expire in ten minutes.
 9. If using sentiment: **stop stripping `sentiment_analysis` and
    `sentiment_webhook`** in the payload builder, then confirm an event arrives
    at the sentiment webhook mid-call when a caller asks for a human.
