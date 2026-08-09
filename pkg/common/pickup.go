@@ -26,9 +26,50 @@ var pickupTokens = map[string]bool{
 	"oh": true, "um": true, "uh": true, "er": true, "ah": true, "hm": true, "hmm": true,
 }
 
+// pickupPhrases are complete openers that carry no information, matched after
+// normalisation (lowercased, punctuation and apostrophes stripped).
+//
+// Phrases rather than words because the useful ones are multi-word and their
+// parts are not interchangeable: "how are you" is a pleasantry, "how do I stop
+// this" is not, and both start "how".
+var pickupPhrases = map[string]bool{
+	"whats up": true, "wassup": true, "sup": true, "whats going on": true,
+	"how are you": true, "how are you doing": true, "how you doing": true,
+	"how are ya": true, "hows it going": true, "how is it going": true,
+	"hows things": true, "you alright": true, "alright": true,
+	"good morning": true, "good afternoon": true, "good evening": true,
+	"good day": true, "morning": true, "afternoon": true, "evening": true,
+	"yes hello": true, "yeah hello": true, "yes hi": true, "yeah hi": true,
+	"hello yes": true, "hello hi": true, "hi hi": true,
+}
+
 // maxPickupWords bounds what can be dismissed as a pickup noise. Anything
 // longer is a sentence, whatever words it happens to contain.
 const maxPickupWords = 4
+
+// normalisePickup lowercases and strips punctuation so "What”'s up?" and
+// "whats up" are the same phrase. Apostrophes go entirely rather than being
+// mapped, because speech-to-text is inconsistent about them.
+func normalisePickup(text string) string {
+	var b strings.Builder
+	prevSpace := true
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+			prevSpace = false
+		case r == ' ' || r == '	':
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		default:
+			// Punctuation and apostrophes are dropped, not turned into spaces,
+			// so "what'''s" becomes "whats" rather than "what s".
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
 
 // IsPickupNoise reports whether text is nothing but a greeting reflex.
 //
@@ -37,6 +78,9 @@ const maxPickupWords = 4
 // this returns true, and it should only ever be returned for something that
 // genuinely carries no information.
 func IsPickupNoise(text string) bool {
+	if pickupPhrases[normalisePickup(text)] {
+		return true
+	}
 	fields := strings.Fields(strings.ToLower(text))
 	if len(fields) == 0 || len(fields) > maxPickupWords {
 		return false
