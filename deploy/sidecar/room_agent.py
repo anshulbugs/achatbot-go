@@ -56,8 +56,12 @@ INTERRUPT_FENCE = 0.4
 # speech. Echo is attenuated by the caller's own speakers and microphone, so it
 # arrives much quieter than the caller does — which is the whole basis for
 # telling them apart without an acoustic model.
-ECHO_GATE_MULT = 3.0        # inbound must exceed this multiple of the echo floor
-ECHO_FLOOR_MIN = 250.0      # absolute floor, so silence cannot set a low bar
+# Tuned down from 3.0 after a real call: the caller had to shout to be heard
+# over the agent. Echo returns attenuated by the caller's speakers and
+# microphone, so it is typically several times quieter than they are — 2.0 is
+# still comfortably above the echo and no longer demands a raised voice.
+ECHO_GATE_MULT = 2.0        # inbound must exceed this multiple of the echo floor
+ECHO_FLOOR_MIN = 180.0      # absolute floor, so silence cannot set a low bar
 GATE_HOLD = 0.8             # once the caller is through, pass everything for this
                             # long: it must exceed the pauses inside a sentence
 
@@ -109,6 +113,11 @@ class RoomAgent:
         self.agent_ws = f"{agent_ws}?session={session}"
 
         self.stopping = threading.Event()
+        # Set once the caller is actually in the room. The writer waits on it:
+        # frames written before then go nowhere, and since the writer consumes
+        # the buffer on every tick regardless, the opening of the greeting was
+        # simply discarded into an empty room.
+        self.caller_present = threading.Event()
         self.ws: WebSocketApp | None = None
         self.ws_ready = threading.Event()
 
@@ -264,7 +273,9 @@ class RoomAgent:
         # Quiet while we are speaking: this is our own echo, or room noise, and
         # it is the only thing that should define the floor. Decayed so one loud
         # moment does not deafen the gate for the rest of the call.
-        self.echo_floor = max(ECHO_FLOOR_MIN, self.echo_floor * 0.98, rms)
+        # Decays over roughly a second at 50 frames/s, so a single loud moment
+        # does not keep the bar raised for the rest of the reply.
+        self.echo_floor = max(ECHO_FLOOR_MIN, self.echo_floor * 0.95, rms)
         return False
 
     def _pump_pipeline_to_room(self):
@@ -376,6 +387,8 @@ class RoomAgent:
             if others > 0:
                 if not seen_caller:
                     log.info("the caller joined")
+                    # Releases the writer, which has been holding the greeting.
+                    self.caller_present.set()
                 seen_caller = True
                 continue
             if seen_caller:
