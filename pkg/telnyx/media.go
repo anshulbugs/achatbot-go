@@ -180,6 +180,20 @@ type Serializer struct {
 // rather than fall back to a client-side control message.
 func (s *Serializer) SupportsInterruption() bool { return true }
 
+// ForceClear returns a flush regardless of any interrupt hold.
+//
+// The hold exists to stop the pipeline flushing a greeting the carrier is still
+// playing. Answering-machine detection wants the opposite — cut the greeting
+// NOW and leave a message — so it needs a way past. Without this the voicemail
+// message queued behind the entire greeting and played to a beep long past.
+func (s *Serializer) ForceClear() ([]byte, error) {
+	s.mu.Lock()
+	s.holdInterruptsUntil = time.Time{}
+	s.mutedUntil = time.Now().Add(interruptMute)
+	s.mu.Unlock()
+	return json.Marshal(map[string]string{"event": "clear"})
+}
+
 // HoldInterrupts suppresses "clear" events for d, covering audio already sent
 // but not yet played.
 func (s *Serializer) HoldInterrupts(d time.Duration) {

@@ -846,23 +846,25 @@ func truncate(s string, n int) string {
 // send until we are announceLead ahead of the wall clock, then only top up.
 // That absorbs jitter while keeping at most announceLead of audio committed,
 // which is how quickly a machine verdict can still cut the greeting.
-// Both too little AND too much lead produce the same symptom, which is what
-// made this hard to pin down.
+// The greeting is sent as fast as the socket accepts it, with no pacing.
 //
-// Too little: sending 100ms of audio every 100ms leaves Telnyx no cushion, one
-// scheduling hiccup arrives late, its buffer underruns and the caller hears a
-// hole in the middle of a word.
+// Three attempts at a paced lead all produced a hole in the middle of the
+// greeting, and the evidence finally ruled the sender out entirely: at a 600ms
+// lead a real call sent 14.53s of audio in 13.93s and never once fell behind
+// (the log line for it exists and stayed silent), yet the caller heard a longer
+// gap EARLIER in the sentence than at 3s. Less cushion, worse gap; more
+// cushion, better. The pacing loop was never the fix — it was the exposure.
 //
-// Too much: Telnyx buffers a bounded amount of inbound media. Pushed 3 seconds
-// ahead it dropped the excess, and playback resumed only when our sender caught
-// up — a pause in the middle of the greeting that then continued mid-word. Our
-// own sender never fell behind on those calls (nothing logged), which is what
-// ruled out the underrun explanation and pointed here.
+// The media path runs over a tunnel, and a few hundred milliseconds of stall
+// anywhere in it empties whatever Telnyx is holding. The only cushion that
+// cannot be exhausted by a stall is the whole message, so Telnyx gets the whole
+// message.
 //
-// 600ms absorbs an ordinary stall while staying well inside what the carrier
-// will hold. It also bounds how much greeting is already committed when a
-// machine verdict arrives, which is the other thing this number controls.
-const announceLead = 600 * time.Millisecond
+// What pacing bought was the ability to stop mid-greeting on a machine verdict,
+// and that is not lost: `clear` flushes Telnyx's buffer, which is exactly what
+// the voicemail path already sends. Committing the audio early only means the
+// cut comes from the flush rather than from withholding audio we never sent.
+const announceLead = 0
 
 func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
 	const chunkMS = 100
@@ -894,7 +896,10 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 		}
 		sent = end
 
-		// Wait only while we are further ahead than the lead allows.
+		// announceLead 0 means send everything as fast as it is accepted; the
+		// loop below then never waits. Kept as a knob rather than deleted,
+		// because "how far ahead of real time may we run" is the question this
+		// code is about, and a future carrier may answer it differently.
 		audioSent := time.Duration(sent/2) * time.Second / time.Duration(rate)
 		ahead := audioSent - time.Since(started)
 		// Falling behind real time is the gap the caller hears, and it is
@@ -934,7 +939,10 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 
 	// Flush whatever of the greeting Telnyx still has buffered, so the message
 	// does not trail the interrupted hello.
-	if b, err := ser.Serialize(&frames.StartInterruptionFrame{}); err == nil && len(b) > 0 {
+	// ForceClear, not Serialize: the greeting is committed to Telnyx in full now,
+	// and the interrupt hold that protects it from the pipeline must not also
+	// stop the machine-detection path from cutting it.
+	if b, err := ser.ForceClear(); err == nil && len(b) > 0 {
 		_ = tw.SendPayload(frames.NewAudioRawFrame(nil, rate, 1, 2)) // no-op keeps the writer warm
 	}
 
