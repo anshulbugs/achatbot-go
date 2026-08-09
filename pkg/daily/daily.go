@@ -147,6 +147,51 @@ func (c *Client) meetingToken(ctx context.Context, room string, exp int64) (stri
 	return out.Token, nil
 }
 
+// Presence reports how many participants are currently in a room.
+//
+// Needed because Daily refuses a SIP participant that would be alone in the
+// room — `allow_sip_only_in_room` is false on this domain, and the call is
+// rejected with SIP 480 Temporarily Unavailable, which reads like a network
+// fault rather than a policy. So the agent waits for the browser before dialling
+// in, which is the natural order anyway: the browser is the caller.
+func (c *Client) Presence(ctx context.Context, room string) (int, error) {
+	if c == nil || room == "" {
+		return 0, nil
+	}
+	var out struct {
+		TotalCount int `json:"total_count"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/rooms/"+room+"/presence", nil, &out); err != nil {
+		return 0, err
+	}
+	return out.TotalCount, nil
+}
+
+// WaitForParticipant polls until someone joins the room, or gives up.
+//
+// Returns false on timeout, which means the browser never arrived — a dispatch
+// nobody answered. Polling rather than a webhook because a webhook would need a
+// publicly reachable callback registered with Daily per deployment, and this
+// runs for at most a couple of minutes per call.
+func (c *Client) WaitForParticipant(ctx context.Context, room string, timeout, interval time.Duration) bool {
+	if c == nil {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		n, err := c.Presence(ctx, room)
+		if err == nil && n > 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+	return false
+}
+
 // DeleteRoom removes a room when the call ends.
 //
 // Rooms expire on their own, so this is tidiness rather than correctness — but

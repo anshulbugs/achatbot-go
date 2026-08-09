@@ -435,30 +435,67 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 	}
 	prerenderAnnouncements(p)
 
-	// Our own webhook, so call.answered starts the media fork exactly as it
-	// does for a phone call. Without it the leg connects and stays silent.
-	webhookURL := d.publicURL + "/telnyx/webhook"
-	ccid, err := client.DialSIP(ctx, room.SIPURI, webhookURL, "")
-	if err != nil {
-		_ = dailyClient.DeleteRoom(ctx, room.Name)
-		log.Printf("rexa: session=%s SIP dial into room failed: %v", req.SessionID, err)
-		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
-			"could not join the room: %v", err)
-	}
-
-	if rexaMetrics != nil {
-		rexaMetrics.Rekey(req.SessionID, ccid)
-	}
-	calls.put(ccid, p)
-	log.Printf("rexa: session=%s browser room %s ready, agent joining as call=%s",
-		req.SessionID, room.Name, ccid)
+	// The agent joins AFTER the browser, not before.
+	//
+	// Daily refuses a SIP participant that would be alone in the room
+	// (`allow_sip_only_in_room` is false on this domain) and rejects the call
+	// with SIP 480, which reads like a network fault rather than a policy. It
+	// is also the right order on its own terms: the browser is the caller, and
+	// dialling first would burn a carrier leg for every dispatch nobody opens.
+	//
+	// So return the room now — the platform is waiting on this response to hand
+	// the link to a browser — and join in the background once someone arrives.
+	go joinBrowserRoom(req.SessionID, room.Name, room.SIPURI, p, d.publicURL)
 
 	return rexa.WebrtcDispatchResponse{
-		RoomURL:         room.URL,
-		Token:           room.Token,
-		AgentSessionID:  ccid,
+		RoomURL: room.URL,
+		Token:   room.Token,
+		// No agent_session_id: the carrier leg does not exist until the browser
+		// joins, and the platform's schema makes it optional precisely so an
+		// agent that cannot name the call yet is not forced to invent one.
 		TokenTTLSeconds: int(room.TokenTTL.Seconds()),
 	}, nil
+}
+
+// browserJoinTimeout is how long the agent waits for someone to open the room.
+//
+// Generous, because the link has to travel from our response, through the
+// platform, to a person who then clicks it. Nobody arriving is a real outcome
+// — the session is reported failed rather than left in_progress for the
+// platform's reconciler to sweep half an hour later.
+const browserJoinTimeout = 2 * time.Minute
+
+// joinBrowserRoom waits for the browser and then dials the agent in.
+func joinBrowserRoom(sessionID, roomName, sipURI string, p *callParams, publicURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), browserJoinTimeout+30*time.Second)
+	defer cancel()
+
+	if !dailyClient.WaitForParticipant(ctx, roomName, browserJoinTimeout, 2*time.Second) {
+		log.Printf("rexa: session=%s nobody joined room %s within %s — giving up",
+			sessionID, roomName, browserJoinTimeout)
+		_ = dailyClient.DeleteRoom(ctx, roomName)
+		releaseCall(sessionID)
+		rc := p.platform
+		reportSessionFailed(rc, "no_answer")
+		return
+	}
+
+	// Our own webhook, so call.answered starts the media fork exactly as it
+	// does for a phone call. Without it the leg connects and stays silent.
+	ccid, err := p.platform.client.DialSIP(ctx, sipURI, publicURL+"/telnyx/webhook", "")
+	if err != nil {
+		log.Printf("rexa: session=%s SIP dial into room %s failed: %v", sessionID, roomName, err)
+		_ = dailyClient.DeleteRoom(ctx, roomName)
+		releaseCall(sessionID)
+		reportSessionFailed(p.platform, "provider_failure")
+		return
+	}
+	if rexaMetrics != nil {
+		rexaMetrics.Rekey(sessionID, ccid)
+	}
+	calls.put(ccid, p)
+	log.Printf("rexa: session=%s browser joined room %s, agent dialling in as call=%s",
+		sessionID, roomName, ccid)
 }
 
 // reportDispatchFailure tells the platform a call never got off the ground.
@@ -480,6 +517,37 @@ func (d *platformDispatcher) reportDispatchFailure(sessionID, tenantID, webhookU
 	go func() {
 		if err := rexaPoster.PostEndOfCall(context.Background(), webhookURL, report); err != nil {
 			log.Printf("rexa: dispatch-failure report FAILED for session=%s: %v", sessionID, err)
+		}
+	}()
+}
+
+// reportSessionFailed ends a browser session that never became a call.
+//
+// A room the browser never opened, or a carrier leg that would not connect,
+// both leave the platform with a session it will otherwise mark failed half an
+// hour later with no cause recorded. Saying so immediately is the whole point
+// of the end-of-call report.
+func reportSessionFailed(rc *rexaCall, reason string) {
+	if rexaPoster == nil || rc == nil || rc.webhookURL == "" {
+		return
+	}
+	status := rexa.CallStatusFailed
+	if reason == "no_answer" {
+		// Nobody opened the room. That is a no-answer in the platform's
+		// vocabulary, not a failure of ours — the distinction drives whether
+		// the contact is retried.
+		status = rexa.CallStatusNoAnswer
+	}
+	report := rexa.EndOfCallReport{
+		SessionID:  rc.sessionID,
+		TenantID:   rc.tenantID,
+		CallStatus: status,
+		EndReason:  reason,
+		EndedAt:    rexa.ISOTime(time.Now()),
+	}
+	go func() {
+		if err := rexaPoster.PostEndOfCall(context.Background(), rc.webhookURL, report); err != nil {
+			log.Printf("rexa: session-failed report FAILED for session=%s: %v", rc.sessionID, err)
 		}
 	}()
 }
