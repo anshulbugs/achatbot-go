@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"embed"
 	"encoding/binary"
@@ -595,7 +596,7 @@ func resolvePrompt(base, replace, suffix string) string {
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
-- Do not write filler sounds. Never write "hm", "hmm", "uh", "um", "er", "ah" or similar. They are pronounced as words and sound like a fault, not like thinking. If you need a pause, use a comma or a short sentence.
+- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
 
 // withCallStyle appends the delivery rules to a system prompt.
@@ -686,13 +687,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	prompt := resolvePrompt(systemPromptFor(overrides.lang), overrides.prompt, overrides.promptSuffix)
 	runVoiceSession(&ExampleIWebSocketConn{Conn: conn}, serializers.NewProtobufSerializer(), sessionConfig{
-		clientID:           fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
-		systemPrompt:       prompt,
-		voiceID:            overrides.voiceID,
-		speed:              overrides.speed,
-		volume:             overrides.volume,
-		llmModel:           overrides.llmModel,
-		hello:              overrides.hello,
+		clientID:     fmt.Sprintf("%s_%s", conn.RemoteAddr().Network(), conn.RemoteAddr().String()),
+		systemPrompt: prompt,
+		voiceID:      overrides.voiceID,
+		speed:        overrides.speed,
+		volume:       overrides.volume,
+		llmModel:     overrides.llmModel,
+		// Fall back to the configured greeting when the client sent none.
+		//
+		// The demo page omits the greeting whenever it matches the server's own
+		// — sending an identical copy achieves nothing and puts it in a URL
+		// where proxies have opinions about length. That is the right call, but
+		// it only works if the server actually falls back, and this path did
+		// not: the browser simply got silence where the greeting should be,
+		// while inbound phone calls (which read the same config value directly)
+		// were fine. The symptom is "my configured greeting is not spoken",
+		// with nothing in the logs to suggest why.
+		hello:              cmp.Or(overrides.hello, cfg.Server.InboundHello),
 		addWavHeader:       true,
 		allowInterruptions: cfg.Server.AllowInterruptions,
 	})
