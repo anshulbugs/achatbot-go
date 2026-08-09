@@ -48,11 +48,23 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --context-length 4096 \
     --mem-fraction-static 0.85 \
     --cuda-graph-max-bs 256 \
-    --schedule-policy lpm
+    --schedule-policy lpm \
+    --tool-call-parser gemma4
 
 echo "$NAME started (GPU $LLM_GPU, host port $PORT, model $LLM_MODEL)."
 echo "First run downloads the model into $HF_CACHE — watch: docker logs -f $NAME"
 echo
+# --tool-call-parser is REQUIRED for call transfer to work at all.
+#
+# Without it SGLang returns the model's tool call as raw text in `content` and
+# leaves `tool_calls` null. The agent reads tool_calls, so the transfer never
+# fires -- and the raw markup ("<|tool_call>call:call_transfer{...}") flows on
+# to TTS and is SPOKEN ALOUD to the caller. Verified against gemma-4-E4B-it:
+# the model gets the decision right and the plumbing silently drops it.
+#
+# The parser must match the model family -- `auto` detects from the chat
+# template, `gemma4` is explicit and is what this deployment runs. Change the
+# model and this flag has to change with it.
 echo "WARNING: do NOT lower --context-length below (system prompt + history + max_tokens)."
 echo "  SGLang rejects every oversized request with HTTP 400, the LLM GPU sits at 0%, and"
 echo "  calls stall at a flat ~7s. /v1/models still returns 200, so it looks healthy."
