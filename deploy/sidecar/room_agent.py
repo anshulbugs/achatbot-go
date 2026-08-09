@@ -42,6 +42,25 @@ JOIN_TIMEOUT = 120
 # what is already on the wire, and this cannot unhear what was already queued.
 INTERRUPT_FENCE = 0.4
 
+# Echo gating.
+#
+# The agent hears itself. Daily's browser client cancels echo well when the
+# caller wears headphones and imperfectly when they do not, so the agent's own
+# voice comes back through the caller's microphone, the pipeline's VAD reads it
+# as barge-in, and generation is cancelled and restarted. A real call showed
+# bursts of five to eight interrupts firing while the agent was mid-sentence:
+# the reply's opening was cut and latency went from ~950ms to ~3000ms because
+# every cancellation started the turn over.
+#
+# So while the agent is speaking, inbound audio has to clear a bar to count as
+# speech. Echo is attenuated by the caller's own speakers and microphone, so it
+# arrives much quieter than the caller does — which is the whole basis for
+# telling them apart without an acoustic model.
+ECHO_GATE_MULT = 3.0        # inbound must exceed this multiple of the echo floor
+ECHO_FLOOR_MIN = 250.0      # absolute floor, so silence cannot set a low bar
+GATE_HOLD = 0.8             # once the caller is through, pass everything for this
+                            # long: it must exceed the pauses inside a sentence
+
 DAILY_RATE = 48000
 PIPELINE_IN_RATE = 16000
 # 20 ms of 48 kHz mono s16 — matches Daily's own frame size, so reads never
@@ -91,6 +110,13 @@ class RoomAgent:
         # for the same reason, and this is the second line of defence for
         # anything already in flight when the interrupt was sent.
         self.interrupted_at = 0.0
+        # Echo gate state. playing_until is when the audio we have written
+        # finishes playing, echo_floor is a running estimate of how loud our own
+        # voice comes back, and gate_open_until is set once the caller has
+        # genuinely broken through so the rest of their sentence passes.
+        self.playing_until = 0.0
+        self.echo_floor = ECHO_FLOOR_MIN
+        self.gate_open_until = 0.0
 
         Daily.init()
         # Virtual devices are created through the factory, never constructed
@@ -138,7 +164,12 @@ class RoomAgent:
                 except Exception:  # noqa: BLE001
                     pass
                 self.interrupted_at = time.monotonic()
-                log.info("interrupt: dropped %d queued chunks", dropped)
+                # Stop believing we are speaking: the reply was just cancelled,
+                # so anything arriving now is the caller, not an echo.
+                self.playing_until = 0.0
+                self.gate_open_until = self.interrupted_at + GATE_HOLD
+                if dropped:
+                    log.info("interrupt: dropped %d queued chunks", dropped)
             return
         try:
             self.playback.put_nowait(message)
@@ -172,6 +203,8 @@ class RoomAgent:
             if not buf:
                 continue
             pcm48 = np.frombuffer(buf, dtype=np.int16)
+            if not self._passes_echo_gate(pcm48):
+                continue
             pcm16 = resample(pcm48, DAILY_RATE, PIPELINE_IN_RATE)
             if pcm16.size and self.ws is not None:
                 try:
@@ -180,6 +213,34 @@ class RoomAgent:
                     log.error("send to pipeline failed: %s", e)
                     break
         self.stopping.set()
+
+    def _passes_echo_gate(self, pcm: np.ndarray) -> bool:
+        """Should this inbound frame reach the pipeline?
+
+        Everything passes while the agent is silent — that is the normal case
+        and gating it would only add a way to lose the caller's words. The gate
+        only closes over our own speech, and only for audio quiet enough to be
+        an echo of it.
+        """
+        now = time.monotonic()
+        if now >= self.playing_until:
+            # Agent is silent. Nothing to echo, so nothing to gate.
+            return True
+        if now < self.gate_open_until:
+            # The caller already broke through; do not chop the rest of their
+            # sentence into pieces on its internal pauses.
+            return True
+        if pcm.size == 0:
+            return True
+
+        rms = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
+        # Track the loudest echo seen while speaking, decaying slowly so one
+        # loud moment does not deafen the gate for the rest of the call.
+        self.echo_floor = max(ECHO_FLOOR_MIN, self.echo_floor * 0.995, rms * 0.6)
+        if rms > self.echo_floor * ECHO_GATE_MULT:
+            self.gate_open_until = now + GATE_HOLD
+            return True
+        return False
 
     def _pump_pipeline_to_room(self):
         """Play the agent's replies into the room."""
@@ -197,6 +258,11 @@ class RoomAgent:
             except Exception as e:  # noqa: BLE001
                 log.error("mic write failed: %s", e)
                 break
+            # Extend how long we believe our own voice is audible, which is what
+            # the echo gate keys off. Measured from now rather than accumulated,
+            # so a stall cannot leave the gate closed indefinitely.
+            played = pcm48.size / DAILY_RATE
+            self.playing_until = max(self.playing_until, time.monotonic()) + played
         self.stopping.set()
 
     # ── lifecycle ──────────────────────────────────────────────────
