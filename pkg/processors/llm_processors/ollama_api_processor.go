@@ -77,7 +77,7 @@ func (p *LLMOllamaApiProcessor) appendHistoryChatMessages(msgs []api.Message) {
 			logger.Errorf("mapstructure.Decode error: %v", err)
 			continue
 		}
-		p.session.GetChatHistory().Append(mapMsg)
+		p.session.GetChatHistory().Append(normaliseHistoryItem(mapMsg))
 	}
 }
 

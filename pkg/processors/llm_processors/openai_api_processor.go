@@ -3,6 +3,7 @@ package llm_processors
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"time"
 
@@ -90,8 +91,39 @@ func (p *LLMOpenAIApiProcessor) appendHistoryChatMessages(msgs []types.Message) 
 			logger.Errorf("mapstructure.Decode error: %v", err)
 			continue
 		}
-		p.session.GetChatHistory().Append(mapMsg)
+		p.session.GetChatHistory().Append(normaliseHistoryItem(mapMsg))
 	}
+}
+
+// normaliseHistoryItem makes a decoded assistant turn look like the user turns
+// appended elsewhere in this file: lowercase keys, plain string values.
+//
+// TWO separate mismatches, both silent, and together they cost a real call its
+// entire agent-side transcript — five caller turns arrived and not one reply.
+//
+//  1. mapstructure names keys after STRUCT FIELDS, so a decoded turn has
+//     "Role"/"Content" while user turns are written as literal
+//     "role"/"content".
+//  2. openai-go types Role as `constant.Assistant`, not `string`. Even with the
+//     right key, the `item["role"].(string)` every reader does fails the type
+//     assertion and yields "".
+//
+// Fixing it here rather than in each reader: one map with two spellings and two
+// types for the same field is a trap that would be re-sprung by the next person
+// to read from it. Decoding back into structs is unaffected — mapstructure
+// matches field names case-insensitively and converts named string types.
+func normaliseHistoryItem(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		// Any named string type (constant.Assistant and friends) becomes a
+		// plain string, so a type assertion on the far side succeeds.
+		if rv := reflect.ValueOf(v); rv.IsValid() && rv.Kind() == reflect.String {
+			out[strings.ToLower(k)] = rv.String()
+			continue
+		}
+		out[strings.ToLower(k)] = v
+	}
+	return out
 }
 
 func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processors.FrameDirection) {

@@ -565,6 +565,13 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 
 	rexaPoster = rexa.NewPoster(inbound)
 	rexaVoices = rexa.NewVoiceResolver(kokoroVoiceCatalog(), parseVoiceOverrides(), cfg.TTS.SpeakerID)
+	// Applied HERE, not in initRexaTelemetry: the resolver does not exist until
+	// this line, and Force is nil-safe, so calling it earlier would have
+	// silently done nothing while looking correct.
+	if id := cfg.Server.ForceVoiceID; id >= 0 {
+		rexaVoices.Force(id)
+		log.Printf("rexa: every call pinned to speaker %d (server.force_voice_id)", id)
+	}
 	if rexaMetrics == nil {
 		// initRexaTelemetry must have run first; without it the transports are
 		// unwrapped and every tier would report `unknown` forever.

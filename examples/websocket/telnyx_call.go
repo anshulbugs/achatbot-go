@@ -141,6 +141,9 @@ var demoVoiceSet = []int{2, 6, 9, 16, 14, 18, 21, 26} // Bella, Nicole, Sarah, M
 type callRegistry struct {
 	mu sync.Mutex
 	m  map[string]*callParams
+	// ended keeps finished calls reachable briefly, for carrier events that
+	// arrive after the hangup. See remember.
+	ended map[string]endedCall
 }
 
 func newCallRegistry() *callRegistry { return &callRegistry{m: map[string]*callParams{}} }
@@ -212,13 +215,55 @@ func (r *callRegistry) markAgentEnded(id string) {
 
 // platformOf returns the call's contract state without claiming it, for events
 // that are not once-per-call. nil for demo calls.
+//
+// Falls back to the recently-ended set, because some carrier events arrive
+// AFTER the hangup that removed the call. call.recording.saved is the one that
+// matters: it landed one second after call.hangup on a real call, found
+// nothing, and the recording was silently never reported.
 func (r *callRegistry) platformOf(id string) *rexaCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p := r.m[id]; p != nil {
 		return p.platform
 	}
+	if e, ok := r.ended[id]; ok {
+		return e.rc
+	}
 	return nil
+}
+
+// endedTTL is how long a finished call stays reachable for late carrier events.
+//
+// Telnyx finalises a recording tens of seconds after the call ends, and the
+// event can arrive either side of call.hangup depending on how the call
+// finished. Five minutes covers the observed lag with room to spare while
+// keeping the map small — it holds three strings per entry, not a call.
+const endedTTL = 5 * time.Minute
+
+type endedCall struct {
+	rc *rexaCall
+	at time.Time
+}
+
+// remember keeps a finished call's contract context for late events, and drops
+// anything past the TTL while it is here. Sweeping on write means no timer and
+// no goroutine for a map that only grows when calls end.
+func (r *callRegistry) remember(id string, rc *rexaCall) {
+	if rc == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ended == nil {
+		r.ended = map[string]endedCall{}
+	}
+	cutoff := time.Now().Add(-endedTTL)
+	for k, e := range r.ended {
+		if e.at.Before(cutoff) {
+			delete(r.ended, k)
+		}
+	}
+	r.ended[id] = endedCall{rc: rc, at: time.Now()}
 }
 
 // claimReport returns the call's contract state exactly once, so the report is
@@ -527,6 +572,11 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// reporter off the session would silently drop exactly the outcomes
 		// the platform most needs to hear about.
 		calls.recordHangup(id, ev.Data.Payload.HangupCause)
+		// Keep the contract context reachable before the entry goes: the
+		// recording event arrives after this and would otherwise find nothing.
+		if rc := calls.platformOf(id); rc != nil {
+			calls.remember(id, rc)
+		}
 		reportCallEnded(id)
 		// Release capacity here, on the carrier's lifecycle, for the same
 		// reason the report is emitted here: a no-answer or a busy never
@@ -781,7 +831,12 @@ func truncate(s string, n int) string {
 // send until we are announceLead ahead of the wall clock, then only top up.
 // That absorbs jitter while keeping at most announceLead of audio committed,
 // which is how quickly a machine verdict can still cut the greeting.
-const announceLead = 1500 * time.Millisecond
+// 1500ms was tuned on a four-second greeting and held. A real call with a
+// SIXTEEN-second greeting brought the gap back: the longer the announcement,
+// the more chances there are for one scheduling stall to exceed the lead, and
+// one is all it takes. 3s costs nothing on a human call and only means up to
+// 3s of greeting is already committed when a machine verdict arrives.
+const announceLead = 3 * time.Second
 
 func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
 	const chunkMS = 100
@@ -791,6 +846,7 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 	}
 	started := time.Now()
 	sent := 0
+	fellBehind := false
 	for off := 0; off < len(pcm); off += chunk {
 		select {
 		case <-stop:
@@ -814,7 +870,17 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 
 		// Wait only while we are further ahead than the lead allows.
 		audioSent := time.Duration(sent/2) * time.Second / time.Duration(rate)
-		if ahead := audioSent - time.Since(started); ahead > announceLead {
+		ahead := audioSent - time.Since(started)
+		// Falling behind real time is the gap the caller hears, and it is
+		// otherwise invisible — the audio all arrives, just too late. Logged
+		// once per announcement so the next report of "it broke up" can be
+		// confirmed or ruled out from the log instead of guessed at.
+		if ahead < 0 && !fellBehind {
+			fellBehind = true
+			log.Printf("announce: FELL BEHIND real time by %v after %d/%d bytes — "+
+				"the caller will hear a gap here", -ahead.Round(time.Millisecond), sent, len(pcm))
+		}
+		if ahead > announceLead {
 			select {
 			case <-stop:
 				log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))

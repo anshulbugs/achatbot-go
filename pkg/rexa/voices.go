@@ -30,6 +30,8 @@ type VoiceResolver struct {
 	overrides map[string]int
 	byName    map[string]int
 	fallback  int
+	// forced, when >= 0, overrides every resolution. -1 disables it.
+	forced int
 
 	// warned dedupes the unknown-voice log. Without it a campaign configured
 	// with one bad voice emits a line per call, which buries everything else.
@@ -46,11 +48,29 @@ type VoiceResolver struct {
 //     everything else.
 //   - fallback is used when nothing matches. It should be a voice that is
 //     definitely present — normally the configured default speaker.
+//
+// Force pins every call to one speaker, ignoring what the platform asked for.
+//
+// A blunt instrument, and deliberately so: while the voice is being chosen,
+// hearing a different speaker per call because a tenant's vocabulary happens to
+// map somewhere makes every other judgement — pacing, prompt wording, whether a
+// greeting sounds natural — harder to make. Set it to -1 to honour the
+// platform's choice again.
+func (r *VoiceResolver) Force(id int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.forced = id
+	r.mu.Unlock()
+}
+
 func NewVoiceResolver(catalog map[string]int, overrides map[string]int, fallback int) *VoiceResolver {
 	r := &VoiceResolver{
 		overrides: make(map[string]int, len(overrides)),
 		byName:    make(map[string]int, len(catalog)),
 		fallback:  fallback,
+		forced:    -1,
 		warned:    make(map[string]bool),
 	}
 	for k, v := range overrides {
@@ -76,6 +96,15 @@ func normaliseVoice(s string) string {
 // was matched rather than defaulted. The bool is for callers that want to
 // surface the mismatch; the id is always usable.
 func (r *VoiceResolver) Resolve(voice string) (int, bool) {
+	r.mu.Lock()
+	forced := r.forced
+	r.mu.Unlock()
+	if forced >= 0 {
+		// Reported as matched: the platform asked for a voice and got a
+		// definite answer. Calling it a mismatch would log a warning on every
+		// call about a decision we made on purpose.
+		return forced, true
+	}
 	key := normaliseVoice(voice)
 	if key == "" {
 		return r.fallback, false

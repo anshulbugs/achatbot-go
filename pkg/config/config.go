@@ -184,6 +184,14 @@ type ServerConfig struct {
 	// gate that stayed shut until the numbers recovered would cut off the
 	// samples that could show recovery and never reopen. 0 uses the default.
 	FirstTurnCooldownSecs int `mapstructure:"first_turn_cooldown_secs"`
+	// ForceVoiceID pins every platform-dispatched call to one TTS speaker,
+	// ignoring the voice the dispatch asked for. -1 honours the platform.
+	//
+	// Blunt on purpose. While the voice is still being chosen, a different
+	// speaker per call — because one tenant's vocabulary happens to map
+	// somewhere and another's does not — makes every other judgement harder:
+	// pacing, prompt wording, whether a greeting sounds natural.
+	ForceVoiceID int `mapstructure:"force_voice_id"`
 	// SentimentBaseURL is an OpenAI-compatible endpoint used ONLY for mid-call
 	// sentiment classification. Empty disables the feature regardless of what
 	// a dispatch asks for.
@@ -365,6 +373,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.first_turn_critical_ms", 0)
 	v.SetDefault("server.first_turn_cooldown_secs", 0)
 	v.SetDefault("server.sglang_metrics_urls", []string{})
+	v.SetDefault("server.force_voice_id", -1)
 	v.SetDefault("server.sentiment_base_url", "")
 	v.SetDefault("server.sentiment_model", "llama3.2:3b")
 	v.SetDefault("server.idle_prompt_secs", 0)
