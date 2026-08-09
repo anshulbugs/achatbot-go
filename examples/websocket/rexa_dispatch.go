@@ -265,8 +265,22 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	// Publish "dialing" before the carrier is asked, so a watcher sees the call
 	// during the ring rather than only once someone picks up -- the ring is most
 	// of a dispatch's life and the part an operator most often asks about.
+	//
+	// tenant_id and the two numbers ride on this FIRST envelope because the
+	// consumer's key scanner binds a Redis list to a pending contact by
+	// reading element 0 only (rexa-dialer workers/rexa_session_watcher.py
+	// `_maybe_bind`): it requires tenant_id to equal its own configured
+	// tenant, and both numbers to be E.164. A first envelope without tenant_id
+	// is added to an in-process skip set and never looked at again until their
+	// API restarts — so the call is invisible for its whole life, which is
+	// what "stuck in ringing" looked like from the dashboard.
+	//
+	// Only on this event, and only on the session-id key: the call-control key
+	// does not exist yet, and giving both keys a bindable first envelope would
+	// let one call consume two pending contacts.
 	p.platform.live.Event(rexa.EventDialing, map[string]any{
 		"to_number": req.ToNumber, "from_number": req.FromNumber,
+		"tenant_id": req.TenantID, "session_id": req.SessionID,
 	})
 	// The live-listening room, if this call is being watched. Created before the
 	// dial so the join link is already in Redis while the phone rings.
@@ -306,7 +320,24 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	calls.put(callControlID, p)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
 	log.Printf("rexa: session=%s dispatch carried: %s", req.SessionID, dispatchFeatures(req, p))
-	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: callControlID}, nil
+	// uuid, NOT just agent_session_id.
+	//
+	// The consumer picks the Redis tail key out of this response by trying
+	// "uuid", "request_uuid", "call_uuid", "session_id", "id" in that order
+	// (rexa-dialer apps/api/app/services/call_agent.py `_extract_uuid`).
+	// `agent_session_id` is in none of them, so it found nothing, and
+	// services/dialer.py then logs "call-agent returned no uuid — marking
+	// failed", marks the contact failed and never creates a Call row or starts
+	// a tailer. Every event we published afterwards went into a list with
+	// nobody reading it.
+	//
+	// Set to the call-control id, which is the same value agent_session_id
+	// carries and one of the two keys Event() publishes to.
+	return rexa.DispatchResponse{
+		Status:         "accepted",
+		AgentSessionID: callControlID,
+		UUID:           callControlID,
+	}, nil
 }
 
 // DispatchIncoming answers a carrier leg that is already ringing.

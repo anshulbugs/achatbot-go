@@ -205,10 +205,17 @@ the field named in the message.
 ### Response — 200
 
 ```json
-{ "status": "accepted", "agent_session_id": "v3:abc123..." }
+{ "status": "accepted", "agent_session_id": "v3:abc123...", "uuid": "v3:abc123..." }
 ```
 
 `agent_session_id` is the carrier call-control id, useful for cross-system grep.
+
+`uuid` carries the same value, and is the field your dialer actually reads.
+It looks for `uuid`, `request_uuid`, `call_uuid`, `session_id`, `id` in that
+order and treats the first one it finds as the Redis list key to tail; with
+only `agent_session_id` present it finds none, logs "call-agent returned no
+uuid — marking failed", and never starts a tailer. Events are published under
+both this id and the `session_id` you sent, so either is a valid key.
 
 ### Errors
 
