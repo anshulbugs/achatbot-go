@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -138,6 +139,75 @@ func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd stri
 		return "", err
 	}
 	return res.Data.CallControlID, nil
+}
+
+// DialSIP places a call to a SIP URI and returns its call-control id.
+//
+// Used to put a Daily room's SIP endpoint into a conference with a live call,
+// so an operator in that room hears the conversation. Unlike Dial this sends no
+// answering-machine detection and a short timeout: the far end is a media
+// server that answers immediately, and waiting 30 s for it means an operator
+// clicks a join link and hears nothing for half a minute.
+func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState string) (string, error) {
+	if !strings.HasPrefix(sipURI, "sip:") {
+		sipURI = "sip:" + sipURI
+	}
+	body := map[string]any{
+		"connection_id": c.appID,
+		"to":            sipURI,
+		"from":          c.fromNumber,
+		"webhook_url":   webhookURL,
+		"client_state":  encodeState(clientState),
+		"timeout_secs":  15,
+	}
+	var res DialResult
+	if err := c.do(ctx, http.MethodPost, "/calls", body, &res); err != nil {
+		return "", err
+	}
+	return res.Data.CallControlID, nil
+}
+
+// ConferenceCreate starts a conference with callControlID as its first
+// participant and returns the conference id.
+//
+// Conferencing rather than transferring, because the caller must stay where
+// they are: a transfer hands the leg away and ends the agent's conversation,
+// which is the opposite of letting someone listen in on it.
+func (c *Client) ConferenceCreate(ctx context.Context, name, callControlID string) (string, error) {
+	body := map[string]any{
+		"name":            name,
+		"call_control_id": callControlID,
+		// The agent keeps talking to the caller through the media stream; a
+		// hold tune underneath it would be heard by both.
+		"hold_audio_url":             "",
+		"start_conference_on_create": true,
+	}
+	var res struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/conferences", body, &res); err != nil {
+		return "", err
+	}
+	return res.Data.ID, nil
+}
+
+// ConferenceJoin adds another leg to an existing conference.
+//
+// The listener joins muted and deaf=false: they hear everything, and nothing
+// they do is heard until they choose to unmute, so an operator dropping in
+// cannot accidentally speak over a live sales call.
+func (c *Client) ConferenceJoin(ctx context.Context, conferenceID, callControlID string, muted bool) error {
+	body := map[string]any{
+		"call_control_id": callControlID,
+		"mute":            muted,
+		// Silence the join/leave beeps: the caller would hear them and has no
+		// idea anyone else is on the line.
+		"beep_enabled": "never",
+		"hold":         false,
+	}
+	return c.do(ctx, http.MethodPost, "/conferences/"+conferenceID+"/actions/join", body, nil)
 }
 
 // Speak uses Telnyx's built-in TTS to play text into the call. Used only for

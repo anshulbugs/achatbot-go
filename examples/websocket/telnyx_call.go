@@ -103,6 +103,17 @@ type rexaCall struct {
 	// dispatch carried no Redis details, and every method is nil-safe.
 	live *rexa.LivePublisher
 
+	// Live-listening room. Empty unless the dispatch carried Redis details:
+	// that is the platform's signal that something is watching this call, and
+	// a room per call regardless would be a large Daily bill for a feature
+	// almost nobody opens.
+	roomName string
+	roomSIP  string
+	joinURL  string
+	// bridged guards against dialling a second SIP leg into the room if the
+	// answered event ever arrives twice.
+	bridged bool
+
 	// startedAt anchors both the report's duration and the transcript's turn
 	// timings. Set when the call is answered, not when it was dispatched.
 	startedAt time.Time
@@ -561,11 +572,17 @@ func reportCallEnded(id string) {
 	if rc.transcript != nil {
 		report.Messages = rc.transcript.Turns()
 	}
-	// Close the live view here rather than on pipeline teardown, for the same
-	// reason the report is emitted here: a no-answer or a busy never reaches a
-	// pipeline, and a wallboard showing it as still ringing is worse than one
-	// showing nothing.
-	rc.live.Close()
+	// Terminal event here rather than on pipeline teardown, for the same reason
+	// the report is emitted here: a no-answer or a busy never reaches a
+	// pipeline, and the consumer's tailer waits on this event to stop reading.
+	// end_reason "voicemail" is load-bearing on their side -- it routes the call
+	// into the voicemail bucket instead of counting it as completed.
+	if status == "failed" {
+		rc.live.Failed(reason)
+	} else {
+		rc.live.Ended(reason)
+	}
+	endLiveRoom(rc)
 
 	log.Printf("rexa: reporting session=%s status=%s reason=%s turns=%d",
 		rc.sessionID, status, reason, len(report.Messages))
@@ -951,7 +968,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		chatObserver = chainObservers(chatObserver, obs)
 	}
 	if p.platform != nil {
-		p.platform.live.Status(rexa.LiveStatusInProgress)
+		// The AI now has the call. This is what moves the consumer out of
+		// "dialing" and into a live conversation.
+		p.platform.live.Event(rexa.EventHumanDetected, nil)
 	}
 
 	runVoiceSession(conn, ser, sessionConfig{

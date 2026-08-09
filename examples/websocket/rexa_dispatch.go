@@ -150,6 +150,7 @@ func initRexaTelemetry() {
 	})
 
 	initSentiment(cfg.Server.SentimentBaseURL, cfg.Server.SentimentModel)
+	initDaily(os.Getenv("DAILY_API_KEY"))
 
 	// Poll the LLM server's own cache and queue metrics on a background clock.
 	// Never from the health handler: /health is probed every 5 s fleet-wide,
@@ -240,20 +241,18 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 			// Both are required together: analysis with nowhere to send the
 			// result is pure cost, so the webhook's presence is what enables it.
 			sentimentWebhook: sentimentTargetFor(req.SentimentAnalysis, req.SentimentWebhook),
-			live: rexa.NewLivePublisher(req.Redis(), rexa.LiveCallState{
-				SessionID:  req.SessionID,
-				TenantID:   req.TenantID,
-				Status:     rexa.LiveStatusDialing,
-				ToNumber:   req.ToNumber,
-				FromNumber: req.FromNumber,
-				StartedAt:  rexa.ISOTime(time.Now()),
-			}),
+			live:             rexa.NewLivePublisher(req.Redis(), req.SessionID),
 		},
 	}
 	// Publish "dialing" before the carrier is asked, so a watcher sees the call
-	// during the ring rather than only once someone picks up — the ring is most
+	// during the ring rather than only once someone picks up -- the ring is most
 	// of a dispatch's life and the part an operator most often asks about.
-	p.platform.live.Status(rexa.LiveStatusDialing)
+	p.platform.live.Event(rexa.EventDialing, map[string]any{
+		"to_number": req.ToNumber, "from_number": req.FromNumber,
+	})
+	// The live-listening room, if this call is being watched. Created before the
+	// dial so the join link is already in Redis while the phone rings.
+	startLiveRoom(ctx, p.platform, req.Redis().Configured())
 
 	// Pre-render the greeting and voicemail message before the line rings, so
 	// neither costs a TTS slot once the call is live and a machine-answered
@@ -280,8 +279,12 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	if rexaMetrics != nil {
 		rexaMetrics.Rekey(req.SessionID, callControlID)
 	}
-	p.platform.live.CCID(callControlID)
-	p.platform.live.Status(rexa.LiveStatusRinging)
+	// The consumer tails a list keyed by whatever id it stored from our dispatch
+	// response, which is this one. Publishing to both it and the session id
+	// costs one pipelined command and removes a whole class of "the wallboard
+	// shows nothing" failure.
+	p.platform.live.AddKey(callControlID)
+	p.platform.live.Event(rexa.EventRinging, nil)
 	calls.put(callControlID, p)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
 	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: callControlID}, nil
@@ -323,20 +326,16 @@ func (d *platformDispatcher) DispatchIncoming(ctx context.Context, req rexa.Inco
 			client:           client,
 			transcript:       rexa.NewTranscript(time.Now()),
 			sentimentWebhook: sentimentTargetFor(req.SentimentAnalysis, req.SentimentWebhook),
-			live: rexa.NewLivePublisher(req.Redis(), rexa.LiveCallState{
-				SessionID: req.SessionID,
-				TenantID:  req.TenantID,
-				// No dialing or ringing phase inbound: the leg is already up
-				// and we are answering it.
-				Status:     rexa.LiveStatusInProgress,
-				CCID:       req.CCID,
-				ToNumber:   req.ToNumber,
-				FromNumber: req.FromNumber,
-				StartedAt:  rexa.ISOTime(time.Now()),
-			}),
+			live:             rexa.NewLivePublisher(req.Redis(), req.SessionID),
 		},
 	}
-	p.platform.live.Status(rexa.LiveStatusInProgress)
+	p.platform.live.AddKey(req.CCID)
+	// No dialing or ringing phase inbound: the leg is already up and we are
+	// answering it.
+	p.platform.live.Event(rexa.EventAnswered, map[string]any{
+		"to_number": req.ToNumber, "from_number": req.FromNumber,
+	})
+	startLiveRoom(ctx, p.platform, req.Redis().Configured())
 	// Register BEFORE answering: the carrier can deliver call.answered before
 	// Answer() returns, and an unregistered call is dropped on the floor.
 	calls.put(req.CCID, p)

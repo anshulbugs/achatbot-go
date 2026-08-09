@@ -130,7 +130,7 @@ func (t *transferTool) Execute(args map[string]any) (string, error) {
 	// live view showing "transferred" for a call still sitting with the agent
 	// would be simply wrong.
 	if rc := calls.platformOf(t.callID); rc != nil {
-		rc.live.Status(rexa.LiveStatusTransferred)
+		rc.live.Event(rexa.EventTransferred, map[string]any{"transfer_number": t.to})
 	}
 	// Release the pipeline: the carrier owns the conversation now and our
 	// media fork is not part of that bridge, so holding a GPU slot for it
