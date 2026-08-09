@@ -161,12 +161,11 @@ type Serializer struct {
 	// holdInterruptsUntil suppresses the "clear" event while audio we have
 	// already sent is still playing at Telnyx.
 	//
-	// The greeting is sent up to announceLead AHEAD of real time — a 14.5s
-	// greeting left the sender in 11.5s — so when it "finishes" Telnyx still
-	// holds three seconds of it unplayed. The pipeline starts at that moment
-	// and emits an early interruption frame, which becomes a "clear", which
-	// flushes exactly that unplayed tail. The caller hears the greeting stop
-	// mid-sentence, at the same point every time.
+	// The greeting is handed to Telnyx in full and plays from its buffer, so
+	// when our side considers it "finished" the carrier is still playing it.
+	// The pipeline starts at that moment and emits an early interruption frame,
+	// which becomes a "clear", which flushes the unplayed remainder — the
+	// caller hears the greeting stop mid-sentence at the same point every time.
 	holdInterruptsUntil time.Time
 
 	// Outbound clarity filtering (telephone voice enhancement).

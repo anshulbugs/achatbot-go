@@ -835,50 +835,38 @@ func truncate(s string, n int) string {
 // playAnnouncement streams cached PCM over the media socket, keeping a lead of
 // buffered audio ahead of real time, and stops early if stop closes.
 //
-// Pacing at exactly real time does not work: sending 100ms of audio every 100ms
-// leaves Telnyx no cushion, so the first scheduling hiccup on our side arrives
-// late, its buffer underruns and the caller hears a hole in the middle of a
-// word. That is what "...learn a little about you [gap] anything you're curious
-// about" was -- the audio was all sent, just not early enough.
-//
-// Blasting the whole message instead would buffer fine but makes stopping it
-// meaningless, since Telnyx would already hold the rest. So we run a lead:
-// send until we are announceLead ahead of the wall clock, then only top up.
-// That absorbs jitter while keeping at most announceLead of audio committed,
-// which is how quickly a machine verdict can still cut the greeting.
-// The greeting is sent as fast as the socket accepts it, with no pacing.
-//
-// Three attempts at a paced lead all produced a hole in the middle of the
-// greeting, and the evidence finally ruled the sender out entirely: at a 600ms
-// lead a real call sent 14.53s of audio in 13.93s and never once fell behind
-// (the log line for it exists and stayed silent), yet the caller heard a longer
-// gap EARLIER in the sentence than at 3s. Less cushion, worse gap; more
-// cushion, better. The pacing loop was never the fix — it was the exposure.
-//
-// The media path runs over a tunnel, and a few hundred milliseconds of stall
-// anywhere in it empties whatever Telnyx is holding. The only cushion that
-// cannot be exhausted by a stall is the whole message, so Telnyx gets the whole
-// message.
-//
-// What pacing bought was the ability to stop mid-greeting on a machine verdict,
-// and that is not lost: `clear` flushes Telnyx's buffer, which is exactly what
-// the voicemail path already sends. Committing the audio early only means the
-// cut comes from the flush rather than from withholding audio we never sent.
-const announceLead = 0
 
 func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int, stop <-chan struct{}) bool {
-	const chunkMS = 100
-	chunk := rate * 2 * chunkMS / 1000
-	if chunk <= 0 || len(pcm) == 0 {
+	if len(pcm) == 0 {
 		return true
 	}
+	// ONE message, not a hundred and forty-five.
+	//
+	// Telnyx's own documentation is explicit: "Provided chunks of audio can be
+	// in a size of 20 milliseconds to 30 seconds." A greeting is a few seconds
+	// of pre-rendered audio that exists in full before the call is answered,
+	// so it fits inside a single chunk with room to spare.
+	//
+	// It was being sent as ~145 back-to-back 100ms messages, and every attempt
+	// to fix the resulting hole by adjusting HOW FAST those messages went out
+	// moved the hole rather than closing it: 3s of lead put it late in the
+	// sentence, 600ms put it earlier and made it longer, no pacing at all put
+	// it earlier still. Our sender never once fell behind. The variable that
+	// mattered was never the pacing — it was the message count.
+	//
+	// Anything longer than the carrier's limit still has to be split, so the
+	// chunking stays, sized to the documented maximum with a margin rather
+	// than to a frame.
+	const maxChunkSecs = 25
+	chunk := rate * 2 * maxChunkSecs
 	started := time.Now()
 	sent := 0
-	fellBehind := false
+
 	for off := 0; off < len(pcm); off += chunk {
 		select {
 		case <-stop:
-			log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
+			log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)",
+				sent, len(pcm), time.Since(started).Round(time.Millisecond))
 			return false
 		default:
 		}
@@ -886,41 +874,19 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 		if end > len(pcm) {
 			end = len(pcm)
 		}
-		// Telephony sets AudioOutAddWavHeader false, so this is byte-identical to
-		// SendPayload today. Routed through SendAudioFrame anyway so the header
-		// decision stays with the transport, and enabling headers here later
-		// cannot silently produce undecodable audio.
+		// Telephony sets AudioOutAddWavHeader false, so this is byte-identical
+		// to SendPayload today. Routed through SendAudioFrame anyway so the
+		// header decision stays with the transport.
 		if err := tw.SendAudioFrame(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
-			log.Printf("announce: send failed after %d/%d bytes in %v: %v", sent, len(pcm), time.Since(started).Round(time.Millisecond), err)
+			log.Printf("announce: send failed after %d/%d bytes in %v: %v",
+				sent, len(pcm), time.Since(started).Round(time.Millisecond), err)
 			return false
 		}
 		sent = end
-
-		// announceLead 0 means send everything as fast as it is accepted; the
-		// loop below then never waits. Kept as a knob rather than deleted,
-		// because "how far ahead of real time may we run" is the question this
-		// code is about, and a future carrier may answer it differently.
-		audioSent := time.Duration(sent/2) * time.Second / time.Duration(rate)
-		ahead := audioSent - time.Since(started)
-		// Falling behind real time is the gap the caller hears, and it is
-		// otherwise invisible — the audio all arrives, just too late. Logged
-		// once per announcement so the next report of "it broke up" can be
-		// confirmed or ruled out from the log instead of guessed at.
-		if ahead < 0 && !fellBehind {
-			fellBehind = true
-			log.Printf("announce: FELL BEHIND real time by %v after %d/%d bytes — "+
-				"the caller will hear a gap here", -ahead.Round(time.Millisecond), sent, len(pcm))
-		}
-		if ahead > announceLead {
-			select {
-			case <-stop:
-				log.Printf("announce: stopped after %d/%d bytes in %v (interrupted)", sent, len(pcm), time.Since(started).Round(time.Millisecond))
-				return false
-			case <-time.After(ahead - announceLead):
-			}
-		}
 	}
-	log.Printf("announce: completed %d bytes (%.2fs audio) in %v", len(pcm), float64(len(pcm))/2/float64(rate), time.Since(started).Round(time.Millisecond))
+	log.Printf("announce: sent %d bytes (%.2fs audio) as %d message(s) in %v",
+		len(pcm), float64(len(pcm))/2/float64(rate),
+		(len(pcm)+chunk-1)/chunk, time.Since(started).Round(time.Millisecond))
 	return true
 }
 
