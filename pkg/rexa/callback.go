@@ -38,14 +38,22 @@ var RetrySchedule = []time.Duration{
 
 // SentimentRetrySchedule is the ladder for mid-call sentiment events.
 //
-// Short on purpose. A sentiment alert exists so a human can act while the
-// caller is still on the line; a delivery that finally succeeds twelve minutes
-// later has failed at the only thing it was for, and arrives as noise about a
-// call that has long since ended. Two quick retries cover a blip, and then we
-// stop.
+// Bounded by the life of a CALL, not by the twelve minutes the other callbacks
+// use. A sentiment alert exists so a human can act while the caller is still on
+// the line, so a delivery that finally succeeds twelve minutes later has failed
+// at the only thing it was for and arrives as noise about a call that ended
+// long ago.
+//
+// ~44 s total, which is well inside a typical call. The first version stopped
+// after 1s+3s and that was too aggressive: the platform's sentiment ingress
+// does a synchronous database lookup before responding, so a moment of slowness
+// there dropped the event permanently. Losing the alert is worse than
+// delivering it thirty seconds late — it is the same live call either way.
 var SentimentRetrySchedule = []time.Duration{
 	1 * time.Second,
 	3 * time.Second,
+	10 * time.Second,
+	30 * time.Second,
 }
 
 // callbackTimeout bounds a single POST attempt. The platform's ingress is

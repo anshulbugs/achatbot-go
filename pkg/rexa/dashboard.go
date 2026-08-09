@@ -174,6 +174,8 @@ const dashboardHTML = `<!doctype html>
     <tr><td>Refused at capacity</td><td class="n" id="t-rej">–</td></tr>
     <tr><td>Reaped <span class="sub">— reservations that never resolved</span></td>
         <td class="n" id="t-reap">–</td></tr>
+    <tr><td>Live-publish failures <span class="sub">— calls whose Redis events never arrived</span></td>
+        <td class="n" id="t-live">–</td></tr>
   </tbody>
 </table>
 
@@ -270,6 +272,12 @@ function render(d){
   $("t-vm").textContent    = d.totals.voicemail;
   $("t-rej").textContent   = d.totals.rejected;
   $("t-reap").textContent  = d.totals.reaped;
+  // Publishing is fire-and-forget, so this counter is the only place the
+  // failure surfaces. Colour it when non-zero: the symptom on the caller's
+  // side is an empty wallboard, which reads as "the feature is missing".
+  const lpf = d.totals.live_publish_failures || 0;
+  $("t-live").textContent = lpf;
+  $("t-live").style.color = lpf > 0 ? "var(--bad)" : "";
 }
 
 async function tick(){

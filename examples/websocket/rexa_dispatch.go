@@ -151,6 +151,11 @@ func initRexaTelemetry() {
 
 	initSentiment(cfg.Server.SentimentBaseURL, cfg.Server.SentimentModel)
 	initDaily(os.Getenv("DAILY_API_KEY"))
+	// Covers the window before the platform's dispatch schema carries
+	// redis_password. Managed Redis refuses unauthenticated connections, and
+	// publishing is fire-and-forget, so without a password the live event
+	// stream fails invisibly. A per-dispatch password always wins.
+	rexa.DefaultRedisPassword = os.Getenv("REXA_REDIS_PASSWORD")
 
 	// Poll the LLM server's own cache and queue metrics on a background clock.
 	// Never from the health handler: /health is probed every 5 s fleet-wide,

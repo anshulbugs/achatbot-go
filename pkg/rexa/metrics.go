@@ -882,6 +882,11 @@ type TotalsSnapshot struct {
 	// non-zero value means hangup events are being missed; a persistently
 	// climbing one means capacity would have leaked away without the reaper.
 	Reaped int64 `json:"reaped"`
+	// LivePublishFailures counts calls whose live event stream never reached
+	// the caller's Redis. Publishing is fire-and-forget by design, so without
+	// this the failure is invisible and reads as "the feature does not work".
+	// Non-zero almost always means missing auth or an unreachable host.
+	LivePublishFailures int64 `json:"live_publish_failures"`
 }
 
 // HealthSnapshot is the body of GET /health.
@@ -991,6 +996,7 @@ func (m *Metrics) Snapshot() HealthSnapshot {
 		Totals: TotalsSnapshot{
 			Calls: m.totalCalls, Voicemail: m.totalVoicemail,
 			Rejected: m.totalRejected, Reaped: m.totalReaped,
+			LivePublishFailures: LivePublishFailures(),
 		},
 	}
 }

@@ -198,8 +198,9 @@ the field named in the message.
 | `voicemail_message` | Spoken after the beep when answering-machine detection reports a machine. Pre-rendered at dispatch, so it costs no GPU at call time. |
 | `transfer_number` | Optional. When set, the model is given a `call_transfer` tool and will transfer on an explicit request for a human. Omit it and the tool is not registered at all, so the model cannot promise what it cannot do. See §6. |
 | `webhook_url` | Where the agent POSTs the end-of-call report, and the recording event. |
-| `sentiment_analysis` + `sentiment_webhook` | Both required together to enable mid-call sentiment alerts. See §6. **Your payload builder currently strips these** — they are marked deferred in `schemas.ts`. The agent side is built and waiting. |
-| `redis_host` / `redis_port` / `redis_db` / `redis_password` | Optional live-state publishing. See §7a. **Also currently stripped** by the builder. |
+| `sentiment_analysis` + `sentiment_webhook` | Both required together to enable mid-call sentiment alerts. See §6. Your builder already sends these. |
+| `redis_host` / `redis_port` / `redis_db` | Optional live event publishing. See §7a. Already sent. |
+| `redis_password` | **Not yet in your dispatch schema, and needed.** Managed Redis (Render Key Value, Upstash, ElastiCache with auth) refuses unauthenticated connections, so without it the live event stream fails — and because publishing is fire-and-forget, it fails *quietly*. Until you send it, set `REXA_REDIS_PASSWORD` on the agent as a stopgap; a per-dispatch password always wins over it. |
 
 ### Response — 200
 
@@ -481,10 +482,13 @@ Three behaviours worth knowing:
 - **It never reverts.** There is no "no longer annoyed" event. That is not
   something anyone acts on, and sending it would clear an operator's alert
   while the call is still going badly.
-- **Short retry ladder — 1s, 3s, then we stop.** Unlike every other callback.
-  This event exists so a human can act while the caller is on the line; a
-  delivery that finally succeeds twelve minutes later has failed at the only
-  thing it was for.
+- **Short retry ladder — 1s, 3s, 10s, 30s, then we stop.** Unlike every other
+  callback, which retries for twelve minutes. This event exists so a human can
+  act while the caller is on the line, so the ladder is bounded by the life of a
+  call rather than by durability. ~44 s is still well inside a live call, and is
+  deliberately longer than the 1s+3s first draft — your sentiment ingress does a
+  synchronous database lookup before responding, and a moment of slowness there
+  would otherwise drop the alert permanently.
 
 `daily_room_url` is present when the dispatch carried Redis details, and is the
 same live-listening link as the `join_daily` event in §7a — so an operator
@@ -640,6 +644,12 @@ live call. Rooms carry a 2-hour expiry and are deleted when the call ends.
 **A dead Redis never affects a call.** This is a telemetry sink, not a
 dependency: every push is fire-and-forget with a 500 ms timeout, and a failure
 is logged once per call rather than per event.
+
+Because that silence is the point, it needs somewhere to show up:
+`totals.live_publish_failures` on `/health` counts calls whose events never
+reached you. Non-zero while calls are running means wrong or unreachable Redis
+details — most often a missing password. Check it before concluding the feature
+does not work.
 
 **Nothing is ever removed from a list.** Your consumer tracks position by index,
 and deleting an element would shift every later index down — silently skipping
@@ -816,13 +826,17 @@ no longer serve well.
    human, and confirm `transfer_initiated` arrives and the leg connects. Note
    the event fires on *attempt*, not success.
 8. If using recording: confirm `recording_saved` arrives after the end-of-call
-   report. The payload is Telnyx's own, so fetch the recording rather than
-   storing the URL — its links are pre-signed and expire in ten minutes.
-9. If using sentiment: **stop stripping `sentiment_analysis` and
-   `sentiment_webhook`** in the payload builder, then confirm an event arrives
-   at the sentiment webhook mid-call when a caller asks for a human.
-10. If using live state: **stop stripping `redis_*`**, then confirm events
-    appear on the list and that `join_daily` carries a working room link.
+   report. The payload is Telnyx's own and how you handle its URLs is yours to
+   decide. Note that Telnyx sends one event per channel configuration, so a
+   dual-channel recording produces two — dedupe on `recording_id`.
+9. If using sentiment: confirm an event arrives at the sentiment webhook
+   mid-call when a caller asks for a human. Your builder already sends the
+   fields.
+10. If using live events: add `redis_password` to the dispatch (or have us set
+    `REXA_REDIS_PASSWORD`), then confirm events appear on the list and that
+    `join_daily` carries a working room link. **Check
+    `totals.live_publish_failures` on `/health` first** — non-zero means the
+    agent tried and could not reach your Redis, which is otherwise silent.
 11. Apply §9.1 and §9.2 before any volume test — first-turn latency measured
     3x worse without them, and they cost the agent side nothing.
 

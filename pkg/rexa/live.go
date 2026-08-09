@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -81,6 +82,32 @@ type RedisTarget struct {
 // live-listening room.
 func (t RedisTarget) Configured() bool { return t.Host != "" && t.Port > 0 }
 
+// DefaultRedisPassword is used when a dispatch names a Redis host but carries
+// no password.
+//
+// A bridge, not a design. Managed Redis (Render Key Value, ElastiCache with
+// auth, Upstash) refuses unauthenticated connections, so a dispatch without a
+// password reaches a server that closes the connection — and because publishing
+// is fire-and-forget by design, that failure is invisible except for one log
+// line. That is exactly the shape of "the wallboard shows nothing".
+//
+// Set REXA_REDIS_PASSWORD to cover the window before the platform's dispatch
+// schema carries redis_password. A per-dispatch password always wins, so this
+// stops mattering the moment they send one.
+var DefaultRedisPassword string
+
+// livePublishFailures counts calls whose event stream never reached Redis.
+//
+// Surfaced on /health precisely because the publish path is deliberately
+// silent: an operator watching an empty wallboard needs somewhere to see that
+// the agent tried and failed, rather than concluding the feature is missing.
+var livePublishFailures atomic.Int64
+
+// LivePublishFailures reports how many calls have failed to publish since
+// start. Non-zero with live calls running means the Redis details on those
+// dispatches are wrong or unreachable — most often a missing password.
+func LivePublishFailures() int64 { return livePublishFailures.Load() }
+
 // LivePublisher appends call events to the caller's Redis.
 //
 // One per call, because the connection details arrive per dispatch. A nil
@@ -111,11 +138,15 @@ func NewLivePublisher(t RedisTarget, sessionID string) *LivePublisher {
 	if !t.Configured() {
 		return nil
 	}
+	password := t.Password
+	if password == "" {
+		password = DefaultRedisPassword
+	}
 	return &LivePublisher{
 		rdb: redis.NewClient(&redis.Options{
 			Addr:         t.Host + ":" + strconv.Itoa(t.Port),
 			DB:           t.DB,
-			Password:     t.Password,
+			Password:     password,
 			DialTimeout:  livePublishTimeout,
 			ReadTimeout:  livePublishTimeout,
 			WriteTimeout: livePublishTimeout,
@@ -174,9 +205,13 @@ func (p *LivePublisher) Event(name string, extra map[string]any) {
 	}
 	if _, err := pipe.Exec(ctx); err != nil && !p.failedLog {
 		// Once per call. A wrong host would otherwise log on every event of
-		// every call and bury everything else.
+		// every call and bury everything else. The counter is what makes the
+		// failure visible on /health, since the log line alone is easy to miss
+		// and the publish path is otherwise silent by design.
 		p.failedLog = true
-		log.Printf("rexa: live publish failed for %v (further errors on this call suppressed): %v",
+		livePublishFailures.Add(1)
+		log.Printf("rexa: live publish FAILED for %v — the caller sees no live events "+
+			"for this call (auth? host reachable?); further errors on this call suppressed: %v",
 			keys, err)
 	}
 }
