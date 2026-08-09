@@ -45,6 +45,19 @@ die() { printf '\n\033[1;31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
 [ -f "$SECRETS" ]  || die "$SECRETS missing — it holds the two HMAC secrets shared with the platform"
 [ -f "config.yaml" ] || die "config.yaml missing — cp deploy/config.yaml.example config.yaml"
 
+# Keep the log across restarts.
+#
+# It used to be truncated on every start, which is fine until someone asks "what
+# happened on that call an hour ago" and the answer is gone because the server
+# was redeployed since. Appended instead, with a marker so one run can be told
+# from the next, and rotated when it gets large.
+if [ -f "rexa-${PORT}.log" ] && [ "$(stat -c%s "rexa-${PORT}.log" 2>/dev/null || echo 0)" -gt 209715200 ]; then
+  mv "rexa-${PORT}.log" "rexa-${PORT}.log.1"
+fi
+printf '
+===== agent starting %s =====
+' "$(date -Is)" >> "rexa-${PORT}.log"
+
 log "Stopping the previous instance"
 # Match the executable name exactly. `pkill -f rexa-server` would also match
 # this script's own command line and the ssh command that launched it.
@@ -89,7 +102,7 @@ ACHATBOT_SERVER_MAX_TOTAL_CALLS="${MAX_TOTAL_CALLS:-200}" \
 TELNYX_PUBLIC_URL="$PUBLIC" \
 SIDECAR_PYTHON="$SIDECAR_PYTHON" \
 SIDECAR_SCRIPT="$SIDECAR_SCRIPT" \
-  nohup setsid "$BIN" -config config.yaml > "rexa-${PORT}.log" 2>&1 < /dev/null &
+  nohup setsid "$BIN" -config config.yaml >> "rexa-${PORT}.log" 2>&1 < /dev/null &
 disown
 
 printf '    waiting for /health '

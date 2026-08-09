@@ -433,7 +433,12 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	p.amdCh, p.beepCh = make(chan string, 2), make(chan string, 2)
 	calls.put(callControlID, &p)
-	log.Printf("telnyx: dialing %s call_control_id=%s", p.To, callControlID)
+	// "source=demo" is load-bearing. A platform dispatch logs
+	// "rexa: session=... dialing" instead, and telling the two apart after the
+	// fact is the first question asked when a call behaves unexpectedly — a
+	// demo call carries no session, so the contract machinery correctly does
+	// nothing for it and there is no recording or report to look for.
+	log.Printf("telnyx: dialing %s call_control_id=%s source=demo(/api/call)", p.To, callControlID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"call_control_id": callControlID, "status": "dialing"})
