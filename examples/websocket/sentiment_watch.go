@@ -100,7 +100,12 @@ func classifyTurn(callID string, rc *rexaCall, agentSaid, callerSaid string) {
 	}
 
 	log.Printf("rexa: sentiment session=%s -> %s", rc.sessionID, verdict)
-	rc.live.Sentiment(verdict)
+	// Carries the join link too: an operator alerted mid-call should be one
+	// click from listening, not one lookup away.
+	rc.live.Event("sentiment_detected", map[string]any{
+		"sentiment_value": verdict,
+		"room_url":        rc.joinURL,
+	})
 
 	if rexaPoster == nil {
 		return
@@ -111,6 +116,9 @@ func classifyTurn(callID string, rc *rexaCall, agentSaid, callerSaid string) {
 		CallStatus: "in_progress",
 		CCID:       callID,
 		Sentiment:  verdict,
+		// The platform's alert template has a {{join_url}} token; filling it
+		// is what turns "the caller wants a human" into something actionable.
+		DailyRoomURL: liveJoinURLFor(rc),
 	}
 	if err := rexaPoster.PostSentiment(ctx, rc.sentimentWebhook, evt); err != nil {
 		// Logged, never retried further and never surfaced to the call. A

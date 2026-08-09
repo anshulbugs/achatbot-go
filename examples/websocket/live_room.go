@@ -58,7 +58,8 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 	}
 	rc.roomName = room.Name
 	rc.roomSIP = room.SIPURI
-	rc.live.JoinURL(room.JoinURL)
+	rc.joinURL = room.JoinURL
+	rc.live.JoinDaily(room.JoinURL, "")
 	log.Printf("rexa: session=%s live room %s ready", rc.sessionID, room.Name)
 	return room.Name
 }

@@ -183,10 +183,10 @@ func (r *callRegistry) recordAMD(id, verdict string) {
 	if p := r.m[id]; p != nil && p.platform != nil {
 		p.platform.amdVerdict = verdict
 		if isMachineVerdict(verdict) {
-			// A watcher should see a voicemail drop as its own state, not as a
+			// A watcher should see a voicemail drop as its own event, not as a
 			// call that went quiet: no pipeline ever runs, so nothing else on
 			// this path would report anything.
-			p.platform.live.Status(rexa.LiveStatusVoicemail)
+			p.platform.live.Event(rexa.EventMachineDetected, nil)
 		}
 	}
 }
