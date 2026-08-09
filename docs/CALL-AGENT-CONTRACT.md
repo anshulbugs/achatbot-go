@@ -106,13 +106,21 @@ nothing else in this contract will work.
 Base URL for integration testing:
 
 ```
-https://entirely-reduces-donna-when.trycloudflare.com
+http://38.65.239.47:4399
 ```
 
-> **This URL is temporary.** It is a Cloudflare quick tunnel and it changes
-> every time the tunnel restarts. Treat it as a value in your config, never as
-> a constant in code. Ask for a stable hostname before anything but integration
-> testing runs against it.
+> **Plain HTTP, and that is a known gap, not an oversight.** Every
+> `/connection` body carries the tenant's live Telnyx API key in
+> `telecom_credentials.credentials`. HMAC authenticates the request; it does not
+> encrypt it, so on this URL that credential crosses the network in the clear.
+>
+> Acceptable for integration testing against test credentials. **Do not put a
+> production tenant's carrier key through it.** A TLS hostname replaces this
+> before real traffic; treat the base URL as a config value, never a constant in
+> code, so the swap costs you nothing.
+>
+> Tell us your egress IPs and we will restrict the port to them, which removes
+> most of the exposure and requires no change on your side.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -131,7 +139,7 @@ Before wiring anything up, confirm the two things that break silently.
 **1. The agent is reachable and reporting capacity:**
 
 ```bash
-curl -s https://entirely-reduces-donna-when.trycloudflare.com/health
+curl -s http://38.65.239.47:4399/health
 ```
 
 Expect `200` with `"status": true` and `"accepting": true`.
