@@ -201,6 +201,20 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("room: sidecar connected for session=%s", sessionID)
 	markOnGPU(sessionID)
+	// Play the greeting from the announcement cache, which was filled while the
+	// room was being created and the sidecar was joining. A cache hit is a map
+	// lookup, so the caller hears the first word as soon as they are in.
+	if p.Hello != "" {
+		if pcm := announcements.get(p.Hello, p.VoiceID, p.Speed); len(pcm) > 0 {
+			rate, _, _ := ttsSampleInfo()
+			go func() {
+				// Straight down the wire: the sidecar paces playback on its own
+				// fixed clock, so there is nothing to pace here.
+				_ = conn.WriteMessage(websocket.BinaryMessage, pcm)
+				_ = rate
+			}()
+		}
+	}
 	if p.platform != nil {
 		p.platform.startedAt = time.Now()
 	}
@@ -228,7 +242,12 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 		speed:        p.Speed,
 		volume:       p.Volume,
 		llmModel:     p.LLMModel,
-		hello:        p.Hello,
+		// Empty on purpose — the greeting is played below from the copy already
+		// rendered at dispatch. Left set, runVoiceSession re-synthesizes it at
+		// session start, and the caller waits through a TTS render of the whole
+		// thing before hearing a word: a real dispatch had a 14.8-SECOND
+		// greeting, so that alone was most of a twenty-second wait.
+		hello:        "",
 		addWavHeader: false,
 		// Barge-in works properly here: Daily's client cancels echo before the
 		// audio ever reaches us, so the caller's voice is the caller's voice.

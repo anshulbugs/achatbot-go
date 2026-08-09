@@ -67,6 +67,17 @@ PIPELINE_IN_RATE = 16000
 # straddle two of its internal buffers.
 READ_FRAMES = DAILY_RATE // 50
 
+# The writer's fixed cadence. One frame of this length goes to the room every
+# FRAME_MS, always -- silence when there is nothing to say. See
+# _pump_pipeline_to_room for why that matters.
+FRAME_MS = 20
+FRAME_BYTES = DAILY_RATE * FRAME_MS // 1000 * 2
+
+# About four seconds of speech. Enough to absorb a pipeline producing faster
+# than real time, small enough that overflowing loses a sentence rather than a
+# conversation.
+MAX_BUFFER_BYTES = DAILY_RATE * 2 * 4
+
 
 def resample(pcm: np.ndarray, src: int, dst: int) -> np.ndarray:
     """Linear resample of mono int16.
@@ -97,11 +108,12 @@ class RoomAgent:
         self.ws: WebSocketApp | None = None
         self.ws_ready = threading.Event()
 
-        # Outbound audio waiting to be played into the room. Bounded: if the
-        # room stalls, dropping the oldest audio is right — it is stale speech
-        # nobody wants to hear late, and an unbounded queue would grow until the
-        # process died.
-        self.playback: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        # Outbound audio for the room, already resampled to Daily's rate. A byte
+        # buffer rather than a queue of chunks, because the writer below emits
+        # fixed-size frames on a fixed clock and must take exactly one frame's
+        # worth regardless of how the pipeline happened to chunk it.
+        self.playbuf = bytearray()
+        self.buflock = threading.Lock()
         # The pipeline tells us its output rate implicitly; assume 24 kHz until
         # proven otherwise, which is what the TTS emits.
         self.out_rate = 24000
@@ -147,13 +159,9 @@ class RoomAgent:
                 # Barge-in, and it has to clear TWO buffers, not one.
                 #
                 # Ours: everything queued here but not yet written.
-                dropped = 0
-                while not self.playback.empty():
-                    try:
-                        self.playback.get_nowait()
-                        dropped += 1
-                    except queue.Empty:
-                        break
+                with self.buflock:
+                    dropped = len(self.playbuf)
+                    del self.playbuf[:]
                 # Daily's: audio already written to the virtual microphone is
                 # held by the SDK and keeps playing regardless of what we do
                 # here. Clearing our queue alone leaves the caller hearing the
@@ -169,18 +177,19 @@ class RoomAgent:
                 self.playing_until = 0.0
                 self.gate_open_until = self.interrupted_at + GATE_HOLD
                 if dropped:
-                    log.info("interrupt: dropped %d queued chunks", dropped)
+                    log.info("interrupt: dropped %d buffered bytes", dropped)
             return
-        try:
-            self.playback.put_nowait(message)
-        except queue.Full:
-            # Keep the newest audio, drop the oldest: late speech is worse than
-            # missing speech.
-            try:
-                self.playback.get_nowait()
-                self.playback.put_nowait(message)
-            except queue.Empty:
-                pass
+        # Resampled here, on the receiving thread, so the writer loop stays a
+        # fixed-cost tick. numpy work inside that loop shows up as jitter in the
+        # room.
+        pcm = np.frombuffer(message, dtype=np.int16)
+        pcm48 = resample(pcm, self.out_rate, DAILY_RATE)
+        with self.buflock:
+            self.playbuf.extend(pcm48.tobytes())
+            if len(self.playbuf) > MAX_BUFFER_BYTES:
+                # Keep the newest audio: late speech is worse than missing
+                # speech, and an unbounded buffer grows until the process dies.
+                del self.playbuf[: len(self.playbuf) - MAX_BUFFER_BYTES]
 
     def _on_ws_close(self, _ws, code, msg):
         log.info("pipeline closed (%s %s)", code, msg)
@@ -243,26 +252,61 @@ class RoomAgent:
         return False
 
     def _pump_pipeline_to_room(self):
-        """Play the agent's replies into the room."""
+        """Write to the room on a fixed clock, exactly like the avatar service.
+
+        THIS IS THE PART THAT MATTERS. Writing only when audio happens to
+        arrive -- in whatever size the pipeline produced, at whatever moment --
+        starves Daily's virtual microphone between chunks, and the underrun is
+        audible as a break at the START of every utterance. That is precisely
+        what a browser call sounded like.
+
+        deploy/avatar/avatar_daily.py has always done the opposite: one
+        fixed-size frame per tick, every tick, padded with silence when there is
+        nothing to say. The mic then sees one continuous stream and never
+        underruns, and speech is simply what fills the buffer between silences.
+        """
+        silence = b"\x00" * FRAME_BYTES
+        period = FRAME_MS / 1000.0
+        next_tick = time.monotonic()
+
         while not self.stopping.is_set():
+            frame = silence
+            speaking = False
+            # Nothing plays for a moment after a barge-in: the tail of the
+            # interrupted turn is still arriving and the caller has just said
+            # they do not want it.
+            if time.monotonic() - self.interrupted_at >= INTERRUPT_FENCE:
+                with self.buflock:
+                    if len(self.playbuf) >= FRAME_BYTES:
+                        frame = bytes(self.playbuf[:FRAME_BYTES])
+                        del self.playbuf[:FRAME_BYTES]
+                        speaking = True
+                    elif self.playbuf:
+                        # A partial frame at the end of a reply: pad it rather
+                        # than hold it back for audio that is not coming.
+                        tail = bytes(self.playbuf)
+                        del self.playbuf[:]
+                        frame = tail + silence[len(tail):]
+                        speaking = True
+            if speaking:
+                # Our own voice is audible for this frame's duration, which is
+                # what the echo gate keys off.
+                self.playing_until = max(self.playing_until, time.monotonic()) + period
+
             try:
-                chunk = self.playback.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if time.monotonic() - self.interrupted_at < INTERRUPT_FENCE:
-                continue  # tail of the turn the caller just cut off
-            pcm = np.frombuffer(chunk, dtype=np.int16)
-            pcm48 = resample(pcm, self.out_rate, DAILY_RATE)
-            try:
-                self.mic.write_frames(pcm48.tobytes())
+                self.mic.write_frames(frame)
             except Exception as e:  # noqa: BLE001
                 log.error("mic write failed: %s", e)
                 break
-            # Extend how long we believe our own voice is audible, which is what
-            # the echo gate keys off. Measured from now rather than accumulated,
-            # so a stall cannot leave the gate closed indefinitely.
-            played = pcm48.size / DAILY_RATE
-            self.playing_until = max(self.playing_until, time.monotonic()) + played
+
+            next_tick += period
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                # Fell behind. Resync rather than sprint to catch up, which
+                # would write a burst and undo the point of a fixed clock.
+                next_tick = time.monotonic()
         self.stopping.set()
 
     # ── lifecycle ──────────────────────────────────────────────────
