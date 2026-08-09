@@ -55,8 +55,13 @@ const interruptMute = 400 * time.Millisecond
 // exceeds both an absolute floor and a multiple of that echo level.
 const (
 	bargeAbsFloor = 550.0 // min inbound RMS (int16) to count as speech at all
-	bargeFactor   = 2.0   // inbound must exceed echoFloor * this to be barge-in
-	echoFloorEMA  = 0.15  // smoothing for the running echo-floor estimate
+	// Lowered from 2.0 after a live call: the agent kept talking for a
+	// noticeable moment after the caller started. Echo returns attenuated by
+	// the handset, so 1.6 still clears it, and the pre-roll buffer below means
+	// a slightly earlier trigger costs nothing — the words that opened the
+	// barge-in are replayed to ASR either way.
+	bargeFactor  = 1.6  // inbound must exceed echoFloor * this to be barge-in
+	echoFloorEMA = 0.15 // smoothing for the running echo-floor estimate
 )
 
 // biquad is a Direct-Form-I second-order IIR filter used to clean outbound
@@ -148,6 +153,17 @@ type Serializer struct {
 	// than a dead call.
 	mutedUntil time.Time
 
+	// holdInterruptsUntil suppresses the "clear" event while audio we have
+	// already sent is still playing at Telnyx.
+	//
+	// The greeting is sent up to announceLead AHEAD of real time — a 14.5s
+	// greeting left the sender in 11.5s — so when it "finishes" Telnyx still
+	// holds three seconds of it unplayed. The pipeline starts at that moment
+	// and emits an early interruption frame, which becomes a "clear", which
+	// flushes exactly that unplayed tail. The caller hears the greeting stop
+	// mid-sentence, at the same point every time.
+	holdInterruptsUntil time.Time
+
 	// Outbound clarity filtering (telephone voice enhancement).
 	clarity  bool
 	hpf      *biquad
@@ -158,6 +174,17 @@ type Serializer struct {
 // the wire (as Telnyx's "clear" event), so callers should hand it the frame
 // rather than fall back to a client-side control message.
 func (s *Serializer) SupportsInterruption() bool { return true }
+
+// HoldInterrupts suppresses "clear" events for d, covering audio already sent
+// but not yet played.
+func (s *Serializer) HoldInterrupts(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.holdInterruptsUntil = time.Now().Add(d)
+	s.mu.Unlock()
+}
 
 // SetClarity enables/disables the outbound clarity filter.
 func (s *Serializer) SetClarity(on bool) { s.clarity = on }
@@ -372,6 +399,13 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 func (s *Serializer) Serialize(frame frames.Frame) ([]byte, error) {
 	switch af := frame.(type) {
 	case *frames.StartInterruptionFrame:
+		s.mu.Lock()
+		holding := time.Now().Before(s.holdInterruptsUntil)
+		s.mu.Unlock()
+		if holding {
+			// Flushing now would cut the greeting Telnyx is still playing.
+			return nil, nil
+		}
 		s.resetPlayback()
 		s.mu.Lock()
 		s.mutedUntil = time.Now().Add(interruptMute)

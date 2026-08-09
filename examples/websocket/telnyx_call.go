@@ -1023,6 +1023,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 			ttsRate, _, _ := ttsSampleInfo()
+			announceStart := time.Now()
 			log.Printf("announce: playing greeting call=%s (%d bytes @%dHz)", id, len(pcm), ttsRate)
 			finished := playAnnouncement(tw, pcm, ttsRate, stop)
 			stopOnce.Do(func() { close(stop) })
@@ -1042,6 +1043,18 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				runVoicemailCall(id, tw, ser, ttsRate, p, p.beepCh)
 				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
 				return
+			}
+			// Telnyx is still holding whatever we sent ahead of real time.
+			// Suppress "clear" for that long: the pipeline starts now and its
+			// first interruption frame would otherwise flush the unplayed tail
+			// of the greeting mid-sentence.
+			if finished {
+				spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(ttsRate)
+				if outstanding := spoken - time.Since(announceStart); outstanding > 0 {
+					ser.HoldInterrupts(outstanding)
+					log.Printf("announce: %s of greeting still buffered at Telnyx; holding interrupts",
+						outstanding.Round(time.Millisecond))
+				}
 			}
 			log.Printf("announce: greeting done call=%s (finished=%t verdict=%q) -> starting pipeline", id, finished, verdict)
 			// Human: the greeting has already played, so the session must not
