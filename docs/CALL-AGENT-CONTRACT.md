@@ -558,63 +558,81 @@ callers: `functions[]` (tool calling), `recording` config, `opt_out_detection`,
 
 ---
 
-## 7a. Live call state in Redis
+## 7a. Live call events in Redis
 
-Optional, and unrelated to the webhooks. Send `redis_host` / `redis_port` /
-`redis_db` (and `redis_password` if the instance needs one) on a dispatch and
-the agent publishes that call's state to your Redis as it happens.
+Optional. Send `redis_host` / `redis_port` / `redis_db` (and `redis_password`
+if needed) on a dispatch and the agent publishes that call's events to your
+Redis as they happen.
 
-**Why this exists alongside the webhooks.** A webhook is an *event* you must not
-miss: signed, retried for twelve minutes, worth reading after the fact. That
-machinery is exactly wrong for a wallboard, which wants the current state of
-forty calls right now and does not care what happened at 09:14. Redis answers
-that in one read. Neither replaces the other.
+**The shape is not ours — it matches the existing consumer**
+(`rexa-dialer/apps/api/app/workers/event_tailer.py`), which tails a Redis LIST
+and reads forward with incremental `LRANGE key next_index -1`.
 
 ### Keys
 
-| Key | Type | Contents |
-|---|---|---|
-| `rexa:call:{session_id}` | HASH | current state, TTL 1 hour, refreshed on every update |
-| `rexa:call:{session_id}:events` | pub/sub channel | the same state as JSON, on every change |
-| `rexa:calls:live` | SET | session ids currently live |
+The agent RPUSHes to **two** lists: one keyed by `session_id` and one keyed by
+the `agent_session_id` we returned from the dispatch. Tail whichever you stored
+as your `call_uuid` — writing both costs us one pipelined command and removes a
+whole class of "the wallboard shows nothing" failure. Both carry a 6-hour TTL,
+refreshed on every push.
 
-To show everything happening now, read the set then the hashes. To react as it
-happens, subscribe to `rexa:call:*:events`. Neither needs to poll the agent.
+### Envelope
 
-### Fields
+One JSON object per list element:
 
 ```json
-{
-  "session_id": "…", "tenant_id": "…",
-  "status": "in_progress",
-  "CCID": "v3:abc123",
-  "join_url": "",
-  "sentiment": "wants_human",
-  "to_number": "+15557654321", "from_number": "+15551234567",
-  "started_at": "2026-08-09T08:39:50.123Z",
-  "updated_at": "2026-08-09T08:40:02.456Z"
-}
+{ "event": "call_answered", "timestamp": 1786262685.605 }
 ```
 
-`status` moves `dialing → ringing → in_progress → ended`, with `voicemail` and
-`transferred` as alternative terminal-ish states. Inbound calls start at
-`in_progress` — there is no ring to observe.
+`timestamp` is **unix seconds as a float**, because the consumer does
+`datetime.fromtimestamp(float(ts))`. Milliseconds would date every event to the
+year 57000.
 
-`sentiment` is present only when sentiment analysis is enabled for the call.
-Empty is not the same as neutral; it means nobody is classifying.
+| `event` | When | Extra fields |
+|---|---|---|
+| `call_dialing` | before the carrier is asked | `to_number`, `from_number` |
+| `call_ringing` | dial accepted, phone ringing | |
+| `call_answered` | carrier reports an answer | |
+| `human_detected` | the AI pipeline has the call | |
+| `machine_detected` | answering machine | |
+| `join_daily` | live-listen room ready | `room_url`, `token`, and the same nested under `payload` |
+| `sentiment_detected` | mid-call sentiment change | `sentiment_value`, `room_url` |
+| `call_transferred` | transfer connected | `transfer_number` |
+| `call_ended` | **terminal** | `end_reason` |
+| `call_failed` | **terminal** | `end_reason` |
 
-`join_url` is **empty until the WebRTC path exists**. It is in the schema now so
-you can build against it, but treat it as optional.
+**Terminal events stop the tail.** Your consumer exits its read loop on
+`call_ended` / `call_failed`, so we publish nothing after one — the room link
+and every status change arrive before the end, never after.
+
+`end_reason: "voicemail"` is load-bearing: your tailer routes the call into the
+voicemail bucket on that value rather than counting it as completed.
+
+### Live listening
+
+When a dispatch carries Redis details the agent also creates a **Daily room**
+for that call and publishes a `join_daily` event with a join link. The phone leg
+is bridged into the room over SIP, so an operator who opens the link hears the
+live conversation and can unmute to speak to the caller.
+
+**Gated on the Redis fields, deliberately.** Daily bills per participant-minute
+and each bridged room runs a second carrier leg for the call's duration, so
+doing this for every call would be a large bill for a feature almost nobody
+opens. Redis details are your own signal that something is watching this call.
+A dispatch without them costs nothing extra.
+
+The operator joins **muted**, so dropping in cannot accidentally speak over a
+live call. Rooms carry a 2-hour expiry and are deleted when the call ends.
 
 ### Two guarantees
 
 **A dead Redis never affects a call.** This is a telemetry sink, not a
-dependency: every publish is fire-and-forget with a 500 ms timeout, and a
-failure is logged once per call rather than per turn.
+dependency: every push is fire-and-forget with a 500 ms timeout, and a failure
+is logged once per call rather than per event.
 
-**Keys are left behind at `ended`, not deleted.** A watcher polling every few
-seconds would otherwise see live calls vanish with no final state. The TTL
-cleans them up.
+**Nothing is ever removed from a list.** Your consumer tracks position by index,
+and deleting an element would shift every later index down — silently skipping
+one event and double-reading another.
 
 ---
 

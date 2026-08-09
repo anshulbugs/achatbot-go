@@ -160,18 +160,8 @@ func (p *LivePublisher) Event(name string, extra map[string]any) {
 	keys := append([]string(nil), p.keys...)
 	p.mu.Unlock()
 
-	env := map[string]any{
-		"event": name,
-		// Unix seconds as a float — the consumer does
-		// datetime.fromtimestamp(float(ts)), so milliseconds would date every
-		// event to the year 57000 and an ISO string would fail the cast.
-		"timestamp": float64(time.Now().UnixNano()) / 1e9,
-	}
-	for k, v := range extra {
-		env[k] = v
-	}
-	blob, err := json.Marshal(env)
-	if err != nil {
+	blob := envelopeFor(name, extra)
+	if blob == nil {
 		return
 	}
 
@@ -189,6 +179,26 @@ func (p *LivePublisher) Event(name string, extra map[string]any) {
 		log.Printf("rexa: live publish failed for %v (further errors on this call suppressed): %v",
 			keys, err)
 	}
+}
+
+// envelopeFor builds one list element.
+func envelopeFor(name string, extra map[string]any) []byte {
+	env := map[string]any{
+		"event": name,
+		// Unix seconds as a float: the consumer does
+		// datetime.fromtimestamp(float(ts)), so milliseconds would date every
+		// event to the year 57000 and an ISO string would fail the cast and
+		// silently fall back to "now".
+		"timestamp": float64(time.Now().UnixNano()) / 1e9,
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	blob, err := json.Marshal(env)
+	if err != nil {
+		return nil
+	}
+	return blob
 }
 
 // JoinDaily publishes the live-listen room.
