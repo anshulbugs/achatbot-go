@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -115,6 +116,11 @@ func LivePublishFailures() int64 { return livePublishFailures.Load() }
 // without Redis details gets.
 type LivePublisher struct {
 	rdb *redis.Client
+	// target is kept so the connection can be rebuilt with the other
+	// credential when the server disagrees with us about auth. See authFlip.
+	target   RedisTarget
+	usingPwd bool
+	flipped  bool
 	// keys are the lists to append to. Both the id we returned from the
 	// dispatch and the session id: the consumer tails by whichever it stored
 	// as its call_uuid, and writing to both costs one extra pipelined command
@@ -143,18 +149,53 @@ func NewLivePublisher(t RedisTarget, sessionID string) *LivePublisher {
 		password = DefaultRedisPassword
 	}
 	return &LivePublisher{
-		rdb: redis.NewClient(&redis.Options{
-			Addr:         t.Host + ":" + strconv.Itoa(t.Port),
-			DB:           t.DB,
-			Password:     password,
-			DialTimeout:  livePublishTimeout,
-			ReadTimeout:  livePublishTimeout,
-			WriteTimeout: livePublishTimeout,
-			// One connection per call: these are low-volume and short-lived,
-			// and a larger pool would multiply sockets by concurrency.
-			PoolSize: 1,
-		}),
-		keys: []string{sessionID},
+		rdb:      dialRedis(t, password),
+		target:   t,
+		usingPwd: password != "",
+		keys:     []string{sessionID},
+	}
+}
+
+func dialRedis(t RedisTarget, password string) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:         t.Host + ":" + strconv.Itoa(t.Port),
+		DB:           t.DB,
+		Password:     password,
+		DialTimeout:  livePublishTimeout,
+		ReadTimeout:  livePublishTimeout,
+		WriteTimeout: livePublishTimeout,
+		// One connection per call: these are low-volume and short-lived, and a
+		// larger pool would multiply sockets by concurrency.
+		PoolSize: 1,
+	})
+}
+
+// authFlip decides whether a failure means we guessed the auth mode wrong, and
+// what to try instead.
+//
+// Guessing is unavoidable: the dispatch says where the Redis is but not whether
+// it wants a password, and the two failure modes are exact opposites.
+//
+//	open server, we sent AUTH   -> "ERR Client sent AUTH, but no password is set"
+//	secured server, we sent none -> "NOAUTH Authentication required"
+//
+// Returns the password to retry with and whether to bother. A wrong password
+// (WRONGPASS) is deliberately NOT flipped: dropping the password would not fix
+// it, and retrying unauthenticated against a secured server just fails twice.
+func authFlip(err error, usingPwd bool, fallback string) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := err.Error()
+	switch {
+	case usingPwd && strings.Contains(msg, "but no password is set"):
+		// The server is open. Drop the credential.
+		return "", true
+	case !usingPwd && strings.Contains(msg, "NOAUTH") && fallback != "":
+		// The server wants auth and we have something to offer.
+		return fallback, true
+	default:
+		return "", false
 	}
 }
 
@@ -203,7 +244,30 @@ func (p *LivePublisher) Event(name string, extra map[string]any) {
 		pipe.RPush(ctx, k, blob)
 		pipe.Expire(ctx, k, liveKeyTTL)
 	}
-	if _, err := pipe.Exec(ctx); err != nil && !p.failedLog {
+	_, err := pipe.Exec(ctx)
+
+	// The dispatch tells us where the Redis is, never whether it wants a
+	// password. Rather than fail every event on a guess, correct the guess once
+	// and replay this event — the alternative is a whole call's worth of events
+	// lost to a one-word configuration difference.
+	if err != nil && !p.flipped {
+		if pwd, flip := authFlip(err, p.usingPwd, DefaultRedisPassword); flip {
+			p.flipped = true
+			_ = p.rdb.Close()
+			p.rdb = dialRedis(p.target, pwd)
+			p.usingPwd = pwd != ""
+			log.Printf("rexa: live publish retrying with auth %s for %v",
+				map[bool]string{true: "enabled", false: "disabled"}[p.usingPwd], keys)
+			retry := p.rdb.Pipeline()
+			for _, k := range keys {
+				retry.RPush(ctx, k, blob)
+				retry.Expire(ctx, k, liveKeyTTL)
+			}
+			_, err = retry.Exec(ctx)
+		}
+	}
+
+	if err != nil && !p.failedLog {
 		// Once per call. A wrong host would otherwise log on every event of
 		// every call and bury everything else. The counter is what makes the
 		// failure visible on /health, since the log line alone is easy to miss

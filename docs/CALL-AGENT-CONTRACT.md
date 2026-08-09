@@ -200,7 +200,7 @@ the field named in the message.
 | `webhook_url` | Where the agent POSTs the end-of-call report, and the recording event. |
 | `sentiment_analysis` + `sentiment_webhook` | Both required together to enable mid-call sentiment alerts. See §6. Your builder already sends these. |
 | `redis_host` / `redis_port` / `redis_db` | Optional live event publishing. See §7a. Already sent. |
-| `redis_password` | **Not yet in your dispatch schema, and needed.** Managed Redis (Render Key Value, Upstash, ElastiCache with auth) refuses unauthenticated connections, so without it the live event stream fails — and because publishing is fire-and-forget, it fails *quietly*. Until you send it, set `REXA_REDIS_PASSWORD` on the agent as a stopgap; a per-dispatch password always wins over it. |
+| `redis_password` | **Not yet in your dispatch schema.** Managed Redis (Render Key Value, Upstash, ElastiCache with auth) refuses unauthenticated connections. Send it when you can; a per-dispatch password always wins. Until then the agent copes on its own — see below. |
 
 ### Response — 200
 
@@ -668,7 +668,18 @@ live call. Rooms carry a 2-hour expiry and are deleted when the call ends.
 dependency: every push is fire-and-forget with a 500 ms timeout, and a failure
 is logged once per call rather than per event.
 
-Because that silence is the point, it needs somewhere to show up:
+**The agent works out the auth mode itself.** The dispatch says where your Redis
+is but never whether it wants a password, so the first push settles it: an open
+server answering `ERR Client sent AUTH, but no password is set` makes the agent
+drop the credential and replay; a secured server answering `NOAUTH` makes it
+retry with the configured fallback. Either way that call's events arrive. A
+`WRONGPASS` is not retried — dropping the password cannot fix a wrong one.
+
+So all three cases work today: you send a password, you send none against an
+open Redis, or you send none against a secured one where the agent holds
+`REXA_REDIS_PASSWORD`.
+
+Because the silence is the point, failure still needs somewhere to show up:
 `totals.live_publish_failures` on `/health` counts calls whose events never
 reached you. Non-zero while calls are running means wrong or unreachable Redis
 details — most often a missing password. Check it before concluding the feature

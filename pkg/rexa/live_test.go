@@ -140,3 +140,80 @@ func TestJoinDailyCarriesTheRoomBothWays(t *testing.T) {
 		t.Fatal("room_url missing from the nested payload")
 	}
 }
+
+// The dispatch says where the Redis is, never whether it wants a password. Both
+// wrong guesses produce a distinct error, and getting the correction backwards
+// loses a whole call's worth of events to a one-word configuration difference.
+
+type fakeErr string
+
+func (e fakeErr) Error() string { return string(e) }
+
+func TestAuthFlipCorrectsBothWrongGuesses(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		usingPwd bool
+		fallback string
+		wantPwd  string
+		wantFlip bool
+	}{
+		{
+			name:     "we sent a password to an open server",
+			err:      fakeErr("ERR Client sent AUTH, but no password is set"),
+			usingPwd: true,
+			fallback: "secret",
+			wantPwd:  "",
+			wantFlip: true,
+		},
+		{
+			name:     "we sent nothing to a secured server",
+			err:      fakeErr("NOAUTH Authentication required."),
+			usingPwd: false,
+			fallback: "secret",
+			wantPwd:  "secret",
+			wantFlip: true,
+		},
+		{
+			name:     "secured server but we have no password to offer",
+			err:      fakeErr("NOAUTH Authentication required."),
+			usingPwd: false,
+			fallback: "",
+			wantFlip: false,
+		},
+		{
+			name: "wrong password is not an auth-mode mistake",
+			// Dropping the credential cannot fix this, and retrying
+			// unauthenticated against a secured server just fails twice.
+			err:      fakeErr("WRONGPASS invalid username-password pair"),
+			usingPwd: true,
+			fallback: "secret",
+			wantFlip: false,
+		},
+		{
+			name:     "an unreachable host is not an auth problem",
+			err:      fakeErr("dial tcp 10.0.0.1:6379: i/o timeout"),
+			usingPwd: false,
+			fallback: "secret",
+			wantFlip: false,
+		},
+		{
+			name:     "no error, nothing to correct",
+			err:      nil,
+			usingPwd: true,
+			fallback: "secret",
+			wantFlip: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pwd, flip := authFlip(tc.err, tc.usingPwd, tc.fallback)
+			if flip != tc.wantFlip {
+				t.Fatalf("flip = %v, want %v", flip, tc.wantFlip)
+			}
+			if flip && pwd != tc.wantPwd {
+				t.Fatalf("retry password = %q, want %q", pwd, tc.wantPwd)
+			}
+		})
+	}
+}
