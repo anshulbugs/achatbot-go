@@ -305,6 +305,7 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	p.platform.live.Event(rexa.EventRinging, nil)
 	calls.put(callControlID, p)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
+	log.Printf("rexa: session=%s dispatch carried: %s", req.SessionID, dispatchFeatures(req, p))
 	return rexa.DispatchResponse{Status: "accepted", AgentSessionID: callControlID}, nil
 }
 
@@ -654,4 +655,54 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// dispatchFeatures summarises which optional contract fields this dispatch
+// actually carried, for one line in the log at dial time.
+//
+// WHY. Every optional field on the dispatch degrades silently by design: no
+// voicemail_message means the agent hangs up on a machine, no sentiment webhook
+// means no classification, no redis means no live events and no listen-in room.
+// Each of those is correct behaviour for a tenant who did not ask for the
+// feature, and indistinguishable from a bug for one who did — three of them
+// were found the same way, by running a test call and noticing the absence of
+// something afterwards.
+//
+// Printed at dial rather than inferred from what happened later, so "did the
+// platform send it?" is answered by the log instead of by reasoning backwards
+// from which announcements got pre-rendered.
+func dispatchFeatures(req rexa.PhoneDispatchRequest, p *callParams) string {
+	parts := []string{"amd=" + amdModeFor(p)}
+
+	switch {
+	case req.VoicemailMessage != "":
+		parts = append(parts, "voicemail_message=dispatch")
+	case p.VoicemailMessage != "":
+		parts = append(parts, "voicemail_message=server-default")
+	default:
+		parts = append(parts, "voicemail_message=NONE(will hang up on a machine)")
+	}
+
+	switch {
+	case p.platform.sentimentWebhook != "":
+		parts = append(parts, "sentiment=on")
+	case req.SentimentAnalysis:
+		// Asked for, with nowhere to send it. Worth calling out separately from
+		// "off": this one is a platform-side mistake, not a choice.
+		parts = append(parts, "sentiment=REQUESTED-BUT-NO-WEBHOOK")
+	default:
+		parts = append(parts, "sentiment=off")
+	}
+
+	if req.TransferNumber != "" {
+		parts = append(parts, "transfer=on")
+	} else {
+		parts = append(parts, "transfer=off")
+	}
+	if req.Redis().Configured() {
+		parts = append(parts, "live_events=on")
+	} else {
+		parts = append(parts, "live_events=off")
+	}
+	return strings.Join(parts, " ")
 }
