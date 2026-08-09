@@ -482,8 +482,10 @@ Three behaviours worth knowing:
   delivery that finally succeeds twelve minutes later has failed at the only
   thing it was for.
 
-`daily_room_url` is absent until the WebRTC path exists (§8). Treat it as
-optional rather than assuming every live call has a join link.
+`daily_room_url` is present when the dispatch carried Redis details, and is the
+same live-listening link as the `join_daily` event in §7a — so an operator
+alerted with "the caller wants a human" is one click from hearing them. Absent
+otherwise. Treat it as optional rather than assuming every call has one.
 
 ### Transfer initiated
 
@@ -544,6 +546,11 @@ actually is, and a caller is misled whenever the two disagree.
 { "error": { "code": "provider_unavailable",
              "message": "WebRTC rooms are not yet available on this agent" } }
 ```
+
+**This is about browser-originated calls, not live listening.** Daily rooms DO
+exist for watched calls — §7a — where a phone leg is bridged into a room over
+SIP so an operator can listen. What is missing is the reverse: a dispatch whose
+*caller* is a browser rather than a phone.
 
 The planned design is a Daily room joined over SIP, with the carrier bridging
 the leg into the existing media path. It fails loudly rather than returning a
@@ -643,7 +650,27 @@ REXA_OUTBOUND_HMAC_SECRET=...   # required — platform signs dispatches with th
 REXA_INBOUND_HMAC_SECRET=...    # required — agent signs callbacks with this
 TELNYX_PUBLIC_URL=https://...   # required — where the CARRIER reaches us
 REXA_VOICE_MAP=leah=3,marcus=16 # optional — platform voice id → kokoro speaker
+DAILY_API_KEY=...               # optional — enables live-listening rooms (§7a)
 ```
+
+`DAILY_API_KEY` is ours, not the tenant's: it is our Daily account being billed,
+which is why it is agent configuration rather than a dispatch field. Without it
+no room is ever created and `join_daily` is never published; everything else is
+unaffected.
+
+Mid-call sentiment, in `config.yaml`:
+
+```yaml
+server:
+  sentiment_base_url: "http://127.0.0.1:11434/v1"   # empty disables it
+  sentiment_model: "qwen3:0.6b"
+```
+
+Point this at a SMALL model on its own endpoint, never at the conversation LLM.
+First-turn latency on that model is what decides how many calls the fleet can
+carry (§5), and classifying on it spends the exact resource capacity is measured
+in. Empty `sentiment_base_url` disables classification regardless of what a
+dispatch asks for.
 
 Both secrets are required together. With only one, the agent would either
 verify dispatches but never report, or report but accept unauthenticated
@@ -784,8 +811,16 @@ no longer serve well.
 7. If using transfer: dispatch with `transfer_number` set, ask the agent for a
    human, and confirm `transfer_initiated` arrives and the leg connects. Note
    the event fires on *attempt*, not success.
-8. Apply §9.1 and §9.2 before any volume test — first-turn latency measured
-   3x worse without them, and they cost the agent side nothing.
+8. If using recording: confirm `recording_saved` arrives after the end-of-call
+   report, and re-host `recording_urls` rather than storing them — Telnyx's
+   links are pre-signed and expire in ten minutes.
+9. If using sentiment: **stop stripping `sentiment_analysis` and
+   `sentiment_webhook`** in the payload builder, then confirm an event arrives
+   at the sentiment webhook mid-call when a caller asks for a human.
+10. If using live state: **stop stripping `redis_*`**, then confirm events
+    appear on the list and that `join_daily` carries a working room link.
+11. Apply §9.1 and §9.2 before any volume test — first-turn latency measured
+    3x worse without them, and they cost the agent side nothing.
 
 Watch `/dashboard` during the first campaign and record `measured.answer_rate`
 and `measured.ring_ms_p95` — those are the numbers that decide whether
