@@ -1,7 +1,7 @@
-# Next: latency-driven backpressure
+# Latency-driven backpressure — built, not yet calibrated
 
-Spec for the next piece of work. Written down because the reasoning behind it
-came from measurements that are easy to lose.
+Was a spec; now a status page. The mechanism is in and tested. The thresholds
+are still estimates, and that is the one thing left.
 
 ## The requirement, stated by the operator
 
@@ -10,95 +10,85 @@ came from measurements that are easy to lose.
 > **immediately** — even if that means the claimed concurrency drops from 61 to
 > 6.
 
-Read that as a priority order, because it inverts the usual instinct:
+Read as a priority order, because it inverts the usual instinct:
 
 **Serving 6 calls well beats accepting 61 and serving all of them badly.**
 
-The ceiling is not a promise. `max_gpu_calls: 61` was measured with ~3k prompts
-and good prefix sharing. When the workload is heavier than the workload it was
-measured under, the honest response is to advertise less capacity, not to keep
-accepting on the strength of a number that no longer applies.
+`max_gpu_calls: 61` was measured with ~3k prompts and good prefix sharing. When
+the workload is heavier than the one it was measured under, the honest response
+is to advertise less capacity — not to keep accepting on the strength of a
+number that no longer applies.
 
-## Why the existing signal is not enough
+## What was built
 
-The tier mechanism is already wired: any tier reporting `saturated` flips
-`accepting: false` and makes `/connection` return `at_capacity`. LLM, ASR and
-TTS all feed it through the same transport timing, so all three are covered.
+**First-turn TTFT is its own signal** (`pkg/rexa/metrics.go`). One sample per
+call: the wait between the caller finishing their first sentence and the first
+word of the reply. It gates `accepting` independently of every count, so it can
+refuse at 10 calls against a ceiling of 61.
 
-Two gaps:
+Why it needed separating, measured at 60 concurrent calls with 3k prompts:
 
-**1. First-turn latency is pooled with warm turns, which hides it.**
+| | one campaign | a different prompt per call |
+|---|---|---|
+| p95 across all turns | 1725 ms | 6252 ms |
+| **p95 of turn 1** | **1853 ms** | **9903 ms** |
+| p95 of turn 8 | 727 ms | 4035 ms |
 
-Measured at 60 concurrent calls, 3k prompts, one campaign:
+Turn 1 is the only turn that pays a cold prefill. Pooled with cheap warm turns
+it lands at 6252 ms — under any threshold that would have fired.
 
-| | value |
-|---|---|
-| overall TTFT p95 | 1725ms |
-| turn 1 p95 | 1853ms |
-| turn 8 p95 | 727ms |
+**It trips on one sample, not a percentile.** Ten unrelated prompts produce ten
+samples in total; waiting for a comfortable count means answering "send more"
+twice before reacting. `first_turn_critical_ms` trips on a single first turn.
 
-And the same 60 calls with a different prompt each:
+**It is a duty cycle, not a latch.** The window is fed only by new calls, so a
+gate that stayed shut until the numbers recovered would cut off the samples that
+could prove recovery and never reopen. It shuts for the cooldown, reopens,
+re-measures on fresh calls, trips again if the workload is still too heavy.
+Under sustained overload that settles into admitting a trickle — which is the
+behaviour asked for.
 
-| | value |
-|---|---|
-| overall TTFT p95 | 6252ms |
-| **turn 1 p95** | **9903ms** |
-| turn 8 p95 | 4035ms |
+**The LLM tier had no samples at all.** It was never wired to the transport, and
+would have been wrong if it had been: with SSE the HTTP round trip returns when
+response headers arrive, before the model has produced anything, so a
+transport-timed LLM tier reports single-digit milliseconds while the caller
+waits ten seconds. It is now fed real per-turn TTFT and its thresholds moved to
+match what is actually being measured.
 
-Turn 1 is where KV pressure shows first and worst — it is the only turn that
-pays a cold prefill. Pooling it with cheap warm turns drags the number below
-any threshold that would have fired. **First-turn TTFT has to be its own
-tracked series**, and it is the one that should drive `accepting`.
+**SGLang's own metrics are polled** in the background (`pkg/rexa/sglang.go`) and
+shown on `/health` and `/dashboard`. Reported, never acted on — no calibrated
+crossover exists, and gating on an uncalibrated signal refuses work for a
+reading nobody has correlated with a bad call. They answer *why* latency moved:
+falling cache hit rate means prompts stopped sharing prefixes, growing queue
+means there are simply too many. Needs `--enable-metrics` on SGLang; without it
+`/metrics` 404s while `/v1/models` still answers 200, and the panel reads "not
+polling".
 
-It is also the turn that matters to the caller: the pause after they say
-"hello". Ten seconds of silence there is where people hang up.
+ASR and TTS need no new plumbing. Their limiting parameter is throughput
+(Parakeet 26-36 req/s at 4 workers, Kokoro 25.7 at 8) and the symptom of
+exceeding it is queueing, which the existing transport timing already captures.
+They need calibrated thresholds, same as everything else here.
 
-**2. The thresholds are estimates, not measurements.**
+## What is left: calibration
 
-`DefaultThresholds` in `pkg/rexa/metrics.go` — ASR 400/900ms, LLM 900/2000ms,
-TTS 700/1600ms — were derived from a turn budget, not measured. They could fire
-early or never. They need a real ramp before they are trusted to turn traffic
-away.
+`first_turn_saturated_ms: 4000`, `first_turn_critical_ms: 8000` and the tier
+thresholds are derived from two measured points — 2471 ms good, 9903 ms bad —
+not from a ramp across the crossover. Too high and the gate fires after callers
+have already been dropped; too low and it turns away work the stack can serve.
 
-## What to build
+Ramp with the tool that reproduces the bad case on demand:
 
-**a. Track first-turn TTFT separately.** A distinct window, fed only by the
-first LLM request of each call. Surface it on `/health` and `/dashboard`
-alongside the tier states.
+```
+python3 deploy/loadtest/turnbench.py <port> <calls> 8 12.4 3000 distinct
+```
 
-**b. Drive `accepting` from it.** Above a configured threshold, stop accepting
-regardless of how few calls are in flight — that is exactly the 61-to-6 case.
-Keep the existing count-based and tier-based conditions; this is another
-independent reason to say no.
-
-**c. Poll SGLang's own metrics in the background.** Cache hit rate and
-running/waiting queue depth are a direct read of KV pressure rather than an
-inference from latency. Must be a background ticker with a cached value —
-`/health` is probed every 5s fleet-wide and must never fan out to downstream
-services, or a slow LLM takes the agent out of rotation instead of merely
-slowing calls.
-
-**d. Same treatment for ASR and TTS.** Their limiting parameter is throughput
-(measured: Parakeet 26-36 req/s at 4 uvicorn workers, Kokoro 25.7 at 8), and
-the symptom of exceeding it is queueing, which the existing transport timing
-already captures. They need calibrated thresholds, not new plumbing.
-
-**e. Recovery must work.** Whatever turns `accepting` false has to turn it back
-on when load drops, without oscillating. The 256-sample window damps this
-today; a first-turn window will be much smaller (one sample per call) and needs
-its own thought — likely a minimum sample count plus hysteresis.
-
-## Calibration
-
-The thresholds cannot be finished from a desk. Ramp with
-`deploy/loadtest/turnbench.py` in `distinct` mode, which reproduces the bad
-case on demand, and find where first-turn TTFT crosses from acceptable to not.
-Somewhere around 2-3s is the plausible starting point — 2471ms was measured as
-the good case and 9903ms as the bad one — but that is a guess until measured.
+Raise `<calls>` until first-turn p95 crosses from acceptable to not, and set the
+thresholds from where that happens rather than from where they are now.
 
 ## Related
 
-- `docs/CALL-AGENT-CONTRACT.md` §9 — the two platform-side asks (prompt layout,
-  campaign batching) that prevent this situation arising in the first place.
-  Backpressure is the safety net for when they are not honoured.
-- `deploy/loadtest/turnbench.py` — produced every number above.
+- `docs/CALL-AGENT-CONTRACT.md` §5 — what the platform sees and must do about it.
+- §9 — the two dispatch asks (per-contact block last, batch per campaign) that
+  stop this arising at all. This gate is the safety net for when they are not
+  honoured; `first_turn.trips` climbing while calls flow is the signal that they
+  are not.
