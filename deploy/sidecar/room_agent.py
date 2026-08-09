@@ -73,10 +73,14 @@ READ_FRAMES = DAILY_RATE // 50
 FRAME_MS = 20
 FRAME_BYTES = DAILY_RATE * FRAME_MS // 1000 * 2
 
-# About four seconds of speech. Enough to absorb a pipeline producing faster
-# than real time, small enough that overflowing loses a sentence rather than a
-# conversation.
-MAX_BUFFER_BYTES = DAILY_RATE * 2 * 4
+# Sixty seconds of speech, and it has to be this large.
+#
+# Four seconds looked prudent and silently truncated the greeting: a real
+# dispatch had a 14.8-SECOND hello, sent in one go, and the buffer kept only
+# the newest four — so the caller heard the opening cut off and then a long
+# pause. Memory is not the constraint here (5.7MB), losing what the agent said
+# is.
+MAX_BUFFER_BYTES = DAILY_RATE * 2 * 60
 
 
 def resample(pcm: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -272,22 +276,23 @@ class RoomAgent:
         while not self.stopping.is_set():
             frame = silence
             speaking = False
-            # Nothing plays for a moment after a barge-in: the tail of the
-            # interrupted turn is still arriving and the caller has just said
-            # they do not want it.
-            if time.monotonic() - self.interrupted_at >= INTERRUPT_FENCE:
-                with self.buflock:
-                    if len(self.playbuf) >= FRAME_BYTES:
-                        frame = bytes(self.playbuf[:FRAME_BYTES])
-                        del self.playbuf[:FRAME_BYTES]
-                        speaking = True
-                    elif self.playbuf:
-                        # A partial frame at the end of a reply: pad it rather
-                        # than hold it back for audio that is not coming.
-                        tail = bytes(self.playbuf)
-                        del self.playbuf[:]
-                        frame = tail + silence[len(tail):]
-                        speaking = True
+            # No time fence after an interrupt. Clearing the buffer on the
+            # interrupt message already removes everything queued from the old
+            # turn; holding the writer silent for a further 400ms on top only
+            # silences the START of the reply that follows, which is what a
+            # browser call sounded like on every single sentence.
+            with self.buflock:
+                if len(self.playbuf) >= FRAME_BYTES:
+                    frame = bytes(self.playbuf[:FRAME_BYTES])
+                    del self.playbuf[:FRAME_BYTES]
+                    speaking = True
+                elif self.playbuf:
+                    # A partial frame at the end of a reply: pad it rather than
+                    # hold it back for audio that is not coming.
+                    tail = bytes(self.playbuf)
+                    del self.playbuf[:]
+                    frame = tail + silence[len(tail):]
+                    speaking = True
             if speaking:
                 # Our own voice is audible for this frame's duration, which is
                 # what the echo gate keys off.

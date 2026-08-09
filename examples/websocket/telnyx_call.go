@@ -1043,6 +1043,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	// Platform calls record a transcript; demo calls do not.
 	var chatObserver func(map[string]any)
 	if p.platform != nil && p.platform.transcript != nil {
+		// The greeting was spoken straight from TTS and never reached the
+		// model, so nothing else will ever put it in the transcript.
+		p.platform.transcript.SeedGreeting(p.Hello)
 		chatObserver = p.platform.transcript.ObserveChatHistory()
 	}
 	// Sentiment rides the same observer: it needs exactly what the transcript

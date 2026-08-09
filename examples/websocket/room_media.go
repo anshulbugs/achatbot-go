@@ -43,32 +43,23 @@ import (
 // that a phone line needs would only cut the caller off mid-sentence here.
 type roomSerializer struct {
 	mu sync.Mutex
-	// mutedUntil is a post-interruption fence, copied from the phone path
-	// because the failure is identical and this path had none.
-	//
-	// Telling the far end to drop what it has buffered flushes only what it
-	// ALREADY holds. Cancellation upstream is asynchronous, so TTS frames for
-	// the turn the caller just interrupted keep arriving here for a while
-	// afterwards — and without a fence they are dutifully forwarded and played,
-	// so the caller interrupts and then hears the rest of the sentence they cut
-	// off. That is exactly what a browser call did.
-	//
-	// A deadline, never a flag. Gating on some "new turn started" frame is what
-	// a first attempt at the phone path did, and it silenced calls completely:
-	// no such frame is emitted in this pipeline, so the mute latched on the
-	// first interruption and never lifted. A deadline degrades safely.
-	mutedUntil time.Time
 
-	// firstAudioAt measures reply latency: caller stops, agent speaks. Without
-	// it "the call felt laggy" has no number attached to it.
+	// NO OUTBOUND MUTE HERE, deliberately — this is the second attempt.
+	//
+	// The phone path drops outbound audio for 400ms after an interruption, to
+	// swallow the interrupted turn's tail. Copying that here clipped the
+	// opening of EVERY reply instead: interruption frames fire as the caller
+	// stops speaking, which is a few hundred milliseconds before the agent
+	// starts, so the fence was still closed when the new turn's first audio
+	// arrived. The phone path gets away with it because its reply latency is
+	// ~950ms; this path is faster, and the fence ate the difference.
+	//
+	// The tail is dropped where it can be done precisely instead: the sidecar
+	// clears its own playback buffer on the interrupt message, which is the
+	// only place that knows what has been queued but not yet spoken.
 	lastInterrupt time.Time
 	awaitingReply bool
 }
-
-// roomInterruptMute matches the phone path's 400ms. Measured reply latency is
-// ~950ms at best, so a genuinely new turn's audio lands well after this window
-// and is never clipped.
-const roomInterruptMute = 400 * time.Millisecond
 
 // SupportsInterruption reports that barge-in is encoded on the wire, so the
 // transport hands us the frame instead of falling back to a client control
@@ -101,20 +92,15 @@ func (s *roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
 	switch f := frame.(type) {
 	case *frames.AudioRawFrame:
 		s.mu.Lock()
-		muted := time.Now().Before(s.mutedUntil)
-		if !muted && s.awaitingReply {
+		if s.awaitingReply {
 			s.awaitingReply = false
 			log.Printf("room: reply latency ~%dms",
 				time.Since(s.lastInterrupt).Milliseconds())
 		}
 		s.mu.Unlock()
-		if muted {
-			return nil, nil // tail of the turn the caller just interrupted
-		}
 		return f.Audio, nil
 	case *frames.StartInterruptionFrame:
 		s.mu.Lock()
-		s.mutedUntil = time.Now().Add(roomInterruptMute)
 		s.lastInterrupt = time.Now()
 		s.awaitingReply = true
 		s.mu.Unlock()
@@ -226,6 +212,7 @@ func handleRoomMedia(w http.ResponseWriter, r *http.Request) {
 
 	var chatObserver func(map[string]any)
 	if p.platform != nil && p.platform.transcript != nil {
+		p.platform.transcript.SeedGreeting(p.Hello)
 		chatObserver = p.platform.transcript.ObserveChatHistory()
 	}
 	if obs := sentimentObserver(sessionID, p.platform); obs != nil {
