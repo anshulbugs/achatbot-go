@@ -57,6 +57,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --mem-fraction-static 0.85 \
     --cuda-graph-max-bs 256 \
     --schedule-policy lpm \
+    --enable-metrics \
     --tool-call-parser gemma4
 
 echo "$NAME started (GPU $LLM_GPU, host port $PORT, model $LLM_MODEL)."
@@ -73,6 +74,13 @@ echo
 # The parser must match the model family -- `auto` detects from the chat
 # template, `gemma4` is explicit and is what this deployment runs. Change the
 # model and this flag has to change with it.
+#
+# --enable-metrics exposes /metrics (prefix-cache hit rate, queue depth, KV pool
+# usage). The agent polls it for the dashboard; without the flag the endpoint
+# 404s while /v1/models keeps answering 200, so the panel simply reads "not
+# polling" and nothing else breaks. Nothing gates traffic on these numbers --
+# they are there to say WHY latency moved: a falling hit rate means prompts have
+# stopped sharing prefixes, a growing queue means there are simply too many.
 echo "WARNING: do NOT lower --context-length below (system prompt + history + max_tokens)."
 echo "  SGLang rejects every oversized request with HTTP 400, the LLM GPU sits at 0%, and"
 echo "  calls stall at a flat ~7s. /v1/models still returns 200, so it looks healthy."
