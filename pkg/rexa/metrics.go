@@ -903,8 +903,12 @@ type HealthSnapshot struct {
 	Measured  MeasuredSnapshot        `json:"measured"`
 	Tiers     map[string]TierSnapshot `json:"tiers"`
 	FirstTurn FirstTurnSnapshot       `json:"first_turn"`
-	SGLang    SGLangSnapshot          `json:"sglang"`
-	Totals    TotalsSnapshot          `json:"totals"`
+	// Runtime is the process's own health. Present so a leak is visible from
+	// the same endpoint everything else is watched from, rather than needing a
+	// profiler attached to a process carrying live calls.
+	Runtime RuntimeSnapshot `json:"runtime"`
+	SGLang  SGLangSnapshot  `json:"sglang"`
+	Totals  TotalsSnapshot  `json:"totals"`
 }
 
 // Snapshot builds the current view.
@@ -992,6 +996,7 @@ func (m *Metrics) Snapshot() HealthSnapshot {
 		},
 		Tiers:     tiers,
 		FirstTurn: ft,
+		Runtime:   Runtime(),
 		SGLang:    sg,
 		Totals: TotalsSnapshot{
 			Calls: m.totalCalls, Voicemail: m.totalVoicemail,

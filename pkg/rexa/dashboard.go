@@ -166,6 +166,24 @@ const dashboardHTML = `<!doctype html>
   <tbody id="tiers"><tr><td colspan="4" class="sub">waiting…</td></tr></tbody>
 </table>
 
+<h2>Process — is it leaking?</h2>
+<table>
+  <tbody>
+    <tr><td>Goroutines <span class="sub">— should track live calls, not climb with total</span></td>
+        <td class="n" id="rt-gor">–</td></tr>
+    <tr><td>Go heap</td><td class="n" id="rt-heap">–</td></tr>
+    <tr><td>RSS <span class="sub">— includes ONNX; this is what gets OOM-killed</span></td>
+        <td class="n" id="rt-rss">–</td></tr>
+    <tr><td>Open file descriptors <span class="sub">— sockets leak before memory does</span></td>
+        <td class="n" id="rt-fds">–</td></tr>
+    <tr><td>Last GC pause</td><td class="n" id="rt-gc">–</td></tr>
+  </tbody>
+</table>
+<p class="sub">Read these against <b>total live</b> above. Goroutines rising while calls stay flat is
+  the earliest leak signal there is — every call starts several and every one must end with it.
+  RSS drifting away from heap is not Go memory: it is the speech runtimes, which grow on demand
+  and never shrink.</p>
+
 <h2>Since start</h2>
 <table>
   <tbody>
@@ -271,6 +289,13 @@ function render(d){
   $("t-calls").textContent = d.totals.calls;
   $("t-vm").textContent    = d.totals.voicemail;
   $("t-rej").textContent   = d.totals.rejected;
+  const rt = d.runtime || {};
+  $("rt-gor").textContent  = rt.goroutines ?? "–";
+  $("rt-heap").textContent = (rt.heap_mb ?? 0) + " MB";
+  $("rt-rss").textContent  = rt.rss_mb ? rt.rss_mb + " MB" : "–";
+  $("rt-fds").textContent  = rt.open_fds || "–";
+  $("rt-gc").textContent   = (rt.gc_pause_ms ?? 0).toFixed(1) + " ms";
+
   $("t-reap").textContent  = d.totals.reaped;
   // Publishing is fire-and-forget, so this counter is the only place the
   // failure surfaces. Colour it when non-zero: the symptom on the caller's
