@@ -476,6 +476,29 @@ func sidecarAgentWS() string {
 	return "ws://" + addr + "/room/media"
 }
 
+// reportDispatchFailure tells the platform a call never got off the ground.
+//
+// Without this the session sits in_progress until the platform's reconciler
+// marks it failed half an hour later, with no cause recorded.
+func (d *platformDispatcher) reportDispatchFailure(sessionID, tenantID, webhookURL, direction string) {
+	if rexaPoster == nil {
+		return
+	}
+	status, reason := rexa.Outcome{DispatchFailed: true, Direction: direction}.Report()
+	report := rexa.EndOfCallReport{
+		SessionID:  sessionID,
+		TenantID:   tenantID,
+		CallStatus: status,
+		EndReason:  reason,
+		EndedAt:    rexa.ISOTime(time.Now()),
+	}
+	go func() {
+		if err := rexaPoster.PostEndOfCall(context.Background(), webhookURL, report); err != nil {
+			log.Printf("rexa: dispatch-failure report FAILED for session=%s: %v", sessionID, err)
+		}
+	}()
+}
+
 // reportSessionFailed ends a browser session that never became a call.
 //
 // A room the browser never opened, or a carrier leg that would not connect,

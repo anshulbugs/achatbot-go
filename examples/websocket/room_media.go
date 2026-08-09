@@ -24,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -86,15 +87,25 @@ func (roomSerializer) Serialize(frame frames.Frame) ([]byte, error) {
 // The split matters: the sidecar decides what to do with a payload by frame
 // type alone, so a control message arriving as binary would be played as a
 // burst of noise.
-type roomConn struct{ *websocket.Conn }
+type roomConn struct {
+	*websocket.Conn
+	mu sync.Mutex
+}
 
-func (c *roomConn) ReadMessage() (int, []byte, error) { return c.Conn.ReadMessage() }
+func (c *roomConn) ReadMessage() (consts.MessageType, []byte, error) {
+	_, data, err := c.Conn.ReadMessage()
+	return consts.BinaryMessage, data, err
+}
 
-func (c *roomConn) WriteMessage(_ int, data []byte) error {
+func (c *roomConn) WriteMessage(_ consts.MessageType, data []byte) error {
 	kind := websocket.BinaryMessage
 	if isRoomControl(data) {
 		kind = websocket.TextMessage
 	}
+	// Gorilla forbids concurrent writers, and audio frames and interruption
+	// control messages come from different goroutines.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.Conn.WriteMessage(kind, data)
 }
 
