@@ -573,6 +573,43 @@ func resolvePrompt(base, replace, suffix string) string {
 	return base
 }
 
+// callStyleRules are appended to every system prompt, on every call.
+//
+// These are TTS rules, not personality. The model is writing something a
+// speech engine will read aloud, and the failure modes are specific and
+// consistent enough to be worth stating on every call rather than hoping each
+// tenant's prompt remembers them:
+//
+//   - Written filler ("hm", "uh") is not the natural hesitation it looks like
+//     on the page. TTS pronounces it as a word, which lands as a glitch rather
+//     than as thinking.
+//   - Digit strings read as quantities are unusable on a call. A phone number
+//     spoken as "three hundred twenty one million..." cannot be written down,
+//     and the caller has no way to ask for it again except to ask for all of it.
+//
+// Appended LAST, after the tenant's own prompt. Later instructions carry more
+// weight with the model, and these have to survive a 3000-token prompt that
+// never mentions them. The cost is that they sit after the per-contact block
+// and are re-prefilled per call — about eighty tokens, which is nothing next to
+// what a cold campaign prefix costs.
+const callStyleRules = `
+Delivery rules for this call, which override any conflicting instruction above:
+- You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
+- Do not write filler sounds. Never write "hm", "hmm", "uh", "um", "er", "ah" or similar. They are pronounced as words and sound like a fault, not like thinking. If you need a pause, use a comma or a short sentence.
+- Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
+
+// withCallStyle appends the delivery rules to a system prompt.
+//
+// Applies to every session — phone, browser room and the demo page alike.
+// A rule that held on one path and not another would show up as "the agent
+// says 'um' only on browser calls", which is a miserable thing to track down.
+func withCallStyle(prompt string) string {
+	if prompt == "" {
+		return strings.TrimSpace(callStyleRules)
+	}
+	return prompt + "\n" + callStyleRules
+}
+
 // firstChars returns up to n runes of s on a single line, for log lines that
 // need to identify a prompt without dumping the whole thing. Rune-based so a
 // cut never lands mid-character and corrupts the log.
@@ -759,7 +796,9 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	if sc.call != nil && sc.callID != "" {
 		registerTransferTool(session, sc.call, sc.callID)
 	}
-	session.InitChatMessage(map[string]any{"role": "system", "content": sc.systemPrompt})
+	session.InitChatMessage(map[string]any{
+		"role": "system", "content": withCallStyle(sc.systemPrompt),
+	})
 	// Log which prompt this session actually got. Answering "did my prompt
 	// apply?" previously meant reading code and guessing, because an override
 	// that was rejected looked identical to one that was never sent.
