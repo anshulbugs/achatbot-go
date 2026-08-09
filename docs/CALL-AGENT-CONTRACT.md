@@ -4,8 +4,9 @@ What this agent exposes, what it sends back, and how the platform should drive
 it. Written from the implementation, not from a spec — every field and status
 below is what the code actually does.
 
-**Version:** v1.1 · **Status:** phone (outbound + inbound) and call transfer
-implemented · WebRTC **not** implemented
+**Version:** v1.2 · **Status:** phone (outbound + inbound), call transfer,
+recording callbacks, mid-call sentiment and Redis live state implemented ·
+WebRTC **not** implemented
 · **Agent side:** `pkg/rexa/` in `achatbot-go`
 
 ---
@@ -196,7 +197,9 @@ the field named in the message.
 | `language` | ISO 639-1 two-letter (`"en"`), not BCP-47. |
 | `voicemail_message` | Spoken after the beep when answering-machine detection reports a machine. Pre-rendered at dispatch, so it costs no GPU at call time. |
 | `transfer_number` | Optional. When set, the model is given a `call_transfer` tool and will transfer on an explicit request for a human. Omit it and the tool is not registered at all, so the model cannot promise what it cannot do. See §6. |
-| `webhook_url` | Where the agent POSTs the end-of-call report. |
+| `webhook_url` | Where the agent POSTs the end-of-call report, and the recording event. |
+| `sentiment_analysis` + `sentiment_webhook` | Both required together to enable mid-call sentiment alerts. See §6. **Your payload builder currently strips these** — they are marked deferred in `schemas.ts`. The agent side is built and waiting. |
+| `redis_host` / `redis_port` / `redis_db` / `redis_password` | Optional live-state publishing. See §7a. **Also currently stripped** by the builder. |
 
 ### Response — 200
 
@@ -420,6 +423,68 @@ Timestamps are ISO 8601 UTC with a literal `Z` and millisecond precision.
 Expected response: `200 {"ok": true, ...}`. The platform dedupes on
 `session_id`, so a retry is safe.
 
+### Recording saved
+
+```json
+{
+  "type": "recording_saved",
+  "session_id": "…", "tenant_id": "…",
+  "call_control_id": "v3:abc123",
+  "recording_id": "e565673e-216d-45a7-a345-97a54308b5bd",
+  "status": "completed",
+  "channels": "dual",
+  "recording_started_at": "2026-08-09T08:03:22.793076Z",
+  "recording_ended_at":   "2026-08-09T08:04:45.130756Z",
+  "recording_urls": { "wav": "s3://…", "mp3": "https://…" },
+  "public_recording_urls": {}
+}
+```
+
+Sent to the same `webhook_url` as the end-of-call report, and **after** it —
+the carrier finalises a recording tens of seconds after the call ends, and
+holding the report back for it would delay every disposition you act on. Only
+sent when recording is enabled on the agent.
+
+`status` is `completed` or `failed`; we set it explicitly rather than leaving
+you to infer it from URL presence. `public_recording_urls` is empty until the
+agent mirrors recordings to its own storage — until then use `recording_urls`,
+and note that **Telnyx's links are pre-signed and expire in ten minutes**, so
+fetch and re-host rather than storing the URL.
+
+### Sentiment change
+
+POSTed to **`sentiment_webhook`** — a different URL from `webhook_url` — the
+moment the classifier's answer changes.
+
+```json
+{
+  "session_id": "…", "tenant_id": "…",
+  "call_status": "in_progress",
+  "CCID": "v3:abc123",
+  "sentiment_value": "wants_human"
+}
+```
+
+`sentiment_value` is one of `wants_human` · `highly_interested` ·
+`user_annoyed`. Enabled per call by sending **both** `sentiment_analysis: true`
+and `sentiment_webhook` — either alone does nothing, deliberately: the flag
+without a destination means paying for classification and discarding it.
+
+Three behaviours worth knowing:
+
+- **Changes only.** A caller who is annoyed stays annoyed; re-alerting every
+  turn is how an alert becomes noise. You get one event per transition.
+- **It never reverts.** There is no "no longer annoyed" event. That is not
+  something anyone acts on, and sending it would clear an operator's alert
+  while the call is still going badly.
+- **Short retry ladder — 1s, 3s, then we stop.** Unlike every other callback.
+  This event exists so a human can act while the caller is on the line; a
+  delivery that finally succeeds twelve minutes later has failed at the only
+  thing it was for.
+
+`daily_room_url` is absent until the WebRTC path exists (§8). Treat it as
+optional rather than assuming every live call has a join link.
+
 ### Transfer initiated
 
 ```json
@@ -487,11 +552,69 @@ and is indistinguishable from a broken agent.
 
 ### Everything else
 
-Also absent, all optional on the platform side: `functions[]` (tool calling),
-`recording` config, `opt_out_detection`, `metadata` passthrough, sentiment
-webhooks, `disposition_code`, `question_answers[]`, `recording_saved`. Unlike
-transfer, none of these are advertised to the model, so omitting them is
-invisible to callers.
+Absent, and none of it advertised to the model, so omitting it is invisible to
+callers: `functions[]` (tool calling), `recording` config, `opt_out_detection`,
+`metadata` passthrough, `disposition_code`, `question_answers[]`.
+
+---
+
+## 7a. Live call state in Redis
+
+Optional, and unrelated to the webhooks. Send `redis_host` / `redis_port` /
+`redis_db` (and `redis_password` if the instance needs one) on a dispatch and
+the agent publishes that call's state to your Redis as it happens.
+
+**Why this exists alongside the webhooks.** A webhook is an *event* you must not
+miss: signed, retried for twelve minutes, worth reading after the fact. That
+machinery is exactly wrong for a wallboard, which wants the current state of
+forty calls right now and does not care what happened at 09:14. Redis answers
+that in one read. Neither replaces the other.
+
+### Keys
+
+| Key | Type | Contents |
+|---|---|---|
+| `rexa:call:{session_id}` | HASH | current state, TTL 1 hour, refreshed on every update |
+| `rexa:call:{session_id}:events` | pub/sub channel | the same state as JSON, on every change |
+| `rexa:calls:live` | SET | session ids currently live |
+
+To show everything happening now, read the set then the hashes. To react as it
+happens, subscribe to `rexa:call:*:events`. Neither needs to poll the agent.
+
+### Fields
+
+```json
+{
+  "session_id": "…", "tenant_id": "…",
+  "status": "in_progress",
+  "CCID": "v3:abc123",
+  "join_url": "",
+  "sentiment": "wants_human",
+  "to_number": "+15557654321", "from_number": "+15551234567",
+  "started_at": "2026-08-09T08:39:50.123Z",
+  "updated_at": "2026-08-09T08:40:02.456Z"
+}
+```
+
+`status` moves `dialing → ringing → in_progress → ended`, with `voicemail` and
+`transferred` as alternative terminal-ish states. Inbound calls start at
+`in_progress` — there is no ring to observe.
+
+`sentiment` is present only when sentiment analysis is enabled for the call.
+Empty is not the same as neutral; it means nobody is classifying.
+
+`join_url` is **empty until the WebRTC path exists**. It is in the schema now so
+you can build against it, but treat it as optional.
+
+### Two guarantees
+
+**A dead Redis never affects a call.** This is a telemetry sink, not a
+dependency: every publish is fire-and-forget with a 500 ms timeout, and a
+failure is logged once per call rather than per turn.
+
+**Keys are left behind at `ended`, not deleted.** A watcher polling every few
+seconds would otherwise see live calls vanish with no final state. The TTL
+cleans them up.
 
 ---
 

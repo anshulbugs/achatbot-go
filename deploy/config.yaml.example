@@ -93,6 +93,16 @@ server:
   # prefix-cache hit rate and queue depth. Shown on /dashboard and /health;
   # nothing here refuses traffic. Empty disables it.
   sglang_metrics_urls: []
+  # Mid-call sentiment classification. Empty base_url disables it entirely,
+  # whatever a dispatch asks for.
+  #
+  # Point this at a SMALL model on its OWN endpoint, never at the conversation
+  # LLM. First-turn latency on that model is what decides how many calls the
+  # fleet can carry (see first_turn_* above), and classifying on it spends the
+  # exact resource capacity is measured in. A 0.6B model on Ollama costs
+  # nothing the caller waits for and nothing the capacity gate counts.
+  sentiment_base_url: ""          # e.g. "http://127.0.0.1:11434/v1"
+  sentiment_model: "qwen3:0.6b"
   # sglang_metrics_urls: ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]
   chat_history_size: 6       # turns of context kept per conversation
   allow_interruptions: true  # barge-in
