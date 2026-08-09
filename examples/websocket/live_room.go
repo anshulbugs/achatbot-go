@@ -232,3 +232,52 @@ func liveJoinURLFor(rc *rexaCall) string {
 	}
 	return rc.joinURL
 }
+
+// watchForListener bridges the call into its room the moment an operator
+// arrives, and gives up when the call ends.
+//
+// WHY POLL AT ALL. bridgeLiveRoom cannot simply run when the call is answered:
+// `allow_sip_only_in_room` is false on this Daily domain, so a SIP participant
+// that would be alone in the room is rejected with SIP 480 — a failure that
+// reads as a network fault rather than as the policy it is. The phone leg has
+// to arrive AFTER the human, so something has to notice the human arriving.
+// Daily can push that as a webhook, but registering one needs a stable callback
+// URL and ours is a tunnel that renames itself on every restart.
+//
+// The cost is one presence check per interval per watched call, and it stops at
+// the first listener or when the call leaves the registry — so a call nobody
+// opens pays for the length of the call and nothing after it.
+func watchForListener(id string, rc *rexaCall) {
+	if dailyClient == nil || rc == nil || rc.roomName == "" || rc.roomSIP == "" {
+		return
+	}
+	room, session := rc.roomName, rc.sessionID
+	go func() {
+		// Slow enough to be cheap across a full campaign, fast enough that an
+		// operator who clicks Join is not left in silence wondering whether it
+		// worked.
+		const interval = 5 * time.Second
+		ctx := context.Background()
+		for {
+			time.Sleep(interval)
+			// The call is the clock. When it is gone from the registry it has
+			// hung up, and there is nothing left to listen to.
+			if calls.get(id) == nil {
+				return
+			}
+			n, err := dailyClient.Presence(ctx, room)
+			if err != nil {
+				// Transient: keep watching. A presence check that fails once
+				// is not a reason to deny the operator the feature for the
+				// rest of the call.
+				continue
+			}
+			if n == 0 {
+				continue
+			}
+			log.Printf("rexa: session=%s listener joined room %s — bridging the call in", session, room)
+			bridgeLiveRoom(id, rc)
+			return
+		}
+	}()
+}

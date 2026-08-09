@@ -556,6 +556,15 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 			p.platform.live.Event(rexa.EventAnswered, map[string]any{
 				"to_number": p.To,
 			})
+			// Start watching for someone to open the listen-in room.
+			//
+			// bridgeLiveRoom existed, was documented, and was called from
+			// nowhere — so the room was created and published on every watched
+			// call and the phone leg was never put into it. An operator who
+			// clicked Join landed in an empty room, which is exactly what "the
+			// room was created but immediately dropped" looks like from their
+			// side.
+			watchForListener(id, p.platform)
 		}
 		if cfg.Server.RecordCalls {
 			go func() {
