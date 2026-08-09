@@ -40,8 +40,12 @@ type callParams struct {
 	// amdCh carries the answering-machine verdict (human/machine/not_sure) and
 	// beepCh the greeting-ended cue. Detection happens on the webhook goroutine
 	// while the audio is driven from the media handler, so they meet here.
-	amdCh    chan string
-	beepCh   chan string
+	amdCh  chan string
+	beepCh chan string
+	// amdSeen records that SOME detection verdict has already been delivered
+	// for this call, so a later event can fill in for a missing one without
+	// overriding one that actually arrived. Guarded by callRegistry.mu.
+	amdSeen  bool
 	VoiceID  int     `json:"voice"`
 	Speed    float32 `json:"speed"`
 	Volume   float32 `json:"volume"`
@@ -183,6 +187,9 @@ func (r *callRegistry) markAnswered(id string, at time.Time) {
 func (r *callRegistry) recordAMD(id, verdict string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil {
+		p.amdSeen = true
+	}
 	if p := r.m[id]; p != nil && p.platform != nil {
 		p.platform.amdVerdict = verdict
 		if isMachineVerdict(verdict) {
@@ -192,6 +199,15 @@ func (r *callRegistry) recordAMD(id, verdict string) {
 			p.platform.live.Event(rexa.EventMachineDetected, nil)
 		}
 	}
+}
+
+// hasAMDVerdict reports whether a detection verdict has already been recorded
+// for this call.
+func (r *callRegistry) hasAMDVerdict(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	return p != nil && p.amdSeen
 }
 
 // recordHangup stores the carrier's hangup cause, which distinguishes busy
@@ -564,6 +580,21 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// beep_detected is the real cue; "ended" (greeting_end mode) and
 		// "not_sure" (30s beep timeout) both mean it is safe to start talking.
 		calls.signalBeep(id, ev.Data.Payload.Result)
+		// This event is ALSO a machine verdict, and on this account it is the
+		// ONLY one. Telnyx documents greeting.ended as conditional on
+		// detection having already concluded "machine" -- it is never emitted
+		// for a human -- and documents detection.ended as arriving first. On
+		// our traffic the first half holds and the second does not: across
+		// every call placed so far there are 2 greeting.ended events and 0
+		// detection.ended. Waiting only for detection.ended therefore meant
+		// every answering machine was treated as a person and got a full
+		// pipeline talking to it until the call cap.
+		if !calls.hasAMDVerdict(id) {
+			log.Printf("telnyx amd: greeting.ended result=%q with no detection verdict on call=%s -- treating as machine",
+				ev.Data.Payload.Result, id)
+			calls.recordAMD(id, "machine")
+			calls.signalAMD(id, "machine")
+		}
 	case "call.recording.saved":
 		// Emitted separately from the end-of-call report, and deliberately
 		// after it: the carrier finalises a recording tens of seconds after the
@@ -890,6 +921,39 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 	return true
 }
 
+// watchLateAMD ends a call whose machine verdict arrives after the pipeline has
+// already started.
+//
+// The beep phase runs for as long as the machine's own greeting does, which can
+// outlast ours, so a verdict landing late is normal rather than exceptional. By
+// then the pipeline owns the media socket and leaving the voicemail message
+// would mean two writers on one connection — so this path hangs up without
+// leaving a message. That loses the message on a long voicemail greeting, and
+// it beats the alternative we actually observed: the agent holding a
+// conversation with an answering machine for five minutes, to the call cap.
+//
+// Bounded rather than open-ended. p.amdCh is never closed, so an unbounded
+// receive here would park one goroutine per human call for the life of the
+// process. Telnyx's own beep detection gives up at 30s; 60s covers it twice
+// over and then this returns.
+func watchLateAMD(id string, p *callParams) {
+	timer := time.NewTimer(60 * time.Second)
+	defer timer.Stop()
+	select {
+	case v := <-p.amdCh:
+		if !isMachineVerdict(v) {
+			return
+		}
+		log.Printf("telnyx amd: late machine verdict=%q on call=%s -- pipeline already running, hanging up without leaving a message", v, id)
+		calls.stopMediaFor(id)
+		calls.markAgentEnded(id)
+		if err := p.tc().Hangup(context.Background(), id); err != nil {
+			log.Printf("telnyx amd: late hangup failed on call=%s: %v", id, err)
+		}
+	case <-timer.C:
+	}
+}
+
 // runVoicemailCall handles a call that answered as a machine, without ever
 // acquiring a pipeline slot: stop the greeting, wait for the beep, play the
 // pre-rendered message, hang up.
@@ -1013,32 +1077,60 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			})
 			stop := make(chan struct{})
 			var stopOnce sync.Once
-			verdict := ""
+			// got re-publishes the verdict this goroutine consumes. Reading
+			// p.amdCh in two places and assigning across them is how the
+			// verdict used to be both raced on and swallowed.
+			got := make(chan string, 1)
 			go func() {
 				select {
-				case verdict = <-p.amdCh:
-					if isMachineVerdict(verdict) {
+				case v := <-p.amdCh:
+					got <- v
+					if isMachineVerdict(v) {
 						stopOnce.Do(func() { close(stop) }) // cut the greeting mid-word
 					}
 				case <-stop:
 				}
 			}()
 			ttsRate, _, _ := ttsSampleInfo()
+			spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(ttsRate)
 			announceStart := time.Now()
-			log.Printf("announce: playing greeting call=%s (%d bytes @%dHz)", id, len(pcm), ttsRate)
+			log.Printf("announce: playing greeting call=%s (%d bytes @%dHz, %.1fs audio)",
+				id, len(pcm), ttsRate, spoken.Seconds())
 			finished := playAnnouncement(tw, pcm, ttsRate, stop)
-			stopOnce.Do(func() { close(stop) })
 
-			// Do NOT block waiting for a verdict here. Detection resolves within
-			// a few seconds of answer, so on any greeting of normal length it has
-			// already arrived; waiting again at the end just adds dead air to
-			// every human call, and adds it unconditionally when detection is not
-			// firing at all. Silence by now means treat the callee as human and
-			// get the pipeline running immediately.
-			select {
-			case verdict = <-p.amdCh:
-			default:
+			// Wait out the greeting for a verdict.
+			//
+			// This used to be a non-blocking peek, on the reasoning that
+			// playAnnouncement had already spent the greeting's duration in
+			// real time and detection would have landed inside it. That was
+			// true when the greeting went out as a hundred paced messages.
+			// It stopped being true the moment the greeting became ONE
+			// message: playAnnouncement now returns in milliseconds while the
+			// carrier plays the audio for the next fifteen seconds, so the
+			// peek ran a few milliseconds after answer, always found nothing,
+			// and sent every answering machine down the human path.
+			//
+			// Waiting here costs the caller nothing -- they are listening to
+			// the greeting the whole time -- so the window is the audio's own
+			// duration, less a lead so the pipeline is warm when it ends.
+			const pipelineLead = 1500 * time.Millisecond
+			verdict := ""
+			if wait := spoken - time.Since(announceStart) - pipelineLead; finished && wait > 0 {
+				log.Printf("telnyx amd: waiting up to %s for a verdict while the greeting plays call=%s",
+					wait.Round(time.Millisecond), id)
+				timer := time.NewTimer(wait)
+				select {
+				case verdict = <-got:
+				case <-timer.C:
+				}
+				timer.Stop()
+			} else {
+				select {
+				case verdict = <-got:
+				default:
+				}
 			}
+			stopOnce.Do(func() { close(stop) })
 			if isMachineVerdict(verdict) {
 				log.Printf("telnyx amd: machine verdict=%q on call=%s (greeting cut=%t) -- no pipeline will be used", verdict, id, !finished)
 				runVoicemailCall(id, tw, ser, ttsRate, p, p.beepCh)
@@ -1050,7 +1142,6 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// first interruption frame would otherwise flush the unplayed tail
 			// of the greeting mid-sentence.
 			if finished {
-				spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(ttsRate)
 				if outstanding := spoken - time.Since(announceStart); outstanding > 0 {
 					ser.HoldInterrupts(outstanding)
 					log.Printf("announce: %s of greeting still buffered at Telnyx; holding interrupts",
@@ -1058,6 +1149,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			log.Printf("announce: greeting done call=%s (finished=%t verdict=%q) -> starting pipeline", id, finished, verdict)
+			go watchLateAMD(id, p)
 			// Human: the greeting has already played, so the session must not
 			// repeat it.
 			helloText = ""
