@@ -176,6 +176,20 @@ func amdConfigFor(amd string) map[string]any {
 	}
 	return map[string]any{
 		"total_analysis_time_millis": 10000,
+		// How long to keep listening for the beep after concluding "machine".
+		//
+		// THIS IS WHY A VOICEMAIL RECORDED SILENCE. The default is a few
+		// seconds: on a real call the verdict landed at 4s and the greeting
+		// event followed at 10s reporting no_beep_detected — Telnyx had given
+		// up while the machine was still reading its own greeting. The agent
+		// took that as its cue, played the message over the greeting, and hung
+		// up; the machine then beeped and recorded the silence that followed.
+		//
+		// 30s covers an ordinary outgoing greeting, so the beep is found and
+		// reported instead of timed out past. Costs nothing on a human call,
+		// where there is no greeting phase at all, and the voicemail path's own
+		// 35s wait still bounds the event never arriving.
+		"greeting_duration_millis": 30000,
 	}
 }
 

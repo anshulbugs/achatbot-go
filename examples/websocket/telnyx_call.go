@@ -1189,6 +1189,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		chatObserver = p.platform.transcript.ObserveChatHistory()
 		agentObserver = p.platform.transcript.ObserveAgentTurns()
 	}
+	if p.platform != nil {
+		agentObserver = chainAgentObservers(agentObserver, publishFirstAgentTurn(p.platform))
+	}
 	// Sentiment rides the same observer: it needs exactly what the transcript
 	// needs — every turn as it happens — and adding a second observation point
 	// in the pipeline would be a second thing to keep in sync.
@@ -1226,4 +1229,49 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 		audioOutFrameMS: 40,
 	})
 	log.Printf("telnyx media stream ended call=%s", id)
+}
+
+// publishFirstAgentTurn returns an observer that publishes one ai_speaking
+// event to the watcher's Redis, on the first thing the MODEL says.
+//
+// The first AGENT TURN, not the greeting. The greeting is pre-rendered audio
+// played before the pipeline exists and is identical on every call in a
+// campaign, so publishing it would tell a watcher only what they already know
+// from the campaign. The model's opening line is the first thing that is
+// specific to this conversation, and it is what makes a live row worth looking
+// at.
+//
+// Once per call, by design. See rexa.EventAISpeaking.
+func publishFirstAgentTurn(rc *rexaCall) func(string) {
+	if rc == nil {
+		return nil
+	}
+	var once sync.Once
+	return func(text string) {
+		if text == "" {
+			return
+		}
+		once.Do(func() {
+			// Their Console truncates the snippet to 240 characters, so
+			// sending more is bytes on the wire that nothing renders.
+			rc.live.Event(rexa.EventAISpeaking, map[string]any{
+				"text": firstChars(text, 240),
+			})
+		})
+	}
+}
+
+// chainAgentObservers runs two agent-turn observers as one, tolerating a nil
+// on either side so a caller can add one unconditionally.
+func chainAgentObservers(a, b func(string)) func(string) {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	}
+	return func(s string) {
+		a(s)
+		b(s)
+	}
 }

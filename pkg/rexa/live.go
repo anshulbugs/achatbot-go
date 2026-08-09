@@ -56,6 +56,17 @@ const (
 	EventTransferred     = "call_transferred"
 	EventEnded           = "call_ended"
 	EventFailed          = "call_failed"
+	// EventAISpeaking carries a `text` field into the consumer's live Console
+	// snippet. It recognises several spellings of this
+	// (ai_speaking / agent_speaking / tts_started / …); they are equivalent and
+	// none of them changes the call's status.
+	//
+	// Sent ONCE per call, on the first thing the model says. Per turn would be
+	// a Redis write for every reply on every call — real traffic at sixty
+	// concurrent — to keep re-writing a line nobody is watching most of the
+	// time. One event is what turns "this call is live" into "this call is
+	// live and here is what it opened with".
+	EventAISpeaking = "ai_speaking"
 )
 
 // liveKeyTTL bounds how long a call's event list survives.
