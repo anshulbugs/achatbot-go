@@ -185,11 +185,18 @@ func amdConfigFor(amd string) map[string]any {
 		// took that as its cue, played the message over the greeting, and hung
 		// up; the machine then beeped and recorded the silence that followed.
 		//
-		// 30s covers an ordinary outgoing greeting, so the beep is found and
-		// reported instead of timed out past. Costs nothing on a human call,
-		// where there is no greeting phase at all, and the voicemail path's own
-		// 35s wait still bounds the event never arriving.
-		"greeting_duration_millis": 30000,
+		// 10000 is the CEILING Telnyx allows: the documented range is
+		// (100, 10000) and anything above it fails the dial outright with
+		// "parameter is outside the valid range" — which is not a degraded
+		// voicemail, it is no call at all. 30000 was tried and did exactly
+		// that.
+		//
+		// So this is as much beep-detection as the carrier will sell us, and it
+		// is still short of a long outgoing greeting. A greeting that outlasts
+		// it reports no_beep_detected rather than beep_detected, and the
+		// voicemail path has to handle that case on its own rather than trust
+		// the cue. See runVoicemailCall.
+		"greeting_duration_millis": 10000,
 	}
 }
 
