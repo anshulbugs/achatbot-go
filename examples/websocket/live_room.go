@@ -240,13 +240,26 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			if listenOnly {
 				role = "monitor"
 			}
-			sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "", confName, role)
+			// Our own webhook URL on this leg, so its call.answered comes back
+			// here. Dialled without one, the leg's events go to whatever the
+			// Call Control Application is configured with and we never learn
+			// when it went live.
+			legHook := ""
+			if pub := rc.client.PublicURL(); pub != "" {
+				legHook = strings.TrimRight(pub, "/") + "/telnyx/webhook"
+			}
+			sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, legHook, "", confName, role)
 			if err != nil {
 				log.Printf("rexa: session=%s SIP dial to room failed (attempt %d): %v",
 					rc.sessionID, dial+1, err)
 				time.Sleep(time.Second)
 				continue
 			}
+			// Registered BEFORE the log line, because a leg on the same box can
+			// answer in well under the time it takes to format one.
+			answeredCh := watchLegAnswered(sipLeg)
+			defer forgetLeg(sipLeg)
+
 			mode := "barge (agent leaves)"
 			if listenOnly {
 				mode = "listen (monitor, agent stays)"
@@ -287,10 +300,25 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			// in the conference, not that Daily has answered it, and Daily
 			// takes a few seconds either way. A settle beats a probe that
 			// cannot observe what it is asking about.
-			const legSettle = 3500 * time.Millisecond
-			log.Printf("rexa: session=%s operator's leg is in the conference — agent stepping out in %s",
-				rc.sessionID, legSettle)
-			time.Sleep(legSettle)
+			// Wait for the carrier to say the leg ANSWERED, rather than
+			// guessing how long Daily needs.
+			//
+			// This was a flat 3.5s settle, and it was three and a half of the
+			// eight seconds an operator waited — all of it with the agent still
+			// on the call talking over the handover. The leg is dialled with
+			// our own webhook URL, so its call.answered comes back to us and
+			// says precisely when it went live.
+			select {
+			case <-answeredCh:
+				log.Printf("rexa: session=%s operator's leg answered after %s — agent stepping out",
+					rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond))
+			case <-time.After(8 * time.Second):
+				// Fall through rather than strand the operator: the leg is in
+				// the conference either way, and a late answer is better served
+				// by an agent that has already left than by one still talking.
+				log.Printf("rexa: session=%s no answer event for the operator's leg within 8s — stepping out anyway",
+					rc.sessionID)
+			}
 			if calls.get(id) == nil {
 				return
 			}
