@@ -160,6 +160,9 @@ func initRexaTelemetry() {
 	// publishing is fire-and-forget, so without a password the live event
 	// stream fails invisibly. A per-dispatch password always wins.
 	rexa.DefaultRedisPassword = os.Getenv("REXA_REDIS_PASSWORD")
+	// Let /health report the pre-rendered audio cache, the one structure that
+	// grows per CONTACT rather than per concurrent call.
+	rexa.AudioCacheStats = announcements.stats
 
 	// Poll the LLM server's own cache and queue metrics on a background clock.
 	// Never from the health handler: /health is probed every 5 s fleet-wide,

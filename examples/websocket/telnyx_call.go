@@ -931,12 +931,68 @@ func prerenderAnnouncements(p *callParams) {
 // per call burns a TTS pool slot to produce audio we already have. Rendering
 // once and replaying the bytes means a voicemail call never touches the GPU at
 // all, and a human call only pays for the conversation itself.
+// announceCacheMaxBytes bounds what the cache may hold.
+//
+// IT USED TO HOLD EVERYTHING, FOREVER. The design assumed one greeting per
+// campaign — the same words for every contact, rendered once. The platform
+// personalises them: "Hi Anshul, this is calling from the local dealership…"
+// is a different string for every person dialled, so every contact minted its
+// own key and pinned about half a megabyte of PCM for the life of the process.
+// A thousand-contact campaign is roughly half a gigabyte that never comes back,
+// and nothing ever evicted it.
+//
+// 256MB is generous next to the ~500KB a greeting costs — a campaign's worth of
+// distinct wordings still fits — while putting a ceiling on a process that runs
+// for days.
+const announceCacheMaxBytes = 256 << 20
+
 type announceCache struct {
 	mu sync.Mutex
 	m  map[string][]byte
+	// order is insertion order, used to evict oldest-first. A plain FIFO
+	// rather than an LRU: entries are per-contact and read once or twice
+	// within a single call, so recency carries almost no information here and
+	// a FIFO costs nothing to maintain.
+	order []string
+	bytes int
 }
 
 var announcements = &announceCache{m: map[string][]byte{}}
+
+// stats reports what the cache is holding, for /health. Growth that nobody can
+// see is growth nobody fixes.
+func (a *announceCache) stats() (entries, megabytes int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.m), a.bytes >> 20
+}
+
+// put stores rendered audio, evicting oldest-first to stay under the cap.
+func (a *announceCache) put(key string, pcm []byte) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, exists := a.m[key]; exists {
+		return
+	}
+	a.m[key] = pcm
+	a.order = append(a.order, key)
+	a.bytes += len(pcm)
+
+	evicted := 0
+	for a.bytes > announceCacheMaxBytes && len(a.order) > 1 {
+		oldest := a.order[0]
+		a.order = a.order[1:]
+		if old, ok := a.m[oldest]; ok {
+			a.bytes -= len(old)
+			delete(a.m, oldest)
+			evicted++
+		}
+	}
+	if evicted > 0 {
+		log.Printf("announce: cache at %dMB, evicted %d oldest entries (%d held)",
+			a.bytes>>20, evicted, len(a.m))
+	}
+}
 
 // get returns PCM for text in the given voice, synthesizing on first use. The
 // key includes voice and speed because the same words in a different voice are
@@ -971,9 +1027,7 @@ func (a *announceCache) get(text string, voiceID int, speed, gain float32) []byt
 		prov.SetGain(gain)
 	}
 	pcm = prov.Synthesize(text)
-	a.mu.Lock()
-	a.m[key] = pcm
-	a.mu.Unlock()
+	a.put(key, pcm)
 	log.Printf("announce: cached %d bytes for %q (voice=%d speed=%.2f)", len(pcm), truncate(text, 40), voiceID, speed)
 	return pcm
 }

@@ -49,7 +49,19 @@ type RuntimeSnapshot struct {
 	// stuttering under load has this as a suspect, and it is otherwise
 	// invisible.
 	GCPauseMs float64 `json:"gc_pause_ms"`
+	// CachedAudio is what the pre-rendered greeting/voicemail cache is holding.
+	//
+	// Surfaced because it is the one structure that grows with CONTACTS rather
+	// than with concurrency: the platform personalises greetings by name, so
+	// every person dialled mints its own entry. It went unbounded for a long
+	// time precisely because nothing reported it.
+	CachedAudioEntries int `json:"cached_audio_entries"`
+	CachedAudioMB      int `json:"cached_audio_mb"`
 }
+
+// AudioCacheStats is installed by the application so /health can report cache
+// size without this package knowing what a greeting is. nil is fine.
+var AudioCacheStats func() (entries, megabytes int)
 
 // Runtime reads the current process state.
 func Runtime() RuntimeSnapshot {
@@ -66,6 +78,9 @@ func Runtime() RuntimeSnapshot {
 	if m.NumGC > 0 {
 		// PauseNs is a ring of the last 256 pauses, most recent at (NumGC+255)%256.
 		out.GCPauseMs = float64(m.PauseNs[(m.NumGC+255)%256]) / 1e6
+	}
+	if AudioCacheStats != nil {
+		out.CachedAudioEntries, out.CachedAudioMB = AudioCacheStats()
 	}
 	return out
 }
