@@ -273,6 +273,23 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 				return // listening only: the agent keeps the call
 			}
 
+			// SILENCE THE AGENT NOW, leave in a moment.
+			//
+			// The operator's leg takes about five seconds to be answered —
+			// Daily only registers a room's SIP endpoint once a session exists,
+			// and their join is what starts it. Dropping the agent first would
+			// leave the caller with nobody for those five seconds; letting it
+			// keep talking is what an operator hears as the bot "doing
+			// something of its own" over the handover, and once conferenced it
+			// hears itself and starts stuttering.
+			//
+			// So it stops speaking immediately and stays on the line until the
+			// leg is live. The caller gets a clean cut to quiet rather than a
+			// bot talking across the person taking over.
+			if calls.hushAgentFor(id) {
+				log.Printf("rexa: session=%s agent hushed for the handover", rc.sessionID)
+			}
+
 			// WAIT FOR THE LEG TO BE ANSWERED BEFORE LEAVING.
 			//
 			// early_media joins the conference at RINGBACK, which is what makes

@@ -40,6 +40,10 @@ type callParams struct {
 	// stopMedia ends the media session for this call, releasing its GPU pool
 	// slots. Set by the media handler, called by answering-machine detection.
 	stopMedia func()
+	// hushAgent silences the agent without ending the call, for the seconds
+	// between an operator committing to a barge and their leg being answered.
+	// Set by the media handler, which is the only place the serializer exists.
+	hushAgent func()
 	// amdCh carries the answering-machine verdict (human/machine/not_sure) and
 	// beepCh the greeting-ended cue. Detection happens on the webhook goroutine
 	// while the audio is driven from the media handler, so they meet here.
@@ -469,6 +473,30 @@ func (r *callRegistry) signalBeep(id, result string) {
 	case ch <- result:
 	default:
 	}
+}
+
+// setHushAgent records how to silence this call's agent without ending it.
+func (r *callRegistry) setHushAgent(id string, hush func()) {
+	r.mu.Lock()
+	if p := r.m[id]; p != nil {
+		p.hushAgent = hush
+	}
+	r.mu.Unlock()
+}
+
+// hushAgentFor silences the agent on a call, once. Reports whether it did.
+func (r *callRegistry) hushAgentFor(id string) bool {
+	r.mu.Lock()
+	var hush func()
+	if p := r.m[id]; p != nil && p.hushAgent != nil {
+		hush, p.hushAgent = p.hushAgent, nil
+	}
+	r.mu.Unlock()
+	if hush == nil {
+		return false
+	}
+	hush()
+	return true
 }
 
 // stopMediaFor ends a call's media session exactly once and reports whether it
@@ -1636,6 +1664,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	// and the agent went on holding a conversation with a caller the carrier
 	// had already handed to somebody else.
 	calls.setStopMedia(id, func() { _ = ws.Close() })
+	calls.setHushAgent(id, ser.Hush)
 
 	// Greeting first, from cache, before any pool slot is taken. Every call in a
 	// campaign says the same words, so synthesizing per call would burn a TTS

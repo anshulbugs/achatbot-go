@@ -372,6 +372,24 @@ func (s *Serializer) resetPlayback() {
 	s.mu.Unlock()
 }
 
+// Hush stops this call's outbound audio for good.
+//
+// FOR THE HANDOVER GAP. When an operator barges, the agent cannot simply be
+// dropped: the SIP leg carrying the operator takes about five seconds to be
+// answered — Daily only registers a room's SIP endpoint once a session exists —
+// and cutting the agent first leaves the caller with nobody at all.
+//
+// So it stays on the line and stops speaking. The caller hears the agent go
+// quiet the moment the operator commits, instead of hearing it talk over the
+// handover, and once conferenced it can no longer hear itself and stutter.
+// Deliberately permanent: this call is being handed to a person, and there is
+// no state in which the agent should start talking again.
+func (s *Serializer) Hush() {
+	s.mu.Lock()
+	s.mutedUntil = time.Now().Add(24 * time.Hour)
+	s.mu.Unlock()
+}
+
 // BotActive reports whether the bot is estimated to still be playing audio.
 func (s *Serializer) BotActive() bool {
 	s.mu.Lock()
