@@ -191,6 +191,18 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 	}
 	rc.bridged = true
 
+	// The sidecar route skips SIP entirely. See config.BargeViaSidecar.
+	if cfg.Server.BargeViaSidecar {
+		go bridgeViaSidecar(id, rc, listenOnly)
+		return
+	}
+	bridgeLiveRoomSIP(id, rc, listenOnly)
+}
+
+// bridgeLiveRoomSIP is the carrier route: a SIP leg into the room, met in a
+// Telnyx conference. Also the fallback when the sidecar route cannot start.
+func bridgeLiveRoomSIP(id string, rc *rexaCall, listenOnly bool) {
+	rc.bridged = true
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -345,6 +357,59 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 		log.Printf("rexa: session=%s gave up bridging the live room", rc.sessionID)
 		rc.bridged = false
 	}()
+}
+
+// bridgeViaSidecar puts the operator into the call without a SIP leg: the
+// sidecar joins their room and relays audio to and from the media socket we
+// already hold for the call.
+//
+// The whole five seconds the SIP route spends is Daily registering the room's
+// SIP endpoint, which it will not do until a session exists — and the
+// operator's join is what starts one. Nothing here needs that endpoint at all.
+//
+// On BARGE the agent is hushed rather than removed, because the media socket is
+// now the audio bridge: closing it would take the operator's path down with the
+// agent. That is the one place this route differs from the SIP one, where
+// leaving was safe because the carrier held the bridge.
+func bridgeViaSidecar(id string, rc *rexaCall, listenOnly bool) {
+	started := time.Now()
+	if !sidecarReady() {
+		log.Printf("rexa: session=%s barge_via_sidecar is on but the sidecar is not installed — falling back to SIP", rc.sessionID)
+		rc.bridged = false
+		bridgeLiveRoomSIP(id, rc, listenOnly)
+		return
+	}
+
+	registerRelay(rc.sessionID, id, listenOnly)
+	if err := startSidecar(rc.sessionID, rc.roomURL, rc.roomToken, relayAgentWS()); err != nil {
+		log.Printf("rexa: session=%s listen-in sidecar failed to start (%v) — falling back to SIP", rc.sessionID, err)
+		endRelay(rc.sessionID)
+		rc.bridged = false
+		bridgeLiveRoomSIP(id, rc, listenOnly)
+		return
+	}
+
+	mode := "barge"
+	if listenOnly {
+		mode = "listen"
+	}
+	log.Printf("rexa: session=%s live room bridged via sidecar in %s as %s (no SIP leg)",
+		rc.sessionID, time.Since(started).Round(time.Millisecond), mode)
+
+	if !listenOnly {
+		// Hush, do not leave: this process is the audio bridge now.
+		if calls.hushAgentFor(id) {
+			log.Printf("rexa: session=%s agent hushed — operator has the call", rc.sessionID)
+		}
+	}
+}
+
+// relayAgentWS is where the listen-in sidecar sends the room's audio. Loopback
+// for the same reason the browser path is: the sidecar runs beside the agent,
+// so routing its audio out through the public tunnel and back would add latency
+// and a dependency on the tunnel being up.
+func relayAgentWS() string {
+	return "ws://127.0.0.1:" + strings.TrimPrefix(cfg.Server.Addr, ":") + "/relay/media"
 }
 
 // endLiveRoom deletes the room when the call is over.

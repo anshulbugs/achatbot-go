@@ -162,6 +162,9 @@ type Serializer struct {
 	// case a little tail leaks through, which is the bug we started with rather
 	// than a dead call.
 	mutedUntil time.Time
+	// tap receives a copy of inbound caller audio, for live listening. nil on
+	// every call nobody is listening to, which is almost all of them.
+	tap func(pcm8 []byte, rate int)
 
 	// holdInterruptsUntil suppresses the "clear" event while audio we have
 	// already sent is still playing at Telnyx.
@@ -372,6 +375,25 @@ func (s *Serializer) resetPlayback() {
 	s.mu.Unlock()
 }
 
+// SetInboundTap installs a callback receiving a COPY of the caller's audio, at
+// 8 kHz, before the echo gate. nil removes it.
+//
+// For live listening: it lets an operator's room be fed from the call without
+// putting a second reader on the media socket, which is the thing that cannot
+// be done safely while the pipeline owns it. The copy is deliberate — a tap
+// that handed out the pipeline's own buffer could change what the agent hears.
+func (s *Serializer) SetInboundTap(fn func(pcm8 []byte, rate int)) {
+	s.mu.Lock()
+	s.tap = fn
+	s.mu.Unlock()
+}
+
+func (s *Serializer) inboundTap() func([]byte, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tap
+}
+
 // Hush stops this call's outbound audio for good.
 //
 // FOR THE HANDOVER GAP. When an operator barges, the agent cannot simply be
@@ -430,6 +452,20 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 		return nil, nil
 	}
 	pcm8 := MuLawToPCM16(mulaw)
+
+	// Tap the caller's audio BEFORE the echo gate.
+	//
+	// An operator listening in wants to hear the call as it is, not as the
+	// pipeline needs it: the gate exists to stop the agent transcribing itself,
+	// and applying it here would cut the caller out of the operator's ear
+	// whenever the agent happened to be speaking. Taking a copy this early also
+	// means the tap cannot change what the pipeline receives.
+	if tap := s.inboundTap(); tap != nil {
+		cp := make([]byte, len(pcm8))
+		copy(cp, pcm8)
+		tap(cp, telnyxRate)
+	}
+
 	if s.suppressEcho {
 		if pcm8 = s.keepInbound(pcm8); pcm8 == nil {
 			return nil, nil // steady echo while the bot speaks: drop it
