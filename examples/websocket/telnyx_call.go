@@ -1035,9 +1035,45 @@ func watchLateAMD(id string, p *callParams) {
 		if !isMachineVerdict(v) {
 			return
 		}
-		log.Printf("telnyx amd: late machine verdict=%q on call=%s -- pipeline already running, hanging up without leaving a message", v, id)
+		log.Printf("telnyx amd: late machine verdict=%q on call=%s -- taking the agent off and leaving the message", v, id)
+		calls.markHandedOver(id)
 		calls.stopMediaFor(id)
 		calls.markAgentEnded(id)
+		markVoicemail(id)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = p.tc().StreamingStop(ctx, id)
+
+		// LEAVE THE MESSAGE THROUGH THE CARRIER, not the media socket.
+		//
+		// This used to hang up with nothing said, on the reasoning that the
+		// pipeline owns the socket by now and two writers on one connection is
+		// worse than a lost message. True of the socket — and beside the point,
+		// because the carrier can speak into the call without one.
+		//
+		// Telnyx's own TTS defaults to Telnyx.KokoroTTS.af_heart, which is the
+		// same Heart voice this agent already uses, so the caller hears the
+		// message they would have heard anyway rather than a different person.
+		msg := p.VoicemailMessage
+		if msg == "" {
+			if err := p.tc().Hangup(ctx, id); err != nil {
+				log.Printf("telnyx amd: late hangup failed on call=%s: %v", id, err)
+			}
+			return
+		}
+		if err := p.tc().Speak(ctx, id, msg, ""); err != nil {
+			log.Printf("telnyx amd: late voicemail speak failed on call=%s: %v", id, err)
+			_ = p.tc().Hangup(ctx, id)
+			return
+		}
+		log.Printf("telnyx amd: leaving the voicemail message via carrier TTS on call=%s (%d chars)", id, len(msg))
+
+		// Estimated, because `speak` returns as soon as the carrier accepts it
+		// and the call.speak.ended webhook is not wired. Deliberately generous:
+		// hanging up early truncates the message, waiting too long costs a few
+		// seconds of a call nobody is on.
+		time.Sleep(time.Duration(len(msg))*time.Second/12 + 3*time.Second)
 		if err := p.tc().Hangup(context.Background(), id); err != nil {
 			log.Printf("telnyx amd: late hangup failed on call=%s: %v", id, err)
 		}
@@ -1341,9 +1377,30 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// call that has not answered the question yet — and those are
 			// overwhelmingly machines, which do not mind the silence. A human
 			// pays nothing for it.
+			// A LIVE PERSON MUST NEVER WAIT FOR THIS.
+			//
+			// The window returns the instant a verdict lands, and every human
+			// verdict in the log arrives at 3-4s — before the greeting has even
+			// finished — so a person is not affected by how long the ceiling
+			// is. The ceiling only bites when NOTHING arrives, and then it is
+			// dead air on someone who has stopped hearing the greeting and is
+			// waiting to be spoken to.
+			//
+			// So the ceiling is the greeting plus a short grace, not the
+			// detection deadline. That still covers the 9-11s verdicts on a
+			// greeting of ordinary length, and it bounds what a human can lose
+			// to four seconds. Anything slower than this is now handled after
+			// the pipeline starts: watchLateAMD takes the agent off the call
+			// and has the carrier speak the message, which is why the window no
+			// longer has to be long enough to catch everything.
+			const amdWaitGrace = 4 * time.Second
 			const amdWaitCap = 16 * time.Second
 			verdict := ""
-			if wait := amdWaitCap - time.Since(announceStart); finished && wait > 0 {
+			wait := spoken - time.Since(announceStart) + amdWaitGrace
+			if wait > amdWaitCap {
+				wait = amdWaitCap
+			}
+			if finished && wait > 0 {
 				log.Printf("telnyx amd: waiting up to %s for a verdict (greeting is %.1fs) call=%s",
 					wait.Round(time.Millisecond), spoken.Seconds(), id)
 				timer := time.NewTimer(wait)
