@@ -582,14 +582,24 @@ func registerDailyWebhook(publicURL string) {
 	if dailyClient == nil || publicURL == "" {
 		return
 	}
+	target := strings.TrimRight(publicURL, "/") + dailyWebhookPath
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		target := strings.TrimRight(publicURL, "/") + dailyWebhookPath
-		if err := dailyClient.EnsureWebhook(ctx, target, []string{"participant.joined"}); err != nil {
-			log.Printf("rexa: daily webhook registration failed — barge falls back to presence polling (~6s slower): %v", err)
-			return
+		// RETRIED, because Daily validates by POSTing to the URL and this runs
+		// while routes are still being registered — the listener is not up yet,
+		// the validation POST gets nothing, and Daily refuses the subscription.
+		// That is exactly how the first attempt failed: the endpoint answered
+		// 200 through the tunnel a minute later, when asked by hand.
+		for attempt, wait := range []time.Duration{5, 15, 30, 60} {
+			time.Sleep(wait * time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := dailyClient.EnsureWebhook(ctx, target, []string{"participant.joined"})
+			cancel()
+			if err == nil {
+				log.Printf("rexa: daily webhook active at %s — operator joins arrive instantly", target)
+				return
+			}
+			log.Printf("rexa: daily webhook registration attempt %d failed: %v", attempt+1, err)
 		}
-		log.Printf("rexa: daily webhook active at %s — operator joins arrive instantly", target)
+		log.Printf("rexa: daily webhook could not be registered — barge falls back to presence polling (~6s slower)")
 	}()
 }
