@@ -104,6 +104,12 @@ pkill -x "$(basename "$BIN")" 2>/dev/null || true
 # Kill only OUR tunnel. A bare `pkill -f "cloudflared tunnel"` takes down every
 # other tunnel on the box, which on a shared machine is someone else's outage.
 pkill -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" 2>/dev/null || true
+# Room sidecars are children of the server, but only the server's own stopSidecar
+# ever ends them — a restart or a hard kill orphans them, and an orphan sits in a
+# Daily room forever holding a session for a call that ended hours ago. One was
+# found doing exactly that. Sweep them here, where "the old instance is gone" is
+# already the invariant being established.
+pkill -f "deploy/sidecar/room_agent.py" 2>/dev/null || true
 sleep 2
 
 log "Public tunnel for the browser and Telnyx"
