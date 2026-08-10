@@ -720,9 +720,8 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 
 	case "call.answered":
 		// The listen-in SIP leg answering is reported here too, and it is NOT
-		// in the call registry — it is a leg we dialled, not a call we own. It
-		// has to be signalled before the registry lookup below returns.
-		signalLegAnswered(id)
+		// in the call registry — it is a leg we dialled, not a call we own, so
+		// the lookup below drops it.
 		p := calls.get(id)
 		if p == nil {
 			return

@@ -267,11 +267,6 @@ func bridgeLiveRoomSIP(id string, rc *rexaCall, listenOnly bool) {
 				time.Sleep(time.Second)
 				continue
 			}
-			// Registered BEFORE the log line, because a leg on the same box can
-			// answer in well under the time it takes to format one.
-			answeredCh := watchLegAnswered(sipLeg)
-			defer forgetLeg(sipLeg)
-
 			mode := "barge (agent leaves)"
 			if listenOnly {
 				mode = "listen (monitor, agent stays)"
@@ -285,72 +280,21 @@ func bridgeLiveRoomSIP(id string, rc *rexaCall, listenOnly bool) {
 				return // listening only: the agent keeps the call
 			}
 
-			// SILENCE THE AGENT NOW, leave in a moment.
+			// THE AGENT LEAVES NOW. It is not needed once a person has the
+			// call, and everything it holds — pool slot, ASR, TTS, the LLM
+			// context — is capacity another call could be using.
 			//
-			// The operator's leg takes about five seconds to be answered —
-			// Daily only registers a room's SIP endpoint once a session exists,
-			// and their join is what starts it. Dropping the agent first would
-			// leave the caller with nobody for those five seconds; letting it
-			// keep talking is what an operator hears as the bot "doing
-			// something of its own" over the handover, and once conferenced it
-			// hears itself and starts stuttering.
-			//
-			// So it stops speaking immediately and stays on the line until the
-			// leg is live. The caller gets a clean cut to quiet rather than a
-			// bot talking across the person taking over.
+			// It used to hush here and leave only once the operator's leg
+			// answered, on the theory that dropping it early left the caller
+			// with nobody. That theory does not survive the hush: a hushed
+			// agent and an absent one sound exactly the same, so the five
+			// seconds bought silence at full cost. The caller waits the same
+			// either way, and the wait belongs to Daily registering the room's
+			// SIP endpoint, which nothing on this side can shorten.
 			if calls.hushAgentFor(id) {
-				log.Printf("rexa: session=%s agent hushed for the handover", rc.sessionID)
+				log.Printf("rexa: session=%s agent hushed", rc.sessionID)
 			}
 
-			// WAIT FOR THE LEG TO BE ANSWERED BEFORE LEAVING.
-			//
-			// early_media joins the conference at RINGBACK, which is what makes
-			// the bridge look instant — but ringback is not a media path. Daily
-			// still has to answer, and until it does the SIP leg carries no
-			// audio. Leaving on a timer after that put the caller and the
-			// operator in silence together: agent gone, leg not yet live.
-			//
-			// ConferenceJoin is the readiness probe, because we already know
-			// exactly what it says while a leg is unanswered — 422 "Call not
-			// answered yet". When it stops saying that, the leg is up, and only
-			// then is it safe for the agent to step out.
-			// THE LEG IS ALREADY IN THE CONFERENCE. Do not try to join it again.
-			//
-			// conference_config puts it in at dial time — that is what
-			// early_media buys — so ConferenceJoin can never succeed here. It
-			// returns 90044 "Participant must not join the same conference
-			// twice", which the previous readiness probe read as a broken leg:
-			// it redialled six times, put six SIP legs in the operator's room,
-			// gave up after twenty-two seconds, and never let the agent leave.
-			// The bridge had been fine since the first dial.
-			//
-			// So there is no join to probe, and the only thing left to decide
-			// is when it is safe for the agent to go. Ringback means the leg is
-			// in the conference, not that Daily has answered it, and Daily
-			// takes a few seconds either way. A settle beats a probe that
-			// cannot observe what it is asking about.
-			// Wait for the carrier to say the leg ANSWERED, rather than
-			// guessing how long Daily needs.
-			//
-			// This was a flat 3.5s settle, and it was three and a half of the
-			// eight seconds an operator waited — all of it with the agent still
-			// on the call talking over the handover. The leg is dialled with
-			// our own webhook URL, so its call.answered comes back to us and
-			// says precisely when it went live.
-			select {
-			case <-answeredCh:
-				log.Printf("rexa: session=%s operator's leg answered after %s — agent stepping out",
-					rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond))
-			case <-time.After(8 * time.Second):
-				// Fall through rather than strand the operator: the leg is in
-				// the conference either way, and a late answer is better served
-				// by an agent that has already left than by one still talking.
-				log.Printf("rexa: session=%s no answer event for the operator's leg within 8s — stepping out anyway",
-					rc.sessionID)
-			}
-			if calls.get(id) == nil {
-				return
-			}
 			leaveCall(id, rc.client, "operator barged in")
 			return
 		}
@@ -397,9 +341,18 @@ func bridgeViaSidecar(id string, rc *rexaCall, listenOnly bool) {
 		rc.sessionID, time.Since(started).Round(time.Millisecond), mode)
 
 	if !listenOnly {
-		// Hush, do not leave: this process is the audio bridge now.
+		// The agent goes inert, but the socket stays: it is the operator's
+		// audio path now, and closing it — which is what leaving means on the
+		// SIP route — would take the caller off the call along with the agent.
+		//
+		// Inert is not the same as idle, so hushAgentFor also deafens: with no
+		// inbound frames the VAD never fires, and ASR, the LLM and TTS all stop
+		// being asked for anything. What is left holding capacity is the pool
+		// slot, which stays deliberately — releasing it while this call still
+		// owns VAD/ASR/TTS instances would admit the next dispatch against
+		// capacity that does not exist.
 		if calls.hushAgentFor(id) {
-			log.Printf("rexa: session=%s agent hushed — operator has the call", rc.sessionID)
+			log.Printf("rexa: session=%s agent inert — operator has the call (socket kept as the relay)", rc.sessionID)
 		}
 	}
 }
