@@ -1380,11 +1380,37 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 			ttsRate, _, _ := ttsSampleInfo()
-			spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(ttsRate)
+
+			// SEND THE GREETING IN TWO PARTS, so a machine verdict can stop it.
+			//
+			// The whole greeting used to go to Telnyx in one message, which
+			// buffers all of it at the carrier — and once it is there the only
+			// way to stop it is `clear`, which kills playback for the rest of
+			// the call. That is the trap this path spent a long time in.
+			//
+			// Holding the tail back sidesteps it entirely: a machine verdict
+			// simply means the second half is never sent, so nothing has to be
+			// cancelled and the stream stays able to play the voicemail
+			// message. It also bounds what a mailbox records of us. A mailbox
+			// that beeps after a three second greeting would otherwise capture
+			// our whole fourteen seconds and then the message; now it captures
+			// at most the head.
+			//
+			// The head must outlast detection or a HUMAN hears a gap where the
+			// tail should join: verdicts land at 3-5s, so six seconds leaves
+			// margin, and the tail is sent while the head is still playing.
+			// Two messages, not the hundred-and-forty-five that caused an
+			// audible hole in the greeting once before.
+			const greetingHeadSecs = 6
+			head, tail := pcm, []byte(nil)
+			if cut := greetingHeadSecs * ttsRate * 2; len(pcm) > cut {
+				head, tail = pcm[:cut], pcm[cut:]
+			}
+			spoken := time.Duration(len(head)/2) * time.Second / time.Duration(ttsRate)
 			announceStart := time.Now()
-			log.Printf("announce: playing greeting call=%s (%d bytes @%dHz, %.1fs audio)",
-				id, len(pcm), ttsRate, spoken.Seconds())
-			finished := playAnnouncement(tw, pcm, ttsRate, stop)
+			log.Printf("announce: playing greeting call=%s (%.1fs of %.1fs now, rest held back for the verdict)",
+				id, spoken.Seconds(), float64(len(pcm)/2)/float64(ttsRate))
+			finished := playAnnouncement(tw, head, ttsRate, stop)
 
 			// Wait out the greeting for a verdict.
 			//
@@ -1433,8 +1459,15 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// longer has to be long enough to catch everything.
 			const amdWaitGrace = 4 * time.Second
 			const amdWaitCap = 16 * time.Second
+			// The FIRST wait ends before the head does, because the tail has to
+			// be sent while the head is still playing or a human hears a seam.
+			const tailLead = 750 * time.Millisecond
 			verdict := ""
-			wait := spoken - time.Since(announceStart) + amdWaitGrace
+			wait := spoken - time.Since(announceStart) - tailLead
+			if len(tail) == 0 {
+				// Nothing held back, so nothing to be early for.
+				wait = spoken - time.Since(announceStart) + amdWaitGrace
+			}
 			if wait > amdWaitCap {
 				wait = amdWaitCap
 			}
@@ -1453,13 +1486,45 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				default:
 				}
 			}
-			stopOnce.Do(func() { close(stop) })
 			if isMachineVerdict(verdict) {
-				log.Printf("telnyx amd: machine verdict=%q on call=%s (greeting cut=%t) -- no pipeline will be used", verdict, id, !finished)
+				stopOnce.Do(func() { close(stop) })
+				log.Printf("telnyx amd: machine verdict=%q on call=%s -- holding back %.1fs of greeting, no pipeline will be used",
+					verdict, id, float64(len(tail)/2)/float64(ttsRate))
 				runVoicemailCall(id, conn, tw, ser, ttsRate, p, p.beepCh)
 				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
 				return
 			}
+
+			// No machine verdict yet, so treat them as a person and finish the
+			// greeting. Sent while the head is still playing, so it joins on
+			// without a seam.
+			if len(tail) > 0 {
+				playAnnouncement(tw, tail, ttsRate, stop)
+				spoken += time.Duration(len(tail)/2) * time.Second / time.Duration(ttsRate)
+
+				// Keep listening while the tail plays. A verdict at 9-11s — the
+				// band that used to be timed out into not_sure — still lands
+				// here, and reaching the voicemail path late is better than
+				// reaching it never. The tail is already at the carrier by now,
+				// so a mailbox hears the rest of the greeting either way; what
+				// this saves is the pipeline and the conversation with a machine.
+				if w := spoken - time.Since(announceStart) + amdWaitGrace; verdict == "" && w > 0 {
+					timer := time.NewTimer(w)
+					select {
+					case verdict = <-got:
+					case <-timer.C:
+					}
+					timer.Stop()
+					if isMachineVerdict(verdict) {
+						stopOnce.Do(func() { close(stop) })
+						log.Printf("telnyx amd: machine verdict=%q on call=%s during the greeting tail -- no pipeline will be used", verdict, id)
+						runVoicemailCall(id, conn, tw, ser, ttsRate, p, p.beepCh)
+						log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
+						return
+					}
+				}
+			}
+			stopOnce.Do(func() { close(stop) })
 			// Telnyx is still holding whatever we sent ahead of real time.
 			// Suppress "clear" for that long: the pipeline starts now and its
 			// first interruption frame would otherwise flush the unplayed tail
