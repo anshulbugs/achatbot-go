@@ -278,15 +278,26 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 					return
 				}
 				perr := rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
-				if perr == nil || !strings.Contains(perr.Error(), "not answered yet") {
+				if perr == nil {
 					answered = true
+					break
+				}
+				// ONLY a nil error means the leg is live.
+				//
+				// This used to treat any error other than "not answered yet" as
+				// success, which is how a leg Daily had REJECTED got read as
+				// ready: the agent stepped out and left the caller with a dead
+				// SIP leg and nobody else. Anything unexpected now falls
+				// through to a redial instead.
+				if !strings.Contains(perr.Error(), "not answered yet") {
+					log.Printf("rexa: session=%s operator's leg is not usable (%v) — redialling", rc.sessionID, perr)
 					break
 				}
 				time.Sleep(250 * time.Millisecond)
 			}
 			if !answered {
-				log.Printf("rexa: session=%s SIP leg never answered — keeping the agent on the call", rc.sessionID)
-				return
+				time.Sleep(time.Second)
+				continue // redial; the room may not have had anyone in it yet
 			}
 			log.Printf("rexa: session=%s operator's leg is live after %s — agent stepping out",
 				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond))
@@ -495,9 +506,24 @@ func handleJoinCall(w http.ResponseWriter, r *http.Request) {
 		"daily_token":    rc.roomToken,
 		"url":            rc.roomURL,
 	})
-	log.Printf("rexa: session=%s join-call — operator is opening room %s", rc.sessionID, rc.roomName)
+	log.Printf("rexa: session=%s join-call — operator is opening room %s (mode=%s)",
+		rc.sessionID, rc.roomName, r.URL.Query().Get("mode"))
 
-	bridgeLiveRoom(id, rc, rc.listenOnly)
+	// DO NOT BRIDGE YET. The operator has just been handed the URL; they are
+	// not in the room.
+	//
+	// Bridging here dialled the SIP leg into an EMPTY room, and
+	// `allow_sip_only_in_room` is false on this domain, so Daily rejects that
+	// with SIP 480. The dial still returns success — Telnyx accepted the
+	// command — the leg then dies, and the agent stepped out having left
+	// nobody on the call. Seen exactly that: join-call at 07:11:49, dial at
+	// 07:11:50, the operator's browser not in the room until 07:11:52.
+	//
+	// So register the room and let participant.joined fire the bridge. That
+	// webhook is the only signal meaning "there is a human in there to dial
+	// towards", and it costs the browser's WebRTC join time and nothing else:
+	// the carrier side is already down to about a second.
+	watchForListener(id, rc)
 }
 
 // ensureLiveRoom creates this call's listen-in room if it does not have one.
