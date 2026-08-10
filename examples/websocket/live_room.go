@@ -180,6 +180,46 @@ func startPrewarmProc(sessionID, roomName, roomURL string) {
 	}()
 }
 
+// preconferenceLiveRoom builds the barge conference while the call is being
+// answered, so barging does not pay for it.
+//
+// Creating it measured 0.77-1.02s, in series ahead of the SIP dial — a full
+// second of a 3.8s barge. Nothing about it needs to wait for an operator: it
+// holds one participant, the call leg that is already on the line, and the SIP
+// leg is dialled into it by name later.
+//
+// Unlike the room pre-joiner this costs nothing per call — no extra leg, no
+// extra participant, nothing billed. It is the same call in a conference of
+// one.
+//
+// Off by default (server.live_room_preconference) because it changes the media
+// path of every answered call that has a room, and a conference is where the
+// agent has previously been heard to echo itself. Turn it on, listen to a call,
+// then leave it on.
+func preconferenceLiveRoom(id string, rc *rexaCall) {
+	if !cfg.Server.LiveRoomPreconference || rc == nil || rc.client == nil {
+		return
+	}
+	if rc.roomName == "" || rc.sessionID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		confID, err := rc.client.ConferenceCreate(ctx, "live-"+rc.sessionID, id)
+		if err != nil {
+			// Barge still works: it creates the conference itself when this
+			// field is empty, which is exactly the old behaviour.
+			log.Printf("rexa: session=%s pre-conference failed (barge will make its own): %v", rc.sessionID, err)
+			return
+		}
+		rc.confMu.Lock()
+		rc.confID = confID
+		rc.confMu.Unlock()
+		log.Printf("rexa: session=%s conference %s ready before any barge", rc.sessionID, confID)
+	}()
+}
+
 // stopPrewarm releases the room's session. Only safe once the call is over:
 // leaving while a supervisor is still arriving would end the session and take
 // the registration with it.
@@ -313,15 +353,29 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 		// The conference is named for the session so it is greppable across
 		// Telnyx's dashboard, our logs and the platform's. It has to exist
 		// before the SIP leg is dialled into it by name, so this one is not
-		// overlapped — it costs about 200ms.
+		// overlapped.
+		//
+		// Usually already made. preconferenceLiveRoom builds it when the call is
+		// ANSWERED, because it measured 0.77-1.02s here — a full second of a
+		// 3.8s barge, spent creating something that holds nothing but the call
+		// leg already on the line. Same trick as the room pre-joiner: do the
+		// setup while there is a conversation to hide it behind.
 		confName := "live-" + rc.sessionID
-		confID, err := rc.client.ConferenceCreate(ctx, confName, id)
-		confAt := time.Since(bridgeStart)
-		if err != nil {
-			log.Printf("rexa: session=%s conference create failed (call unaffected): %v", rc.sessionID, err)
-			rc.bridged = false
-			return
+		rc.confMu.Lock()
+		confID := rc.confID
+		rc.confMu.Unlock()
+
+		var err error
+		preMade := confID != ""
+		if !preMade {
+			confID, err = rc.client.ConferenceCreate(ctx, confName, id)
+			if err != nil {
+				log.Printf("rexa: session=%s conference create failed (call unaffected): %v", rc.sessionID, err)
+				rc.bridged = false
+				return
+			}
 		}
+		confAt := time.Since(bridgeStart)
 
 		// ONE dial that joins itself to the conference at ringback.
 		//
@@ -372,9 +426,13 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			if listenOnly {
 				mode = "listen (monitor, agent stays)"
 			}
-			log.Printf("rexa: session=%s live room bridged in %s as %s (conference %s %s, dial+join %s leg=%s, joined at ringback)",
+			confHow := "created here"
+			if preMade {
+				confHow = "pre-made at answer"
+			}
+			log.Printf("rexa: session=%s live room bridged in %s as %s (conference %s %s %s, dial+join %s leg=%s, joined at ringback)",
 				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond), mode,
-				confAt.Round(time.Millisecond), confID,
+				confAt.Round(time.Millisecond), confHow, confID,
 				(time.Since(bridgeStart) - confAt).Round(time.Millisecond), sipLeg)
 
 			if listenOnly {

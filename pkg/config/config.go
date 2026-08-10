@@ -127,6 +127,19 @@ type ServerConfig struct {
 	//
 	// Off by default. Needs SIDECAR_PYTHON and PREWARM_SCRIPT set.
 	LiveRoomPrewarm bool `mapstructure:"live_room_prewarm"`
+	// LiveRoomPreconference builds the barge conference when the call is
+	// answered instead of when someone barges.
+	//
+	// Creating it measured 0.77-1.02s, run in series ahead of the SIP dial —
+	// a full second of a 3.8s barge, spent on something that holds only the
+	// call leg already on the line. Costs nothing per call: no extra leg, no
+	// extra participant, nothing billed.
+	//
+	// Off by default because it puts every answered call with a room into a
+	// Telnyx conference from the start, which changes the media path — and a
+	// conference is where the agent has previously been heard to echo itself.
+	// Turn it on, listen to a call, then leave it on.
+	LiveRoomPreconference bool `mapstructure:"live_room_preconference"`
 	// JoinCallFallbackURL is where /join-call forwards a uuid this agent does
 	// not know.
 	//
