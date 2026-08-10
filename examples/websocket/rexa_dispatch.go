@@ -398,6 +398,12 @@ func (d *platformDispatcher) DispatchIncoming(ctx context.Context, req rexa.Inco
 	// Register BEFORE answering: the carrier can deliver call.answered before
 	// Answer() returns, and an unregistered call is dropped on the floor.
 	calls.put(req.CCID, p)
+	// Reachable by session id too, exactly as outbound is. Inbound calls get a
+	// live room like any other, and the platform's Join arrives with whichever
+	// id its watcher bound — which for an inbound call it has no reason to
+	// expect is the carrier's. Without this the room is published and the Join
+	// that opens it cannot find the call.
+	calls.linkSession(req.SessionID, req.CCID)
 	// Counted, never refused. The leg is already ringing with a human on it,
 	// so refusing costs a real answered call — but counting it is what makes
 	// inbound load reduce the outbound allowance instead of silently
