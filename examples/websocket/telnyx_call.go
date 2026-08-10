@@ -1103,11 +1103,25 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 	// remainder simply never went out, and a real bug the moment the whole
 	// greeting started going to Telnyx at once.
 	//
-	// AllowInterrupts first: the hold that stops the pipeline flushing a
-	// playing greeting must not also stop machine detection from cutting it.
-	ser.AllowInterrupts()
-	if err := tw.SendPayload(&frames.StartInterruptionFrame{}); err != nil {
-		log.Printf("telnyx amd: could not flush the greeting on call=%s: %v", id, err)
+	// DO NOT SEND `clear` HERE. It is what silenced every voicemail message.
+	//
+	// Telnyx's own recording of a failed call shows it exactly: our greeting is
+	// audible and stops dead at 12.4s, the instant the clear went out — so the
+	// flush worked and the recording does capture our outbound audio — and then
+	// the 14.4s message that the serializer confirms it queued a second later
+	// never plays at all. Fifteen seconds of RMS 6 where the message should be.
+	// On this bidirectional stream a clear does not just drop what is buffered,
+	// it stops the carrier rendering anything we send afterwards.
+	//
+	// Nothing needed the flush. It was there to stop the greeting overrunning
+	// the message, and the greeting is playing to an answering machine: letting
+	// it finish costs a couple of seconds nobody is listening to, and the wait
+	// for the beep usually outlasts it anyway. So wait the remainder out
+	// instead, and leave the stream in a state that still plays audio.
+	if outstanding := time.Until(ser.PlaybackEnd()); outstanding > 0 {
+		log.Printf("telnyx amd: letting the greeting finish (%s left) before the message call=%s",
+			outstanding.Round(time.Millisecond), id)
+		time.Sleep(outstanding)
 	}
 
 	msg := p.VoicemailMessage
