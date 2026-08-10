@@ -44,12 +44,6 @@ type callParams struct {
 	// between an operator committing to a barge and their leg being answered.
 	// Set by the media handler, which is the only place the serializer exists.
 	hushAgent func()
-	// tapInbound installs a listener on the caller's audio, and sendAudio
-	// injects audio towards the caller. Both are set by the media handler,
-	// which owns the serializer and the transport, and both are used only by
-	// the live-listening relay.
-	tapInbound func(func(pcm8 []byte, rate int))
-	sendAudio  func(pcm []byte, rate int)
 	// amdCh carries the answering-machine verdict (human/machine/not_sure) and
 	// beepCh the greeting-ended cue. Detection happens on the webhook goroutine
 	// while the audio is driven from the media handler, so they meet here.
@@ -481,48 +475,6 @@ func (r *callRegistry) signalBeep(id, result string) {
 	}
 }
 
-// setRelayHooks records how to listen to and speak into a live call. Set once
-// by the media handler; used only by live listening.
-func (r *callRegistry) setRelayHooks(id string, tap func(func(pcm8 []byte, rate int)), send func(pcm []byte, rate int)) {
-	r.mu.Lock()
-	if p := r.m[id]; p != nil {
-		p.tapInbound = tap
-		p.sendAudio = send
-	}
-	r.mu.Unlock()
-}
-
-// setInboundTap installs (or with nil removes) a listener on the caller's
-// audio. Reports whether the call was still there to hook.
-func (r *callRegistry) setInboundTap(id string, fn func(pcm8 []byte, rate int)) bool {
-	r.mu.Lock()
-	p := r.m[id]
-	var install func(func([]byte, int))
-	if p != nil {
-		install = p.tapInbound
-	}
-	r.mu.Unlock()
-	if install == nil {
-		return false
-	}
-	install(fn)
-	return true
-}
-
-// sendToCaller injects audio into a live call — the operator's voice during a
-// barge. No-op for a call that has ended.
-func (r *callRegistry) sendToCaller(id string, pcm []byte, rate int) {
-	r.mu.Lock()
-	var send func([]byte, int)
-	if p := r.m[id]; p != nil {
-		send = p.sendAudio
-	}
-	r.mu.Unlock()
-	if send != nil {
-		send(pcm, rate)
-	}
-}
-
 // setHushAgent records how to silence this call's agent without ending it.
 func (r *callRegistry) setHushAgent(id string, hush func()) {
 	r.mu.Lock()
@@ -720,8 +672,9 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 
 	case "call.answered":
 		// The listen-in SIP leg answering is reported here too, and it is NOT
-		// in the call registry — it is a leg we dialled, not a call we own, so
-		// the lookup below drops it.
+		// in the call registry — it is a leg we dialled, not a call we own. It
+		// has to be signalled before the registry lookup below returns.
+		signalLegAnswered(id)
 		p := calls.get(id)
 		if p == nil {
 			return
@@ -1704,30 +1657,14 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := telnyx.NewConn(ws)
-
-	calls.setHushAgent(id, func() {
-		// Mute the agent AND stop the pipeline. Hush alone leaves VAD, ASR,
-		// the LLM and TTS running on the GPU for a call the agent has been
-		// taken off, producing replies that are discarded at the last step.
-		ser.Hush()
-		ser.Deafen()
-	})
-	// Hooks for live listening. Both stay unused — and cost nothing — on every
-	// call nobody opens, which is almost all of them.
+	// Give anything that needs to end this call a way to do it.
 	//
-	// The writer goes over the SAME telnyx.Conn the pipeline uses, not a second
-	// socket: Conn serialises its writes, so the operator's voice and the
-	// agent's cannot interleave mid-frame. During a barge the agent is hushed
-	// anyway, so in practice only one of them is speaking at a time.
-	relayTW := achatbot_processors.NewWebsocketTransportWriter(conn, &params.WebsocketServerParams{
-		AudioCameraParams: params.NewAudioCameraParams(),
-		Serializer:        ser,
-	})
-	calls.setRelayHooks(id,
-		ser.SetInboundTap,
-		func(pcm []byte, rate int) {
-			_ = relayTW.SendAudioFrame(frames.NewAudioRawFrame(pcm, rate, 1, 2))
-		})
+	// setStopMedia existed and was never called, so stopMediaFor was a
+	// permanent no-op — which is why a transferred call kept a live pipeline
+	// and the agent went on holding a conversation with a caller the carrier
+	// had already handed to somebody else.
+	calls.setStopMedia(id, func() { _ = ws.Close() })
+	calls.setHushAgent(id, ser.Hush)
 
 	// Greeting first, from cache, before any pool slot is taken. Every call in a
 	// campaign says the same words, so synthesizing per call would burn a TTS

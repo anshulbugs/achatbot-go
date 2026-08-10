@@ -645,10 +645,6 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 	// Daily pushes participant.joined here, which is how an operator opening
 	// the listen-in room is noticed at once instead of ~6s later.
 	mux.HandleFunc(dailyWebhookPath, handleDailyWebhook)
-	// The listen-in sidecar's audio bridge. Loopback only in practice — the
-	// sidecar runs on this box — but registered on the same mux because it is
-	// the same server.
-	mux.HandleFunc("/relay/media", handleRelayMedia)
 	registerDailyWebhook(publicURL)
 
 	ceiling := "unlimited"

@@ -109,26 +109,6 @@ type ServerConfig struct {
 	// Set false ONLY once rexa-dialer's JOIN_CALL_URL points at this agent.
 	// Until it does, false means Join finds no room at all.
 	LiveRoomPrepublish bool `mapstructure:"live_room_prepublish"`
-	// BargeViaSidecar puts an operator into a call through the Daily sidecar
-	// instead of a SIP leg.
-	//
-	// false (default): Telnyx dials the room's SIP endpoint and both legs meet
-	// in a conference. Costs about five seconds, all of it Daily registering
-	// the room's SIP endpoint — it only does that once a session exists, and
-	// the operator's own join is what starts one, so registration is
-	// serialised in front of our INVITE. Measured at 4.5-5.3s, repeatedly, and
-	// not tunable from either side.
-	//
-	// true: the sidecar joins the room and relays audio to and from the Telnyx
-	// media socket we already hold. No SIP registration, no conference, no
-	// second carrier leg — one WebRTC join. The cost is a Python process per
-	// BARGE (not per call, so rare) and two extra audio hops.
-	//
-	// Default false because the SIP path is the one that has been through real
-	// calls. Flip it, listen to a barge, and flip it back if the audio is worse
-	// — nothing else in the call, voicemail, transfer or browser paths reads
-	// this.
-	BargeViaSidecar bool `mapstructure:"barge_via_sidecar"`
 	// JoinCallFallbackURL is where /join-call forwards a uuid this agent does
 	// not know.
 	//

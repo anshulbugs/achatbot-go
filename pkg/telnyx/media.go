@@ -162,11 +162,6 @@ type Serializer struct {
 	// case a little tail leaks through, which is the bug we started with rather
 	// than a dead call.
 	mutedUntil time.Time
-	// tap receives a copy of inbound caller audio, for live listening. nil on
-	// every call nobody is listening to, which is almost all of them.
-	tap func(pcm8 []byte, rate int)
-	// deaf stops inbound audio reaching the pipeline. See Deafen.
-	deaf bool
 
 	// holdInterruptsUntil suppresses the "clear" event while audio we have
 	// already sent is still playing at Telnyx.
@@ -377,25 +372,6 @@ func (s *Serializer) resetPlayback() {
 	s.mu.Unlock()
 }
 
-// SetInboundTap installs a callback receiving a COPY of the caller's audio, at
-// 8 kHz, before the echo gate. nil removes it.
-//
-// For live listening: it lets an operator's room be fed from the call without
-// putting a second reader on the media socket, which is the thing that cannot
-// be done safely while the pipeline owns it. The copy is deliberate — a tap
-// that handed out the pipeline's own buffer could change what the agent hears.
-func (s *Serializer) SetInboundTap(fn func(pcm8 []byte, rate int)) {
-	s.mu.Lock()
-	s.tap = fn
-	s.mu.Unlock()
-}
-
-func (s *Serializer) inboundTap() func([]byte, int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.tap
-}
-
 // Hush stops this call's outbound audio for good.
 //
 // FOR THE HANDOVER GAP. When an operator barges, the agent cannot simply be
@@ -411,28 +387,6 @@ func (s *Serializer) inboundTap() func([]byte, int) {
 func (s *Serializer) Hush() {
 	s.mu.Lock()
 	s.mutedUntil = time.Now().Add(24 * time.Hour)
-	s.mu.Unlock()
-}
-
-// Deafen stops feeding the pipeline, while the tap keeps running.
-//
-// MUTING THE OUTPUT IS NOT ENOUGH. Hush only drops audio at the last step: VAD,
-// ASR, the LLM and TTS all carry on, on the GPU, producing replies that are
-// then thrown away. On a barged call that is a whole pipeline's compute spent
-// on a conversation the agent is no longer part of — and barged calls are
-// exactly the long ones, because a person is on them.
-//
-// Starving the input is what actually stops the work. With no frames the VAD
-// never fires, so nothing downstream runs. The tap is upstream of this, so the
-// operator still hears the caller.
-//
-// The call keeps its pool instances and so still counts against the GPU
-// ceiling. That is deliberate: releasing the slot while holding VAD/ASR/TTS
-// instances would let the next dispatch in against capacity that does not
-// exist.
-func (s *Serializer) Deafen() {
-	s.mu.Lock()
-	s.deaf = true
 	s.mu.Unlock()
 }
 
@@ -476,29 +430,6 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 		return nil, nil
 	}
 	pcm8 := MuLawToPCM16(mulaw)
-
-	// Tap the caller's audio BEFORE the echo gate.
-	//
-	// An operator listening in wants to hear the call as it is, not as the
-	// pipeline needs it: the gate exists to stop the agent transcribing itself,
-	// and applying it here would cut the caller out of the operator's ear
-	// whenever the agent happened to be speaking. Taking a copy this early also
-	// means the tap cannot change what the pipeline receives.
-	if tap := s.inboundTap(); tap != nil {
-		cp := make([]byte, len(pcm8))
-		copy(cp, pcm8)
-		tap(cp, telnyxRate)
-	}
-
-	// Handed to an operator: the tap above still feeds their room, but nothing
-	// downstream of here should run. See Deafen.
-	s.mu.Lock()
-	deaf := s.deaf
-	s.mu.Unlock()
-	if deaf {
-		return nil, nil
-	}
-
 	if s.suppressEcho {
 		if pcm8 = s.keepInbound(pcm8); pcm8 == nil {
 			return nil, nil // steady echo while the bot speaks: drop it
