@@ -451,12 +451,15 @@ func handleJoinCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "uuid required", http.StatusBadRequest)
 		return
 	}
-	p := calls.get(id)
+	// By carrier id OR platform session id: the platform stores whichever key
+	// its watcher discovered, and that is often the session id. See
+	// callRegistry.bySession.
+	p, id := calls.resolve(id)
 	if p == nil || p.platform == nil {
 		// Not one of ours. Hand it to whoever it does belong to, so the
 		// platform can point its single join_call_url here without cutting off
 		// the other agent's calls.
-		if proxyJoinCall(w, r, id) {
+		if proxyJoinCall(w, r, r.URL.Query().Get("uuid")) {
 			return
 		}
 		// 404 is the right answer and the caller expects it: it retries on

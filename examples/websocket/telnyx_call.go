@@ -174,9 +174,54 @@ type callRegistry struct {
 	// ended keeps finished calls reachable briefly, for carrier events that
 	// arrive after the hangup. See remember.
 	ended map[string]endedCall
+	// bySession maps a platform session id to the carrier call id.
+	//
+	// NEEDED BECAUSE THE PLATFORM CALLS US BY EITHER. Its watcher takes
+	// whichever public-Redis key it discovered and stores that as the call's
+	// id — and we publish to both the session id and the call-control id, so
+	// it is frequently the session id that comes back on /join-call. Keyed
+	// only by carrier id, we answered "not ours" and proxied our OWN calls to
+	// the other agent, which 404s them: every operator Join on those calls got
+	// nothing.
+	bySession map[string]string
 }
 
-func newCallRegistry() *callRegistry { return &callRegistry{m: map[string]*callParams{}} }
+func newCallRegistry() *callRegistry {
+	return &callRegistry{
+		m:         map[string]*callParams{},
+		bySession: map[string]string{},
+	}
+}
+
+// linkSession makes a call reachable by its platform session id as well as by
+// its carrier id. See callRegistry.bySession.
+func (r *callRegistry) linkSession(sessionID, callID string) {
+	if sessionID == "" || callID == "" {
+		return
+	}
+	r.mu.Lock()
+	if r.bySession == nil {
+		r.bySession = map[string]string{}
+	}
+	r.bySession[sessionID] = callID
+	r.mu.Unlock()
+}
+
+// resolve returns the call for either a carrier call id or a platform session
+// id, and the carrier id it resolved to.
+func (r *callRegistry) resolve(id string) (*callParams, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil {
+		return p, id
+	}
+	if callID, ok := r.bySession[id]; ok {
+		if p := r.m[callID]; p != nil {
+			return p, callID
+		}
+	}
+	return nil, ""
+}
 
 // tc returns the Telnyx client that owns this call.
 //

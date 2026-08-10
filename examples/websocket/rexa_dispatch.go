@@ -323,6 +323,10 @@ func (d *platformDispatcher) DispatchPhone(ctx context.Context, req rexa.PhoneDi
 	p.platform.live.AddKey(callControlID)
 	p.platform.live.Event(rexa.EventRinging, nil)
 	calls.put(callControlID, p)
+	// Also reachable by session id. The platform's Join arrives with whichever
+	// id its watcher bound, and because we publish events under both, that is
+	// frequently the session id rather than the carrier's.
+	calls.linkSession(req.SessionID, callControlID)
 	log.Printf("rexa: session=%s dialing %s call=%s", req.SessionID, req.ToNumber, callControlID)
 	log.Printf("rexa: session=%s dispatch carried: %s", req.SessionID, dispatchFeatures(req, p))
 	// uuid, NOT just agent_session_id.
