@@ -189,18 +189,32 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		// Conference and SIP leg CONCURRENTLY. They do not depend on each
+		// other — the dial needs only the room's SIP address — and each is a
+		// carrier round trip the operator is waiting through.
+		type dialResult struct {
+			leg string
+			err error
+		}
+		dialed := make(chan dialResult, 1)
+		go func() {
+			leg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
+			dialed <- dialResult{leg, err}
+		}()
+
 		// The conference is named for the session so it is greppable across
 		// Telnyx's dashboard, our logs and the platform's.
 		confID, err := rc.client.ConferenceCreate(ctx, "live-"+rc.sessionID, id)
+		res := <-dialed
 		if err != nil {
 			log.Printf("rexa: session=%s conference create failed (call unaffected): %v", rc.sessionID, err)
 			return
 		}
-		sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
-		if err != nil {
-			log.Printf("rexa: session=%s SIP dial to room failed (call unaffected): %v", rc.sessionID, err)
+		if res.err != nil {
+			log.Printf("rexa: session=%s SIP dial to room failed (call unaffected): %v", rc.sessionID, res.err)
 			return
 		}
+		sipLeg := res.leg
 		// Wait for the leg to be ANSWERED before conferencing it.
 		//
 		// Joining straight after the dial fails with 422 "Call not answered
@@ -217,7 +231,7 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 		// UNMUTED. It joins muted only if the agent is staying, and it is not:
 		// see below.
 		joined := false
-		for attempt := 0; attempt < 20; attempt++ {
+		for attempt := 0; attempt < 40; attempt++ {
 			err = rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
 			if err == nil {
 				joined = true
@@ -226,7 +240,7 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 			if !strings.Contains(err.Error(), "not answered yet") {
 				break
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 		if !joined {
 			log.Printf("rexa: session=%s room leg failed to join conference: %v", rc.sessionID, err)
@@ -258,6 +272,9 @@ func endLiveRoom(rc *rexaCall) {
 		return
 	}
 	name := rc.roomName
+	// Stop watching before the room goes: a poller still holding this entry
+	// would try to bridge a call that has hung up.
+	unwatchRoom(name)
 	rc.roomName = ""
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -278,51 +295,98 @@ func liveJoinURLFor(rc *rexaCall) string {
 	return rc.joinURL
 }
 
-// watchForListener bridges the call into its room the moment an operator
-// arrives, and gives up when the call ends.
+// Rooms being watched for a listener, keyed by Daily room name.
 //
-// WHY POLL AT ALL. bridgeLiveRoom cannot simply run when the call is answered:
+// One shared map plus one poller, rather than a goroutine and an API call per
+// call: see daily.PresenceAll. What an operator notices is the gap between
+// pressing Join and the agent going quiet, and that gap is this interval.
+var (
+	watchMu      sync.Mutex
+	watchedRooms = map[string]watchedRoom{}
+	watchPolling bool
+)
+
+type watchedRoom struct {
+	callID string
+	rc     *rexaCall
+}
+
+// listenerPollInterval is how often the whole domain's presence is checked.
+// One request covers every room, so this is a fixed cost no matter how many
+// calls are running.
+const listenerPollInterval = time.Second
+
+// watchForListener arranges for the call to be bridged into its room as soon as
+// somebody joins it.
+//
+// bridgeLiveRoom cannot simply run when the call is answered:
 // `allow_sip_only_in_room` is false on this Daily domain, so a SIP participant
 // that would be alone in the room is rejected with SIP 480 — a failure that
 // reads as a network fault rather than as the policy it is. The phone leg has
 // to arrive AFTER the human, so something has to notice the human arriving.
-// Daily can push that as a webhook, but registering one needs a stable callback
-// URL and ours is a tunnel that renames itself on every restart.
-//
-// The cost is one presence check per interval per watched call, and it stops at
-// the first listener or when the call leaves the registry — so a call nobody
-// opens pays for the length of the call and nothing after it.
 func watchForListener(id string, rc *rexaCall) {
 	if dailyClient == nil || rc == nil || rc.roomName == "" || rc.roomSIP == "" {
 		return
 	}
-	room, session := rc.roomName, rc.sessionID
-	go func() {
-		// Slow enough to be cheap across a full campaign, fast enough that an
-		// operator who clicks Join is not left in silence wondering whether it
-		// worked.
-		const interval = 5 * time.Second
-		ctx := context.Background()
-		for {
-			time.Sleep(interval)
-			// The call is the clock. When it is gone from the registry it has
-			// hung up, and there is nothing left to listen to.
-			if calls.get(id) == nil {
-				return
-			}
-			n, err := dailyClient.Presence(ctx, room)
-			if err != nil {
-				// Transient: keep watching. A presence check that fails once
-				// is not a reason to deny the operator the feature for the
-				// rest of the call.
-				continue
-			}
-			if n == 0 {
-				continue
-			}
-			log.Printf("rexa: session=%s listener joined room %s — bridging the call in", session, room)
-			bridgeLiveRoom(id, rc)
-			return
+	watchMu.Lock()
+	watchedRooms[rc.roomName] = watchedRoom{callID: id, rc: rc}
+	start := !watchPolling
+	watchPolling = true
+	watchMu.Unlock()
+	if start {
+		go pollForListeners()
+	}
+}
+
+// unwatchRoom stops watching a room, on bridge or on hangup.
+func unwatchRoom(name string) {
+	if name == "" {
+		return
+	}
+	watchMu.Lock()
+	delete(watchedRooms, name)
+	watchMu.Unlock()
+}
+
+// pollForListeners runs for the life of the process, checking domain presence
+// while any room is being watched and sleeping cheaply when none is.
+func pollForListeners() {
+	ctx := context.Background()
+	for {
+		time.Sleep(listenerPollInterval)
+
+		watchMu.Lock()
+		waiting := len(watchedRooms)
+		watchMu.Unlock()
+		if waiting == 0 {
+			continue
 		}
-	}()
+
+		present, err := dailyClient.PresenceAll(ctx)
+		if err != nil {
+			// Transient. A presence check that fails once is not a reason to
+			// deny the feature for the rest of the call.
+			continue
+		}
+
+		watchMu.Lock()
+		var ready []watchedRoom
+		for room, w := range watchedRooms {
+			if present[room] > 0 {
+				ready = append(ready, w)
+				delete(watchedRooms, room)
+			}
+		}
+		watchMu.Unlock()
+
+		for _, w := range ready {
+			// The call may have ended between the poll and here.
+			if calls.get(w.callID) == nil {
+				continue
+			}
+			log.Printf("rexa: session=%s listener joined room %s — bridging the call in",
+				w.rc.sessionID, w.rc.roomName)
+			bridgeLiveRoom(w.callID, w.rc)
+		}
+	}
 }

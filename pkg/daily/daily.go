@@ -343,3 +343,38 @@ func (c *Client) AccessLink(ctx context.Context, id string, ttl time.Duration) (
 	}
 	return out.DownloadLink, nil
 }
+
+// PresenceAll returns the participant count for every room that has anyone in
+// it, in ONE request for the whole domain.
+//
+// The per-room Presence call is what live listening used, and it scales the
+// wrong way: a check per watched call per interval, so sixty concurrent calls
+// at one second apart would be sixty requests a second. That forced the
+// interval up to five seconds, which an operator experiences as five seconds of
+// the agent still talking after they press Join.
+//
+// This costs one request regardless of how many calls are in flight, so the
+// interval can be short enough to feel immediate.
+func (c *Client) PresenceAll(ctx context.Context) (map[string]int, error) {
+	if c == nil {
+		return nil, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := c.do(ctx, http.MethodGet, "/presence", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(raw))
+	for room, v := range raw {
+		var participants []json.RawMessage
+		if err := json.Unmarshal(v, &participants); err == nil {
+			out[room] = len(participants)
+			continue
+		}
+		// A shape we do not recognise still means the room was listed, and
+		// Daily only lists rooms with someone in them. Counting it as one
+		// occupant is the reading that does not lose a listener to a schema
+		// change.
+		out[room] = 1
+	}
+	return out, nil
+}
