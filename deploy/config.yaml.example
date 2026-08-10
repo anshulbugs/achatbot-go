@@ -9,6 +9,42 @@ server:
   record_calls: false        # ask Telnyx to record every answered call (dual channel, mp3).
                              # Billed and stored by Telnyx — keep off for large runs.
   inbound_hello: ""          # greeting spoken when the agent answers an inbound call
+  # How long an outbound call rings before the carrier reports no_answer.
+  #
+  # THIS IS A VOICEMAIL SETTING as much as a ring setting. Carriers divert to
+  # voicemail somewhere around 25-35s, so Telnyx's default of 30 sits exactly on
+  # that boundary: a line whose mailbox would have answered at 32s is abandoned
+  # at 30 and reported no_answer, and no message is left because nothing ever
+  # picked up. 45 clears the divert on every number tested here.
+  dial_timeout_secs: 45
+  # Force every call onto one kokoro speaker id, ignoring the voice the platform
+  # asked for. Useful while a single voice is being tuned; unset for production
+  # multi-voice campaigns. 0 = honour the dispatch.
+  force_voice_id: 3
+  # Where an operator's Join is bridged from, for calls THIS agent does not own.
+  #
+  # The platform has a single join_call_url shared by every call agent, so
+  # pointing it at this one would break Join for the other fleet's calls.
+  # /join-call answers for its own calls and proxies the rest here, unchanged,
+  # so one URL can front both agents. Empty disables proxying and an unknown
+  # call id gets a plain 404.
+  join_call_fallback_url: ""
+  # How an operator's Join reaches this agent. The two modes are either/or,
+  # because the dialer skips its own Join request whenever a room link has
+  # already been stashed from our join_daily event.
+  #
+  # true  (default): room created at dispatch and published to Redis up front.
+  #                  Join works with no platform-side change, but the only
+  #                  signal left is Daily's presence API, which lags a real
+  #                  join by ~5.6s.
+  # false          : nothing published up front, so the dialer calls
+  #                  /join-call on the click and bridging starts at once.
+  #                  Set this ONLY once the platform's JOIN_CALL_URL points
+  #                  here, or Join finds no room at all.
+  #
+  # Either way, a registered Daily webhook (participant.joined) makes the join
+  # arrive instantly — see DAILY_API_KEY below.
+  live_room_prepublish: true
   # Answering-machine detection on outbound calls. THIS KEY WAS PREVIOUSLY ABSENT,
   # which left it "" -> "disabled" on every dial, so no call.machine.* webhook could
   # ever fire and the voicemail path was dead code. Do not remove it again.
@@ -19,7 +55,13 @@ server:
   voicemail_detection: premium
   # Spoken into the voicemail via the pre-rendered announcement (no GPU slot).
   # Empty means hang up as soon as a machine is detected.
-  voicemail_message: ""
+  #
+  # SET THIS EVEN IF THE PLATFORM SENDS ONE PER CALL. A dispatch that omits
+  # voicemail_message used to fall through to nothing, so the agent detected the
+  # machine in four seconds, spent no GPU on it, and hung up with nothing to say
+  # — the one outcome answering-machine detection exists to avoid. It is a
+  # fallback, so keep the wording campaign-neutral.
+  voicemail_message: "Hi, sorry we missed you. We will try again later."
   # Concurrency ceiling for platform-dispatched calls. Past this many calls
   # holding a pipeline, /connection is refused with at_capacity and /health
   # reports accepting=false. Calls playing a voicemail announcement do NOT

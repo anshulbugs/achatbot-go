@@ -132,6 +132,39 @@ set -a
 [ -f "$TELNYX_ENV" ] && . "$TELNYX_ENV"
 set +a
 
+# Preflight: say out loud which optional features this start will and will not
+# have.
+#
+# Every one of these degrades SILENTLY. A missing DAILY_API_KEY does not fail
+# anything — browser calls are refused, listen-in never appears, browser
+# recordings are never made, and barging drops back to a six-second lag, all
+# without an error. A missing sidecar does the same to /connection_webrtc. The
+# whole class of "we deployed it and the feature was quietly off" is what this
+# block exists to stop, and it has already cost us once with
+# voicemail_detection.
+log "Preflight"
+[ -n "$REXA_OUTBOUND_HMAC_SECRET" ] && [ -n "$REXA_INBOUND_HMAC_SECRET" ] \
+  || die "$SECRETS has no HMAC secrets — the contract endpoints will not register at all"
+if [ -n "$DAILY_API_KEY" ]; then
+  printf '    daily            ON  (listen-in, browser calls, browser recording, instant barge)\n'
+else
+  printf '    daily            OFF (no listen-in, no browser calls, no browser recording) — set DAILY_API_KEY\n'
+fi
+if [ -x "$SIDECAR_PYTHON" ] && [ -f "$SIDECAR_SCRIPT" ]; then
+  printf '    sidecar          ON  (%s)\n' "$SIDECAR_SCRIPT"
+else
+  printf '    sidecar          OFF — browser calls will be refused. Run deploy/scripts/sidecar-install.sh\n'
+fi
+for key in voicemail_detection voicemail_message dial_timeout_secs; do
+  val=$(grep -E "^  ${key}:" config.yaml | head -1 | cut -d: -f2- | sed 's/^ *//;s/ *#.*//')
+  case "$val" in
+    ""|'""'|disabled)
+      printf '    %-16s NOT SET in config.yaml — see deploy/config.yaml.example\n' "$key" ;;
+    *)
+      printf '    %-16s %s\n' "$key" "$(printf '%.60s' "$val")" ;;
+  esac
+done
+
 ACHATBOT_SERVER_ADDR=":${PORT}" \
 ACHATBOT_VAD_POOL_SIZE="$POOL" \
 ACHATBOT_ASR_POOL_SIZE="$POOL" \
