@@ -12,7 +12,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -141,44 +144,42 @@ func stopSidecar(sessionID string) {
 // call as it connects, and a link that appears ten seconds into the
 // conversation has already missed the part they wanted.
 func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) string {
-	if dailyClient == nil || rc == nil || !redisConfigured {
-		return ""
-	}
-	// No recording: this room exists so an operator can listen to a PHONE call,
-	// and Telnyx is already recording that call end to end. A second copy would
-	// bill twice and give the platform two recordings of one conversation.
+	// DELIBERATELY DOES NOTHING NOW.
 	//
-	// Public: see RoomOptions.Public. A private room needs the dialer to thread
-	// the meeting token into the Daily SDK, and it did not — "You are not
-	// allowed to join this meeting", both before and after we started publishing
-	// the token correctly.
-	room, err := dailyClient.CreateRoom(ctx, daily.RoomOptions{TTL: roomTTL, Public: true})
-	if err != nil || room == nil {
-		// Never fail the call over the listening feature. The call is the
-		// product; this is a window onto it.
-		log.Printf("rexa: session=%s live room creation failed (call continues): %v", rc.sessionID, err)
-		return ""
-	}
-	rc.roomName = room.Name
-	rc.roomSIP = room.SIPURI
-	rc.joinURL = room.JoinURL
-	// Still sends the token, even though the room no longer needs one: a client
-	// that does use it gets owner rights, which is what lets an operator unmute
-	// and speak rather than only listen.
-	rc.live.JoinDaily(room.URL, room.JoinURL, room.Token)
-	log.Printf("rexa: session=%s live room %s ready", rc.sessionID, room.Name)
-	return room.Name
+	// The room used to be created here, before the dial, so the join link was
+	// in Redis while the phone rang. That turned out to be the reason barging
+	// took ten seconds: the dialer stashes the link from our join_daily event
+	// and then takes an "already have a room" shortcut past the very request
+	// that would have told us the operator had pressed Join
+	// (rexa-dialer calls.py `_bridge_daily_room`). Left with no push signal, the
+	// agent could only poll Daily's presence API, which lags a join by about
+	// five and a half seconds.
+	//
+	// The room is now made on demand in handleJoinCall, which also means a room
+	// exists only for calls somebody actually opened rather than one per
+	// dispatch.
+	return ""
 }
 
-// bridgeLiveRoom puts the answered call and the room's SIP endpoint into one
-// conference, so audio flows between them.
+// bridgeLiveRoom puts the call and the room's SIP endpoint into one conference,
+// so audio flows between the caller and whoever is in the room.
 //
 // Conferencing rather than transferring: a transfer hands the leg away and ends
 // the agent's conversation, which is the opposite of listening in on it.
 //
-// Called after the call is answered. Before that there is nothing to listen to,
-// and a SIP leg dialled during the ring would bill for the whole ring period on
-// a call that may never be picked up.
+// RETRIES THE WHOLE DIAL, not just the join. Two carrier-side facts make a
+// single attempt unreliable, and they pull in opposite directions:
+//
+//   - `allow_sip_only_in_room` is false on this Daily domain, so a SIP leg that
+//     would be alone in the room is rejected with SIP 480 — and this runs the
+//     moment the operator is handed the URL, a beat before their browser is
+//     actually in the room.
+//   - A leg that has been dialled cannot be conferenced until it has been
+//     answered: 422 "Call not answered yet", which is what left one real barge
+//     with a conference the SIP leg never entered.
+//
+// So the outer loop redials a leg that died, and the inner one waits for a leg
+// that is still being answered.
 func bridgeLiveRoom(id string, rc *rexaCall) {
 	if rc == nil || rc.roomSIP == "" || rc.client == nil || rc.bridged {
 		return
@@ -186,79 +187,53 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 	rc.bridged = true
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-
-		// Conference and SIP leg CONCURRENTLY. They do not depend on each
-		// other — the dial needs only the room's SIP address — and each is a
-		// carrier round trip the operator is waiting through.
-		type dialResult struct {
-			leg string
-			err error
-		}
-		dialed := make(chan dialResult, 1)
-		go func() {
-			leg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
-			dialed <- dialResult{leg, err}
-		}()
 
 		// The conference is named for the session so it is greppable across
 		// Telnyx's dashboard, our logs and the platform's.
 		confID, err := rc.client.ConferenceCreate(ctx, "live-"+rc.sessionID, id)
-		res := <-dialed
 		if err != nil {
 			log.Printf("rexa: session=%s conference create failed (call unaffected): %v", rc.sessionID, err)
-			return
-		}
-		if res.err != nil {
-			log.Printf("rexa: session=%s SIP dial to room failed (call unaffected): %v", rc.sessionID, res.err)
-			return
-		}
-		sipLeg := res.leg
-		// Wait for the leg to be ANSWERED before conferencing it.
-		//
-		// Joining straight after the dial fails with 422 "Call not answered
-		// yet" — the leg is still being set up, and Daily has not picked it up.
-		// That is exactly what happened on a real barge: the conference was
-		// created, the SIP leg never entered it, and the operator sat in the
-		// room hearing nothing.
-		//
-		// Retried rather than waited on a webhook: this leg is dialled without
-		// a webhook override, so its events go to the application's configured
-		// URL rather than necessarily to us, and a poll of a command we are
-		// going to issue anyway needs no extra plumbing.
-		//
-		// UNMUTED. It joins muted only if the agent is staying, and it is not:
-		// see below.
-		joined := false
-		for attempt := 0; attempt < 40; attempt++ {
-			err = rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
-			if err == nil {
-				joined = true
-				break
-			}
-			if !strings.Contains(err.Error(), "not answered yet") {
-				break
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		if !joined {
-			log.Printf("rexa: session=%s room leg failed to join conference: %v", rc.sessionID, err)
+			rc.bridged = false
 			return
 		}
 
-		// The operator has the call now — step out of it.
-		//
-		// Asked for explicitly: barging should behave like a transfer, with the
-		// agent gone rather than talking over the person who just took over.
-		// The conference keeps the caller and the operator connected without
-		// us, so leaving costs the caller nothing.
-		//
-		// NOTE this makes joining the room a TAKEOVER rather than a way to
-		// listen silently. There is no signal that distinguishes the two today
-		// — both are just "somebody appeared in the room".
-		leaveCall(id, rc.client, "operator barged in")
-		log.Printf("rexa: session=%s live room bridged (conference=%s)", rc.sessionID, confID)
+		for dial := 0; dial < 12; dial++ {
+			if calls.get(id) == nil {
+				return // the call ended while we were setting this up
+			}
+			sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
+			if err != nil {
+				log.Printf("rexa: session=%s SIP dial to room failed: %v", rc.sessionID, err)
+				time.Sleep(time.Second)
+				continue
+			}
+			// UNMUTED: the agent is about to leave, and a muted operator in an
+			// agentless call is silence for the caller.
+			joinErr := error(nil)
+			for attempt := 0; attempt < 24; attempt++ {
+				joinErr = rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
+				if joinErr == nil {
+					log.Printf("rexa: session=%s live room bridged (conference=%s)", rc.sessionID, confID)
+					// The operator has the call now — step out of it. Asked for
+					// explicitly: barging should behave like a transfer, with
+					// the agent gone rather than talking over the person who
+					// just took over.
+					leaveCall(id, rc.client, "operator barged in")
+					return
+				}
+				if !strings.Contains(joinErr.Error(), "not answered yet") {
+					break
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+			log.Printf("rexa: session=%s room leg not in conference yet (attempt %d): %v",
+				rc.sessionID, dial+1, joinErr)
+			time.Sleep(time.Second)
+		}
+		log.Printf("rexa: session=%s gave up bridging the live room", rc.sessionID)
+		rc.bridged = false
 	}()
 }
 
@@ -390,3 +365,94 @@ func pollForListeners() {
 		}
 	}
 }
+
+// handleJoinCall serves the dialer's Join/Barge button.
+//
+// THIS IS THE SIGNAL WE WERE MISSING. The dialer does not sit quietly when an
+// operator presses Join — it issues
+// `GET {join_call_url}?uuid=<call_uuid>` and expects a room back
+// (rexa-dialer apps/api/app/routers/calls.py `_bridge_daily_room`). We never
+// implemented the endpoint, so the only way to notice a listener was to poll
+// Daily's presence API — and that API lags a join by about five and a half
+// seconds, measured. Five seconds of detection plus a five second bridge is the
+// ten seconds an operator spends listening to the agent after taking over.
+//
+// The request arrives on the click. Answering it removes the detection delay
+// completely.
+//
+// The room is created HERE rather than at dispatch, which also settles the cost
+// worry this feature was gated on: a room now exists only for calls somebody
+// actually opened, instead of one per dispatched call whether or not anyone
+// ever looks.
+func handleJoinCall(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("uuid")
+	if id == "" {
+		http.Error(w, "uuid required", http.StatusBadRequest)
+		return
+	}
+	p := calls.get(id)
+	if p == nil || p.platform == nil {
+		// 404 is the right answer and the caller expects it: it retries on
+		// 0/0.5/1/2s, which covers a Join pressed while the dial is still
+		// being registered.
+		http.Error(w, "unknown call", http.StatusNotFound)
+		return
+	}
+	rc := p.platform
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if err := ensureLiveRoom(ctx, rc); err != nil {
+		log.Printf("rexa: session=%s join-call could not make a room: %v", rc.sessionID, err)
+		http.Error(w, "room unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Answer FIRST, bridge after. The operator's browser cannot join a room it
+	// has not been told about, and the SIP leg cannot enter a room with nobody
+	// in it — allow_sip_only_in_room is false on this domain. So the reply is
+	// what unblocks the bridge, and holding it back to bridge first would
+	// deadlock the two against each other.
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"room_url":       rc.roomURL,
+		"daily_room_url": rc.roomURL,
+		"token":          rc.roomToken,
+		"daily_token":    rc.roomToken,
+		"url":            rc.roomURL,
+	})
+	log.Printf("rexa: session=%s join-call — operator is opening room %s", rc.sessionID, rc.roomName)
+
+	bridgeLiveRoom(id, rc)
+}
+
+// ensureLiveRoom creates this call's listen-in room if it does not have one.
+func ensureLiveRoom(ctx context.Context, rc *rexaCall) error {
+	if dailyClient == nil {
+		return errNoDaily
+	}
+	if rc.roomName != "" {
+		return nil
+	}
+	room, err := dailyClient.CreateRoom(ctx, daily.RoomOptions{TTL: roomTTL, Public: true})
+	if err != nil {
+		return err
+	}
+	if room == nil {
+		return errNoDaily
+	}
+	rc.roomName = room.Name
+	rc.roomSIP = room.SIPURI
+	rc.roomURL = room.URL
+	rc.roomToken = room.Token
+	rc.joinURL = room.JoinURL
+	// Published for the tailer's own record. It arrives after the operator has
+	// already been handed the URL directly, which is the point: publishing it
+	// up front is what made the dialer take its "already stashed" shortcut and
+	// never call us.
+	rc.live.JoinDaily(room.URL, room.JoinURL, room.Token)
+	log.Printf("rexa: session=%s live room %s ready", rc.sessionID, room.Name)
+	return nil
+}
+
+var errNoDaily = errors.New("daily is not configured")

@@ -631,12 +631,16 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 		&platformDispatcher{publicURL: strings.TrimRight(publicURL, "/")}, rexaMetrics)
 	srv.Routes(mux)
 	srv.RoutesDashboard(mux)
+	// The dialer's Join/Barge button. Not part of the platform contract —
+	// this is rexa-dialer's own `join_call_url`, and answering it is what makes
+	// barging immediate instead of waiting on Daily's presence API.
+	mux.HandleFunc("/join-call", handleJoinCall)
 
 	ceiling := "unlimited"
 	if cfg.Server.MaxGPUCalls > 0 {
 		ceiling = strconv.Itoa(cfg.Server.MaxGPUCalls)
 	}
-	log.Printf("rexa: contract endpoints enabled (/health /connection /incoming /connection_webrtc), "+
+	log.Printf("rexa: contract endpoints enabled (/health /connection /incoming /connection_webrtc /join-call), "+
 		"dashboard at /dashboard, gpu-call ceiling=%s, public=%s", ceiling, publicURL)
 	return true
 }

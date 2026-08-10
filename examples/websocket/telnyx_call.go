@@ -117,9 +117,11 @@ type rexaCall struct {
 	// that is the platform's signal that something is watching this call, and
 	// a room per call regardless would be a large Daily bill for a feature
 	// almost nobody opens.
-	roomName string
-	roomSIP  string
-	joinURL  string
+	roomName  string
+	roomSIP   string
+	roomURL   string
+	roomToken string
+	joinURL   string
 	// bridged guards against dialling a second SIP leg into the room if the
 	// answered event ever arrives twice.
 	bridged bool
