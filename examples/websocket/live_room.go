@@ -125,7 +125,7 @@ func startPrewarm(rc *rexaCall) {
 	if !cfg.Server.LiveRoomPrewarm || prewarmScript == "" || rc == nil {
 		return
 	}
-	if rc.roomURL == "" || rc.roomToken == "" {
+	if rc.roomURL == "" || rc.roomName == "" {
 		return
 	}
 	prewarmMu.Lock()
@@ -134,26 +134,48 @@ func startPrewarm(rc *rexaCall) {
 	if already {
 		return
 	}
+	go startPrewarmProc(rc.sessionID, rc.roomName, rc.roomURL)
+}
+
+// startPrewarmProc mints the pre-joiner its own token and launches it.
+//
+// A SEPARATE TOKEN, not the operator's. The operator's token carries
+// start_cloud_recording and a name every listener check reacts to, so joining
+// with it made the pre-joiner indistinguishable from a supervisor — which is
+// exactly how the first one to run hushed the agent mid-greeting. This one is
+// named so both detectors can skip it, and is not an owner, because it never
+// speaks and must not start a recording.
+//
+// Off the answered path in its own goroutine: minting costs ~300ms and the
+// greeting is being spoken.
+func startPrewarmProc(sessionID, roomName, roomURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	token, err := dailyClient.PrewarmToken(ctx, roomName, time.Now().Add(roomTTL).Unix())
+	if err != nil || token == "" {
+		log.Printf("rexa: session=%s prewarm token failed (barge unaffected): %v", sessionID, err)
+		return
+	}
 
 	cmd := exec.Command(sidecarPython, prewarmScript,
-		"--room-url", rc.roomURL,
-		"--token", rc.roomToken,
-		"--session", rc.sessionID)
+		"--room-url", roomURL,
+		"--token", token,
+		"--session", sessionID)
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = log.Writer()
 	if err := cmd.Start(); err != nil {
-		log.Printf("rexa: session=%s prewarm failed to start (barge unaffected): %v", rc.sessionID, err)
+		log.Printf("rexa: session=%s prewarm failed to start (barge unaffected): %v", sessionID, err)
 		return
 	}
 	prewarmMu.Lock()
-	prewarmers[rc.sessionID] = cmd
+	prewarmers[sessionID] = cmd
 	prewarmMu.Unlock()
-	log.Printf("rexa: session=%s prewarming the live room — SIP will be registered before any barge", rc.sessionID)
+	log.Printf("rexa: session=%s prewarming the live room — SIP will be registered before any barge", sessionID)
 
 	go func() {
 		_ = cmd.Wait()
 		prewarmMu.Lock()
-		delete(prewarmers, rc.sessionID)
+		delete(prewarmers, sessionID)
 		prewarmMu.Unlock()
 	}()
 }
@@ -763,6 +785,12 @@ func handleDailyWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ev.Type != "participant.joined" {
+		return
+	}
+	// Our own pre-joiner, not a supervisor. It joins every prewarmed room a
+	// second after the call is answered, and treating that as a barge hushed
+	// the agent in the middle of its greeting and took it off the call.
+	if ev.Payload.UserName == daily.PrewarmUserName {
 		return
 	}
 	room := firstNonEmpty(ev.Payload.Room, ev.Payload.RoomName, ev.Room, ev.RoomName)

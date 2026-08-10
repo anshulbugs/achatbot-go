@@ -166,13 +166,33 @@ func (c *Client) CreateRoom(ctx context.Context, opt RoomOptions) (*Room, error)
 // holds this token and joins before the browser does, so recording begins
 // ahead of the greeting rather than a second or two into it.
 func (c *Client) meetingToken(ctx context.Context, room string, exp int64, record bool) (string, error) {
+	return c.namedToken(ctx, room, exp, record, "operator")
+}
+
+// PrewarmUserName marks the room pre-joiner so it is not mistaken for a
+// supervisor.
+//
+// EVERY listener detection we have is "a participant appeared" — the presence
+// sweep counts them, the Daily webhook fires on them. A pre-joiner is a
+// participant, so the first one ever to run was read as an operator barging in
+// one second after the call was answered: the agent hushed mid-greeting, left,
+// and the caller heard nothing again. Both detectors must skip this name.
+const PrewarmUserName = "__prewarm__"
+
+// PrewarmToken mints a token for the room pre-joiner. Not an owner — it never
+// speaks, and it must never start a recording.
+func (c *Client) PrewarmToken(ctx context.Context, room string, exp int64) (string, error) {
+	return c.namedToken(ctx, room, exp, false, PrewarmUserName)
+}
+
+func (c *Client) namedToken(ctx context.Context, room string, exp int64, record bool, userName string) (string, error) {
 	props := map[string]any{
 		"room_name": room,
 		"exp":       exp,
 		// Owner so the operator can unmute and speak to the caller, which
 		// is the point of joining rather than reading a transcript.
-		"is_owner":  true,
-		"user_name": "operator",
+		"is_owner":  userName != PrewarmUserName,
+		"user_name": userName,
 	}
 	if record {
 		props["enable_recording"] = "cloud"
@@ -365,9 +385,20 @@ func (c *Client) PresenceAll(ctx context.Context) (map[string]int, error) {
 	}
 	out := make(map[string]int, len(raw))
 	for room, v := range raw {
-		var participants []json.RawMessage
+		var participants []struct {
+			UserName string `json:"userName"`
+		}
 		if err := json.Unmarshal(v, &participants); err == nil {
-			out[room] = len(participants)
+			// The pre-joiner does not count as a listener. It is in every
+			// prewarmed room by design, so counting it would report every
+			// answered call as being watched and bridge them all.
+			n := 0
+			for _, p := range participants {
+				if p.UserName != PrewarmUserName {
+					n++
+				}
+			}
+			out[room] = n
 			continue
 		}
 		// A shape we do not recognise still means the room was listed, and
