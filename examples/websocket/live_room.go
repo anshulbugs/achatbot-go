@@ -251,10 +251,10 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			if listenOnly {
 				mode = "listen (monitor, agent stays)"
 			}
-			log.Printf("rexa: session=%s live room bridged in %s as %s (conference %s, dial+join %s, joined at ringback)",
+			log.Printf("rexa: session=%s live room bridged in %s as %s (conference %s %s, dial+join %s leg=%s, joined at ringback)",
 				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond), mode,
-				confAt.Round(time.Millisecond),
-				(time.Since(bridgeStart) - confAt).Round(time.Millisecond))
+				confAt.Round(time.Millisecond), confID,
+				(time.Since(bridgeStart) - confAt).Round(time.Millisecond), sipLeg)
 
 			if listenOnly {
 				return // listening only: the agent keeps the call
