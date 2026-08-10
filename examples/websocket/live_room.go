@@ -157,7 +157,18 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 	rc.roomName = room.Name
 	rc.roomSIP = room.SIPURI
 	rc.joinURL = room.JoinURL
-	rc.live.JoinDaily(room.JoinURL, "")
+	// The token, NOT just the tokenised URL.
+	//
+	// This published room.JoinURL with an empty token. The URL does carry the
+	// token in its query string, but the consumer hands `room_url` and `token`
+	// to the Daily client as separate fields, and an empty token against a
+	// PRIVATE room is refused with "You are not invited to this meeting" — the
+	// exact error an operator saw when they pressed Join.
+	rc.live.JoinDaily(room.URL, room.JoinURL, room.Token)
+	if room.Token == "" {
+		log.Printf("rexa: session=%s live room %s has NO meeting token — an operator pressing Join will be refused",
+			rc.sessionID, room.Name)
+	}
 	log.Printf("rexa: session=%s live room %s ready", rc.sessionID, room.Name)
 	return room.Name
 }

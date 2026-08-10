@@ -316,19 +316,35 @@ func envelopeFor(name string, extra map[string]any) []byte {
 // The consumer reads room_url from the envelope root or from a nested payload;
 // both are sent because different builds of its sidecar wrote it each way, and
 // this is a link an operator either gets or does not.
-func (p *LivePublisher) JoinDaily(roomURL, token string) {
+// roomURL is the BARE room address and token the meeting token that grants
+// access to it. Both, separately — a private room refuses anyone without a
+// token, and "You are not invited to this meeting" is what the operator sees
+// when the token does not reach the client. joinURL is the same room with the
+// token already in the query string, for anywhere a plain link is more useful
+// than two fields.
+//
+// The daily_ aliases are sent because the consumer accepts either spelling and
+// which one it reads is not worth a round trip to find out.
+func (p *LivePublisher) JoinDaily(roomURL, joinURL, token string) {
 	if p == nil || roomURL == "" {
 		return
 	}
-	payload := map[string]any{"room_url": roomURL}
-	if token != "" {
-		payload["token"] = token
+	fields := map[string]any{
+		"room_url":       roomURL,
+		"daily_room_url": roomURL,
+		"token":          token,
+		"daily_token":    token,
+		"join_url":       joinURL,
+		"daily_join_url": joinURL,
 	}
-	p.Event(EventJoinDaily, map[string]any{
-		"room_url": roomURL,
-		"token":    token,
-		"payload":  payload,
-	})
+	// Nested as well as at the root: different builds of the consumer's sidecar
+	// wrote it each way, and this is a link an operator either gets or does not.
+	nested := make(map[string]any, len(fields))
+	for k, v := range fields {
+		nested[k] = v
+	}
+	fields["payload"] = nested
+	p.Event(EventJoinDaily, fields)
 }
 
 // Ended publishes the terminal event and closes the connection.
