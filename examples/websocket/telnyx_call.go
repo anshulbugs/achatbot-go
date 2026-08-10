@@ -842,15 +842,29 @@ var telnyxUpgrader = websocket.Upgrader{
 // The standard modes (detect, detect_beep, detect_words, greeting_end) only ever
 // answer human/machine/not_sure, but `premium` widens the vocabulary to
 // human_residence, human_business, machine, silence, fax_detected and not_sure.
-// Testing `== "machine"` therefore silently routes a silent voicemail or a fax
-// tone down the human path and burns a full pipeline on it for the whole call.
+// Testing `== "machine"` therefore silently routes a fax tone down the human
+// path and burns a full pipeline on it for the whole call.
 //
 // not_sure stays on the human path deliberately: Telnyx documents it as
 // "treat as human", and hanging up on a real person is far worse than spending
 // a pipeline slot on a machine.
+//
+// `silence` is NOT a machine, deliberately, and it used to be.
+//
+// It means detection heard nothing to judge — which is most often a person who
+// picked up and waited, exactly what people do when a call opens with a pause.
+// Routing them to the voicemail path costs the call: the agent never speaks to
+// them, and on one real call the line then hung up while we sat waiting for a
+// beep that was never coming.
+//
+// Treating it as human is also the recoverable direction. If a silent answer
+// really was a mailbox, `call.machine.greeting.ended` follows — that event is
+// only ever emitted for a machine, and it now overrides a non-machine verdict —
+// so the call still reaches the voicemail path. The reverse has no recovery: a
+// person sent to voicemail is simply never spoken to.
 func isMachineVerdict(result string) bool {
 	switch result {
-	case "machine", "silence", "fax_detected":
+	case "machine", "fax_detected":
 		return true
 	default:
 		return false
