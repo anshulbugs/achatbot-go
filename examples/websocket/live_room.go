@@ -425,6 +425,9 @@ func endLiveRoom(rc *rexaCall) {
 	// Stop watching before the room goes: a poller still holding this entry
 	// would try to bridge a call that has hung up.
 	unwatchRoom(name)
+	// And drop any listen-in relay, which owns a websocket and a Python
+	// process. Without this a barged call would leave both behind every time.
+	endRelay(rc.sessionID)
 	rc.roomName = ""
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

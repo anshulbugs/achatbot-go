@@ -45,6 +45,22 @@ server:
   # Either way, a registered Daily webhook (participant.joined) makes the join
   # arrive instantly — see DAILY_API_KEY below.
   live_room_prepublish: true
+  # How an operator's audio reaches a live call.
+  #
+  # false (default): Telnyx dials the room's SIP endpoint and both legs meet in
+  #                  a conference. Costs ~5s, all of it Daily registering the
+  #                  room's SIP endpoint — it only does that once a session
+  #                  exists, and the operator's own join starts one, so
+  #                  registration sits in front of our INVITE. Measured
+  #                  repeatedly at 4.5-5.3s and not tunable from either side.
+  # true           : the sidecar joins the room and relays audio to and from the
+  #                  media socket we already hold. No SIP, no conference, no
+  #                  second carrier leg — one WebRTC join. Costs one Python
+  #                  process per BARGE (not per call) and two extra audio hops.
+  #
+  # Needs the sidecar installed (deploy/scripts/sidecar-install.sh); falls back
+  # to SIP on its own if it is missing or fails to start.
+  barge_via_sidecar: false
   # Answering-machine detection on outbound calls. THIS KEY WAS PREVIOUSLY ABSENT,
   # which left it "" -> "disabled" on every dial, so no call.machine.* webhook could
   # ever fire and the voicemail path was dead code. Do not remove it again.
