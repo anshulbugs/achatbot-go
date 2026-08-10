@@ -155,6 +155,7 @@ func initRexaTelemetry() {
 	initSentiment(cfg.Server.SentimentBaseURL, cfg.Server.SentimentModel)
 	initDaily(os.Getenv("DAILY_API_KEY"))
 	initSidecar(os.Getenv("SIDECAR_PYTHON"), os.Getenv("SIDECAR_SCRIPT"))
+	initPrewarm(os.Getenv("PREWARM_SCRIPT"))
 	// Covers the window before the platform's dispatch schema carries
 	// redis_password. Managed Redis refuses unauthenticated connections, and
 	// publishing is fire-and-forget, so without a password the live event

@@ -37,6 +37,10 @@ POOL="${POOL:-4}"
 # rather than handing back a room nobody is in. sidecar-install.sh makes it.
 SIDECAR_PYTHON="${SIDECAR_PYTHON:-$HOME/sidecar-venv/bin/python}"
 SIDECAR_SCRIPT="${SIDECAR_SCRIPT:-$PWD/deploy/sidecar/room_agent.py}"
+# The room pre-joiner: holds a listen-in room's session open so Daily registers
+# its SIP endpoint during the call rather than during the handover. Inert unless
+# server.live_room_prewarm is on. Same venv as the sidecar — same Daily SDK.
+PREWARM_SCRIPT="${PREWARM_SCRIPT:-$PWD/deploy/sidecar/room_prewarm.py}"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -180,6 +184,7 @@ ACHATBOT_SERVER_MAX_TOTAL_CALLS="${MAX_TOTAL_CALLS:-200}" \
 TELNYX_PUBLIC_URL="$PUBLIC" \
 SIDECAR_PYTHON="$SIDECAR_PYTHON" \
 SIDECAR_SCRIPT="$SIDECAR_SCRIPT" \
+PREWARM_SCRIPT="$PREWARM_SCRIPT" \
   nohup setsid "$BIN" -config config.yaml >> "rexa-${PORT}.log" 2>&1 < /dev/null &
 disown
 

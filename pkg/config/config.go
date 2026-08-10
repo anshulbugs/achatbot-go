@@ -109,6 +109,24 @@ type ServerConfig struct {
 	// Set false ONLY once rexa-dialer's JOIN_CALL_URL points at this agent.
 	// Until it does, false means Join finds no room at all.
 	LiveRoomPrepublish bool `mapstructure:"live_room_prepublish"`
+	// LiveRoomPrewarm holds a listen-in room's session open from the moment the
+	// call is answered, so its SIP endpoint is registered before anyone barges.
+	//
+	// Daily registers a room's SIP endpoint on SESSION start, not on room
+	// creation, and a session needs a WebRTC participant. Until this existed
+	// that participant was the supervisor themselves, so their barge waited out
+	// registration in full: 4.8-5.3s measured on every one, and by far the
+	// largest part of the delay. A silent pre-joiner moves that wait into the
+	// conversation, where nobody is watching a clock. Registration completed
+	// 1.9s after its join when measured.
+	//
+	// THE COST IS A DAILY PARTICIPANT for the length of every answered call
+	// with a room, whether or not anyone ever barges — so it is worth checking
+	// against your participant-minute rate before leaving it on. The process
+	// itself is cheap: ~34MB, no GPU.
+	//
+	// Off by default. Needs SIDECAR_PYTHON and PREWARM_SCRIPT set.
+	LiveRoomPrewarm bool `mapstructure:"live_room_prewarm"`
 	// JoinCallFallbackURL is where /join-call forwards a uuid this agent does
 	// not know.
 	//

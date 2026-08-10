@@ -708,6 +708,12 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 			// room was created but immediately dropped" looks like from their
 			// side.
 			watchForListener(id, p.platform)
+			// Register the room's SIP endpoint NOW, while there is a
+			// conversation to hide the wait behind. Daily only does it once a
+			// session exists, and until now the supervisor's own join was what
+			// started one — so their barge paid the full 4.8s registration
+			// wait, every time, at the worst possible moment.
+			startPrewarm(p.platform)
 		}
 		if cfg.Server.RecordCalls {
 			go func() {

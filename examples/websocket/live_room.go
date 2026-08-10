@@ -88,6 +88,92 @@ func initSidecar(python, script string) {
 // sidecarReady reports whether browser calls can be served.
 func sidecarReady() bool { return sidecarPython != "" && sidecarScript != "" }
 
+var (
+	prewarmScript string
+
+	prewarmMu sync.Mutex
+	// prewarmers is one process per session, keyed the same way sidecars are
+	// so endLiveRoom can stop it without knowing which of the two ran.
+	prewarmers = map[string]*exec.Cmd{}
+)
+
+// initPrewarm locates the room pre-joiner. Same interpreter as the sidecar,
+// because it is the same Daily SDK.
+func initPrewarm(script string) {
+	if script == "" || sidecarPython == "" {
+		return
+	}
+	if _, err := os.Stat(script); err != nil {
+		log.Printf("rexa: prewarm script not found at %s — barge keeps its ~5s SIP wait", script)
+		return
+	}
+	prewarmScript = script
+}
+
+// startPrewarm holds the room's session open from the moment the call is
+// answered, so its SIP endpoint is registered long before anyone barges.
+//
+// See deploy/sidecar/room_prewarm.py for why this is necessary at all. The
+// short version: Daily registers a room's SIP endpoint when a session starts,
+// a session needs a WebRTC participant, and until now the supervisor's own
+// join was that participant — so their barge paid the 4.8s registration wait
+// in full.
+//
+// Failure here is deliberately quiet. It costs the call nothing: a barge
+// simply waits as long as it does today.
+func startPrewarm(rc *rexaCall) {
+	if !cfg.Server.LiveRoomPrewarm || prewarmScript == "" || rc == nil {
+		return
+	}
+	if rc.roomURL == "" || rc.roomToken == "" {
+		return
+	}
+	prewarmMu.Lock()
+	_, already := prewarmers[rc.sessionID]
+	prewarmMu.Unlock()
+	if already {
+		return
+	}
+
+	cmd := exec.Command(sidecarPython, prewarmScript,
+		"--room-url", rc.roomURL,
+		"--token", rc.roomToken,
+		"--session", rc.sessionID)
+	cmd.Stdout = log.Writer()
+	cmd.Stderr = log.Writer()
+	if err := cmd.Start(); err != nil {
+		log.Printf("rexa: session=%s prewarm failed to start (barge unaffected): %v", rc.sessionID, err)
+		return
+	}
+	prewarmMu.Lock()
+	prewarmers[rc.sessionID] = cmd
+	prewarmMu.Unlock()
+	log.Printf("rexa: session=%s prewarming the live room — SIP will be registered before any barge", rc.sessionID)
+
+	go func() {
+		_ = cmd.Wait()
+		prewarmMu.Lock()
+		delete(prewarmers, rc.sessionID)
+		prewarmMu.Unlock()
+	}()
+}
+
+// stopPrewarm releases the room's session. Only safe once the call is over:
+// leaving while a supervisor is still arriving would end the session and take
+// the registration with it.
+func stopPrewarm(sessionID string) {
+	prewarmMu.Lock()
+	cmd := prewarmers[sessionID]
+	delete(prewarmers, sessionID)
+	prewarmMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		// SIGTERM so it leaves the room properly. A participant that vanishes
+		// without leaving takes Daily a while to time out, and the room bills
+		// for that time.
+		_ = cmd.Process.Signal(os.Interrupt)
+	}
+}
+
 // startSidecar launches the room agent for one session.
 //
 // agentWS is where it sends the room's audio. Always loopback: the sidecar runs
@@ -360,6 +446,9 @@ func endLiveRoom(rc *rexaCall) {
 	// Stop watching before the room goes: a poller still holding this entry
 	// would try to bridge a call that has hung up.
 	unwatchRoom(name)
+	// The pre-joiner is holding this room's session open. Nothing else ends it,
+	// and a room cannot be deleted out from under a participant cleanly.
+	stopPrewarm(rc.sessionID)
 	rc.roomName = ""
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
