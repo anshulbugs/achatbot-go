@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -730,8 +731,12 @@ func dispatchFeatures(req rexa.PhoneDispatchRequest, p *callParams) string {
 	} else {
 		parts = append(parts, "transfer=off")
 	}
-	if req.Redis().Configured() {
-		parts = append(parts, "live_events=on")
+	if r := req.Redis(); r.Configured() {
+		// Host and port, never the password. Which Redis a dispatch pointed at
+		// is the first question asked when the wallboard is wrong or when
+		// someone wants the keys cleared, and without it in the log the answer
+		// has to come from whoever built the dispatch.
+		parts = append(parts, fmt.Sprintf("live_events=on(%s:%d/%d)", r.Host, r.Port, r.DB))
 	} else {
 		parts = append(parts, "live_events=off")
 	}
