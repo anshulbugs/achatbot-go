@@ -236,7 +236,27 @@ func amdConfigFor(amd string) map[string]any {
 // answering-machine detection and a short timeout: the far end is a media
 // server that answers immediately, and waiting 30 s for it means an operator
 // clicks a join link and hears nothing for half a minute.
-func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState string) (string, error) {
+// conferenceName, when set, has the carrier put this leg straight into that
+// conference — no separate join call, and joined at RINGBACK rather than at
+// answer.
+//
+// THIS IS THE WHOLE BARGE LATENCY. Measured on a live call: our own API calls
+// take 268ms (conference 208ms, dial 268ms) and Daily then takes 4.54 SECONDS to
+// answer the SIP invite, because it does not register a room's SIP endpoint
+// with the SIP network until a session exists — and the operator's join is what
+// starts the session. So registration is serialised in front of our INVITE and
+// there is nothing to tune on either side.
+//
+// `early_media` sidesteps the wait instead of shortening it. Telnyx: "Controls
+// the moment when dialled call is joined into conference. If set to `true` user
+// will be joined as soon as media is available (ringback). If `false` user will
+// be joined when call is answered." So the leg enters the conference while
+// Daily is still setting up, and the operator hears the call from that point
+// rather than four and a half seconds later.
+//
+// It also removes the separate join round trip and the 422 "Call not answered
+// yet" retry loop that existed only because joining required an answered leg.
+func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState, conferenceName string) (string, error) {
 	if !strings.HasPrefix(sipURI, "sip:") {
 		sipURI = "sip:" + sipURI
 	}
@@ -247,6 +267,16 @@ func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState st
 		"webhook_url":   webhookURL,
 		"client_state":  encodeState(clientState),
 		"timeout_secs":  15,
+	}
+	if conferenceName != "" {
+		body["conference_config"] = map[string]any{
+			"conference_name": conferenceName,
+			"early_media":     true,
+			// The conference already exists with the caller in it; this leg
+			// must not restart or end it.
+			"start_conference_on_enter": false,
+			"end_conference_on_exit":    false,
+		}
 	}
 	var res DialResult
 	if err := c.do(ctx, http.MethodPost, "/calls", body, &res); err != nil {
