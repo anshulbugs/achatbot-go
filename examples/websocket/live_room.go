@@ -192,9 +192,32 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
+		// TIMED, because the total is what an operator feels and until now it
+		// was one number with no breakdown. Detection is instant via the Daily
+		// webhook, yet bridging still took six seconds, and nothing said
+		// whether that was the conference, the dial, or Daily answering the SIP
+		// invite.
+		bridgeStart := time.Now()
+
+		// First dial runs CONCURRENTLY with the conference create: neither
+		// needs the other, the dial only needs the room's SIP address, and each
+		// is a carrier round trip the operator waits through. Sequential, they
+		// were being added together for no reason.
+		type dialResult struct {
+			leg string
+			err error
+			at  time.Duration
+		}
+		first := make(chan dialResult, 1)
+		go func() {
+			leg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
+			first <- dialResult{leg, err, time.Since(bridgeStart)}
+		}()
+
 		// The conference is named for the session so it is greppable across
 		// Telnyx's dashboard, our logs and the platform's.
 		confID, err := rc.client.ConferenceCreate(ctx, "live-"+rc.sessionID, id)
+		confAt := time.Since(bridgeStart)
 		if err != nil {
 			log.Printf("rexa: session=%s conference create failed (call unaffected): %v", rc.sessionID, err)
 			rc.bridged = false
@@ -205,19 +228,32 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 			if calls.get(id) == nil {
 				return // the call ended while we were setting this up
 			}
-			sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "")
+			var sipLeg string
+			var dialAt time.Duration
+			if dial == 0 {
+				res := <-first
+				sipLeg, err, dialAt = res.leg, res.err, res.at
+			} else {
+				sipLeg, err = rc.client.DialSIP(ctx, rc.roomSIP, "", "")
+				dialAt = time.Since(bridgeStart)
+			}
 			if err != nil {
 				log.Printf("rexa: session=%s SIP dial to room failed: %v", rc.sessionID, err)
 				time.Sleep(time.Second)
 				continue
 			}
+			log.Printf("rexa: session=%s bridge steps: conference %s, sip dial %s — now waiting for Daily to answer the leg",
+				rc.sessionID, confAt.Round(time.Millisecond), dialAt.Round(time.Millisecond))
 			// UNMUTED: the agent is about to leave, and a muted operator in an
 			// agentless call is silence for the caller.
 			joinErr := error(nil)
 			for attempt := 0; attempt < 24; attempt++ {
 				joinErr = rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
 				if joinErr == nil {
-					log.Printf("rexa: session=%s live room bridged (conference=%s)", rc.sessionID, confID)
+					log.Printf("rexa: session=%s live room bridged in %s (conference %s, dial %s, daily answered the leg after %s)",
+						rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond),
+						confAt.Round(time.Millisecond), dialAt.Round(time.Millisecond),
+						(time.Since(bridgeStart) - dialAt).Round(time.Millisecond))
 					// The operator has the call now — step out of it. Asked for
 					// explicitly: barging should behave like a transfer, with
 					// the agent gone rather than talking over the person who

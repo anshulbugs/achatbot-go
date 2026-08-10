@@ -670,8 +670,38 @@ doing this for every call would be a large bill for a feature almost nobody
 opens. Redis details are your own signal that something is watching this call.
 A dispatch without them costs nothing extra.
 
-The operator joins **muted**, so dropping in cannot accidentally speak over a
-live call. Rooms carry a 2-hour expiry and are deleted when the call ends.
+Rooms carry a 2-hour expiry and are deleted when the call ends.
+
+**Joining is a takeover, not a listen.** The SIP leg joins unmuted and the agent
+leaves the call, so the operator has it to themselves rather than talking over
+an agent that is still answering. There is no listen-only mode, because nothing
+in the request distinguishes one: `/calls/{id}/join` and `/calls/{id}/barge` are
+functionally identical on your side — both set `AGENT_JOINED`, both call
+`_bridge_daily_room`, and both put the operator in with their mic live. If you
+want silent monitoring, that needs a flag we can see.
+
+**The room is public.** It was private, with a meeting token published alongside
+the URL, and the operator got "You are not allowed to join this meeting" both
+before and after we started sending the token correctly — the dialer hands
+`room_url` and `token` to the Daily client as separate fields and the token was
+not reaching it. A listening feature that cannot be joined is worth less than
+the secrecy of a random twenty-character room name that lives only in your
+Redis, is deleted when the call ends, and expires within hours. The token is
+still published for a client that wants owner rights.
+
+**How fast an operator gets audio.** Daily's REST presence API lags a real join
+by about 5.6 seconds — measured — so polling it can never be quick. The agent
+registers a Daily `participant.joined` webhook against its own public URL at
+every start, which arrives on the click. That needs nothing from you. The
+remaining delay is the carrier bridging the SIP leg into the room, which is
+timed per step in the log (`bridge steps: conference …, sip dial …`).
+
+**`GET /join-call?uuid=<call id>`** is served for the dialer's Join button. It
+answers with the room for its own calls and proxies anything it does not
+recognise to `server.join_call_fallback_url`, so one `join_call_url` can front
+both this agent and the other fleet without either losing Join. Pointing your
+`JOIN_CALL_URL` here and setting `server.live_room_prepublish: false` removes
+the last of the delay — see §8 — but it is optional and off by default.
 
 ### Two guarantees
 
@@ -713,9 +743,43 @@ DAILY_API_KEY=...               # optional — enables live-listening rooms (§7
 ```
 
 `DAILY_API_KEY` is ours, not the tenant's: it is our Daily account being billed,
-which is why it is agent configuration rather than a dispatch field. Without it
-no room is ever created and `join_daily` is never published; everything else is
-unaffected.
+which is why it is agent configuration rather than a dispatch field. It gates
+four things and all of them fail silently without it — live-listening rooms,
+browser calls on `/connection_webrtc`, cloud recording of those browser calls
+(a phone call is recorded by the carrier instead, so this is the only copy a
+browser call gets), and the `participant.joined` webhook that makes barging
+immediate. Everything else is unaffected.
+
+Answering-machine detection and the voicemail message, in `config.yaml`:
+
+```yaml
+server:
+  voicemail_detection: premium    # disabled | detect | detect_beep | greeting_end | premium
+  voicemail_message: "…"          # fallback when a dispatch omits one
+  dial_timeout_secs: 45           # ring time; 30 sits on the carrier's divert boundary
+```
+
+`premium` is the only mode that has worked here. Standard `detect_beep` never
+emitted `call.machine.detection.ended` on this account — 0 of them against 2
+`greeting.ended` — so nothing ever routed to voicemail. Premium answers in 3–5s
+for a human and 4–5s for a machine.
+
+`dial_timeout_secs` is a voicemail setting as much as a ring setting: carriers
+divert somewhere around 25–35s, so the 30s default abandons a line whose mailbox
+would have answered at 32s and reports `no_answer` with no message left.
+
+`voicemail_message` is a fallback and worth setting even though the dispatch
+carries one. A dispatch that omits it used to leave the agent detecting the
+machine in four seconds, spending no GPU on it, and hanging up with nothing to
+say — the one outcome detection exists to avoid.
+
+Live-listening delivery, in `config.yaml`:
+
+```yaml
+server:
+  live_room_prepublish: true      # see §7a
+  join_call_fallback_url: ""      # where Join for another agent's calls is proxied
+```
 
 Mid-call sentiment, in `config.yaml`:
 
