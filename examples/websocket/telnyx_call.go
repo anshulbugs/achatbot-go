@@ -1139,11 +1139,35 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 	// Wait for the beep. Telnyx times its own beep detection out and reports
 	// no_beep_detected, so this bound only covers the event never arriving.
 	beepResult := ""
-	select {
-	case beepResult = <-beep:
-		log.Printf("telnyx amd: beep signal (%s) call=%s", beepResult, id)
-	case <-time.After(35 * time.Second):
-		log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
+	beepDeadline := time.After(35 * time.Second)
+	// Ticked so a call that ENDS while we are waiting is noticed.
+	//
+	// One did: it hung up at 04:38:43 and this waited out the full 35s beep
+	// timeout, then listened to the dead line for another 28s, then played the
+	// message thirty seconds after the call was over. Nothing was recorded
+	// because there was nothing to record into, and the hangup that followed
+	// returned 422 because the call no longer existed.
+	alive := time.NewTicker(time.Second)
+	defer alive.Stop()
+waitBeep:
+	for {
+		select {
+		case beepResult = <-beep:
+			log.Printf("telnyx amd: beep signal (%s) call=%s", beepResult, id)
+			break waitBeep
+		case <-beepDeadline:
+			log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
+			break waitBeep
+		case <-alive.C:
+			if calls.get(id) == nil {
+				log.Printf("telnyx amd: call ended before the beep, no message to leave call=%s", id)
+				return
+			}
+		}
+	}
+	if calls.get(id) == nil {
+		log.Printf("telnyx amd: call ended before the message could be played call=%s", id)
+		return
 	}
 
 	// NO BEEP MEANS TELNYX GAVE UP, NOT THAT THE MAILBOX IS READY.
@@ -1162,12 +1186,30 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 	// the tone is a stretch of quiet.
 	if beepResult != "beep_detected" {
 		waitForMailboxToFinish(id, conn, ser)
+		if calls.get(id) == nil {
+			log.Printf("telnyx amd: call ended while waiting for the mailbox greeting call=%s", id)
+			return
+		}
 	}
 
 	spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(rate)
 	log.Printf("telnyx amd: playing voicemail message call=%s (%d bytes, %.1fs, no gpu)",
 		id, len(pcm), spoken.Seconds())
-	playAnnouncement(tw, pcm, rate, make(chan struct{}))
+
+	// PACED, not one blob. This is the difference between a message that plays
+	// and one that does not.
+	//
+	// The greeting goes out as a single message and is audible — but it is sent
+	// the instant the stream opens. The voicemail message is the only audio we
+	// hand the carrier in one piece MID-CALL, and two recordings show the same
+	// thing: our greeting plays, then the 12-14s message we queued is fifteen
+	// seconds of silence, then one loud burst at the moment we hang up. That
+	// last detail is the tell — it looks like playback that never got going.
+	//
+	// A live conversation does not have this problem, and it is the one
+	// outbound path that is known to work mid-call: TTS goes out as a stream of
+	// small frames, never as a blob. So the message now goes the same way.
+	playAnnouncementPaced(id, tw, pcm, rate)
 
 	// PROVE THE AUDIO ACTUALLY LEFT, rather than trusting the send.
 	//
@@ -1204,6 +1246,49 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
+}
+
+// playAnnouncementPaced streams pre-rendered audio the way live speech goes
+// out: small frames, released close to real time, so the carrier is never
+// holding more than a second of unplayed audio.
+//
+// Reports whether the whole clip was sent. Stops early if the call ends, which
+// is the difference between noticing a hangup in a second and talking into a
+// line that closed half a minute ago.
+func playAnnouncementPaced(id string, tw *achatbot_processors.WebsocketTransportWriter, pcm []byte, rate int) bool {
+	// 200ms frames with a second of lead. Small enough that the carrier is
+	// playing rather than buffering, large enough that a 13s message is sixty
+	// or so messages and not six hundred.
+	const frameMS = 200
+	const lead = time.Second
+	step := frameMS * rate * 2 / 1000
+	if step <= 0 || len(pcm) == 0 {
+		return false
+	}
+
+	started := time.Now()
+	for off := 0; off < len(pcm); off += step {
+		end := off + step
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if err := tw.SendAudioFrame(frames.NewAudioRawFrame(pcm[off:end], rate, 1, 2)); err != nil {
+			log.Printf("announce: paced send failed after %d/%d bytes on call=%s: %v",
+				off, len(pcm), id, err)
+			return false
+		}
+		if calls.get(id) == nil {
+			log.Printf("announce: call ended %d/%d bytes into the message call=%s", off, len(pcm), id)
+			return false
+		}
+		sent := time.Duration(end/2) * time.Second / time.Duration(rate)
+		if ahead := sent - time.Since(started) - lead; ahead > 0 {
+			time.Sleep(ahead)
+		}
+	}
+	log.Printf("announce: paced %d bytes (%.2fs audio) in %v call=%s",
+		len(pcm), float64(len(pcm)/2)/float64(rate), time.Since(started).Round(time.Millisecond), id)
+	return true
 }
 
 // Silence detection for the voicemail path.
