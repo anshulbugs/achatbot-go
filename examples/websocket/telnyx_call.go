@@ -1093,6 +1093,13 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := telnyx.NewConn(ws)
+	// Give anything that needs to end this call a way to do it.
+	//
+	// setStopMedia existed and was never called, so stopMediaFor was a
+	// permanent no-op — which is why a transferred call kept a live pipeline
+	// and the agent went on holding a conversation with a caller the carrier
+	// had already handed to somebody else.
+	calls.setStopMedia(id, func() { _ = ws.Close() })
 
 	// Greeting first, from cache, before any pool slot is taken. Every call in a
 	// campaign says the same words, so synthesizing per call would burn a TTS

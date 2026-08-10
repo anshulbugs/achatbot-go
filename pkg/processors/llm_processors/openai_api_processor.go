@@ -404,6 +404,19 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 					isToolCalls = true
 					continue
 				}
+				// Last resort: ask again with no tools advertised.
+				//
+				// The same history that produced three empty completions in a
+				// row produces text on twelve of twelve attempts once the tools
+				// are dropped, so this is what stands between the caller and
+				// silence. The turn gives up the ability to invoke a tool,
+				// which is the right thing to trade: a sentence they may have
+				// to follow up on beats nothing at all, and a promised transfer
+				// is repaired from the agent's own words anyway.
+				if spoke := p.retryWithoutTools(turnCtx, messages, direction, observeTurn); spoke {
+					isToolCalls = false
+					continue
+				}
 				logger.Error("chat", "err", "empty completion after retries — this turn is silent")
 				isToolCalls = false
 			}
@@ -464,4 +477,56 @@ func parseToolArgs(raw string) (map[string]any, error) {
 		return nil, err
 	}
 	return args, nil
+}
+
+// noToolsStreamer is implemented by providers that can run one turn with the
+// tool list omitted. Optional on purpose: a provider that cannot do it keeps
+// working, the turn just stays silent in the rare case that gets this far.
+type noToolsStreamer interface {
+	ChatStreamWithoutTools(ctx context.Context, args types.LMGenerateArgs,
+		messages []types.Message, respFunc common.OpenAIStreamChatCompletionRespFunc)
+}
+
+// retryWithoutTools makes one final attempt at a turn that has come back empty
+// every time, with the tools dropped. Reports whether the caller heard
+// anything.
+//
+// The text is queued and recorded exactly as the normal path does, so the
+// transcript and the interruption-trimming see this turn like any other. The
+// history gets the assistant message too — leaving it out would make the next
+// turn's context skip a reply the caller actually heard.
+func (p *LLMOpenAIApiProcessor) retryWithoutTools(
+	ctx context.Context, messages []types.Message,
+	direction processors.FrameDirection, observeTurn func(),
+) bool {
+	provider, ok := p.provider.(noToolsStreamer)
+	if !ok {
+		return false
+	}
+	logger.Warn("chat: retrying without tools after repeated empty completions")
+
+	acc := openai.ChatCompletionAccumulator{}
+	first := true
+	provider.ChatStreamWithoutTools(ctx, p.args, messages, func(chunk *openai.ChatCompletionChunk) error {
+		acc.AddChunk(*chunk)
+		if len(chunk.Choices) == 0 || chunk.Choices[0].Delta.Content == "" {
+			return nil
+		}
+		if first {
+			first = false
+			observeTurn()
+		}
+		p.session.RecordAgentChunk(chunk.Choices[0].Delta.Content)
+		p.QueueFrame(frames.NewTextFrame(chunk.Choices[0].Delta.Content), direction)
+		return nil
+	})
+
+	if len(acc.Choices) == 0 || acc.Choices[0].Message.Content == "" {
+		return false
+	}
+	if !p.isHistoryThink {
+		acc.Choices[0].Message.Reasoning = ""
+	}
+	p.appendHistoryChatMessages([]types.Message{{ChatCompletionMessage: acc.Choices[0].Message}})
+	return true
 }

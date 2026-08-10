@@ -152,6 +152,24 @@ func (t *transferTool) Execute(args map[string]any) (string, error) {
 	// media fork is not part of that bridge, so holding a GPU slot for it
 	// would consume capacity nobody is using.
 	markVoicemail(t.callID)
+
+	// LEAVE THE CALL. Accounting for the slot was never enough on its own —
+	// the media session stayed open, the pipeline kept transcribing, and the
+	// agent carried on answering questions for another thirty seconds after
+	// handing the caller over. Telling the model "stop speaking" does not stop
+	// it: that is a request, and the next thing the caller says starts another
+	// turn regardless.
+	//
+	// Ending the socket is what actually removes the agent from the
+	// conversation. Deferred by a beat so this tool's own result still reaches
+	// the model and the turn unwinds through its normal path rather than
+	// through a read error.
+	go func() {
+		time.Sleep(750 * time.Millisecond)
+		if calls.stopMediaFor(t.callID) {
+			log.Printf("transfer: call=%s handed over — agent has left the call", t.callID)
+		}
+	}()
 	return "Transferred. Stop speaking; the call is being handed over now.", nil
 }
 

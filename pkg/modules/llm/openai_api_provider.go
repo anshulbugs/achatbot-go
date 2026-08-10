@@ -297,3 +297,39 @@ func (p *OpenAIAPIProvider) ChatStream(ctx context.Context, args types.LMGenerat
 func (p *OpenAIAPIProvider) Name() string {
 	return p.name
 }
+
+// ChatStreamWithoutTools runs one streamed turn with the tool list omitted.
+//
+// A LAST RESORT, not an alternative path. gemma-4 served by SGLang returns a
+// completion with no content, no tool call and finish_reason=stop a variable
+// fraction of the time — rare on an idle box, repeatable under call load, and
+// measured at three-in-twelve on one real conversation's history. Retrying the
+// identical request usually clears it; when it does not, the caller is left
+// listening to silence.
+//
+// Dropping the tools is what reliably breaks the pattern: the same history that
+// produced three empty completions in a row produced text on twelve of twelve
+// attempts with the tools omitted. The turn loses the ability to CALL a tool,
+// which is the right thing to give up — a caller who hears a sentence and has to
+// ask again is in a far better position than one who hears nothing at all, and
+// the transfer path has its own repair for a model that talks about a handover
+// instead of invoking it.
+func (p *OpenAIAPIProvider) ChatStreamWithoutTools(ctx context.Context, args types.LMGenerateArgs, messages []types.Message, respFunc common.OpenAIStreamChatCompletionRespFunc) {
+	params := p.getChatCompletionNewParams(messages, args)
+	params.Tools = nil
+
+	stream := p.client.Chat.Completions.NewStreaming(ctx, params,
+		option.WithHeader("HTTP-Referer", "github.com/weedge"),
+		option.WithHeader("X-Title", "achatbot-go"),
+		option.WithMaxRetries(2),
+	)
+	for stream.Next() {
+		chunk := stream.Current()
+		if err := respFunc(&chunk); err != nil {
+			logger.Errorf("chat stream (no tools) error: %v", err)
+		}
+	}
+	if stream.Err() != nil {
+		logger.Errorf("chat stream (no tools) error: %v", stream.Err())
+	}
+}
