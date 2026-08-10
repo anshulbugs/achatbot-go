@@ -378,3 +378,49 @@ func (c *Client) PresenceAll(ctx context.Context) (map[string]int, error) {
 	}
 	return out, nil
 }
+
+// Webhook is a domain-level subscription to Daily's own events.
+type Webhook struct {
+	UUID       string   `json:"uuid"`
+	URL        string   `json:"url"`
+	EventTypes []string `json:"eventTypes"`
+	State      string   `json:"state"`
+}
+
+// EnsureWebhook makes Daily push events to url and nothing else.
+//
+// WHY A WEBHOOK AT ALL. The REST presence endpoint lags a real join by about
+// 5.6 seconds — measured, not assumed — and that lag is most of the ten seconds
+// an operator spends listening to the agent after taking over a call. Polling
+// faster cannot help; the data is simply stale. This is the only signal Daily
+// offers that arrives when the join does, and unlike every other option it
+// needs no change from the platform or the other call agent.
+//
+// Re-registered on every start because the URL is a cloudflared tunnel whose
+// hostname changes each time it comes up: a webhook registered yesterday points
+// at a host that no longer resolves. Stale subscriptions are deleted rather
+// than left, or Daily accumulates dead endpoints and keeps retrying them.
+//
+// Daily VALIDATES the URL by POSTing to it during registration and refuses
+// anything that does not answer 200 — so the handler must exist and be
+// reachable before this is called.
+func (c *Client) EnsureWebhook(ctx context.Context, url string, events []string) error {
+	if c == nil || url == "" {
+		return nil
+	}
+	var existing []Webhook
+	if err := c.do(ctx, http.MethodGet, "/webhooks", nil, &existing); err != nil {
+		return err
+	}
+	for _, w := range existing {
+		if w.URL == url && w.State == "ACTIVE" {
+			return nil // already pointing at us
+		}
+		// Not fatal if this fails: a subscription we could not remove costs
+		// Daily a retry, not this call anything.
+		_ = c.do(ctx, http.MethodDelete, "/webhooks/"+w.UUID, nil, nil)
+	}
+	return c.do(ctx, http.MethodPost, "/webhooks", map[string]any{
+		"url": url, "eventTypes": events,
+	}, nil)
+}

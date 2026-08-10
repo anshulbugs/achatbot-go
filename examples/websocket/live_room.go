@@ -503,3 +503,93 @@ func proxyJoinCall(w http.ResponseWriter, r *http.Request, id string) bool {
 	_, _ = w.Write(body)
 	return true
 }
+
+// dailyWebhookPath is where Daily pushes its events. Registered against the
+// current tunnel hostname on every start — see daily.EnsureWebhook.
+const dailyWebhookPath = "/daily/webhook"
+
+// handleDailyWebhook receives Daily's own events, and exists for exactly one of
+// them: participant.joined.
+//
+// THIS IS THE SIGNAL THAT COSTS NOBODY ELSE ANYTHING. The alternatives all
+// needed someone else to move: the platform to repoint join_call_url, or the
+// other call agent to proxy. Daily will simply tell us when a person enters a
+// room, the instant they do, and that is the same moment an operator presses
+// Join.
+//
+// ALWAYS answers 200, including for events and shapes it does not understand.
+// Daily validates a subscription by POSTing to the URL and refuses to register
+// anything that answers otherwise, and it circuit-breaks a webhook that starts
+// failing — so a parse error here must never become a non-200.
+func handleDailyWebhook(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}`))
+
+	if len(body) == 0 {
+		return // registration probe
+	}
+	var ev struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Room     string `json:"room"`
+			RoomName string `json:"room_name"`
+			UserName string `json:"user_name"`
+		} `json:"payload"`
+		Room     string `json:"room"`
+		RoomName string `json:"room_name"`
+	}
+	if err := json.Unmarshal(body, &ev); err != nil {
+		log.Printf("daily webhook: unreadable body: %s", firstChars(string(body), 200))
+		return
+	}
+	if ev.Type != "participant.joined" {
+		return
+	}
+	room := firstNonEmpty(ev.Payload.Room, ev.Payload.RoomName, ev.Room, ev.RoomName)
+	if room == "" {
+		// Worth seeing in full: the room is the only field we need and the
+		// payload shape is the one thing here we did not get from documentation.
+		log.Printf("daily webhook: participant.joined with no room i recognise: %s",
+			firstChars(string(body), 300))
+		return
+	}
+
+	watchMu.Lock()
+	wr, ok := watchedRooms[room]
+	if ok {
+		delete(watchedRooms, room)
+	}
+	watchMu.Unlock()
+	if !ok {
+		return // a room we are not watching: a browser call, or already bridged
+	}
+	if calls.get(wr.callID) == nil {
+		return
+	}
+	log.Printf("rexa: session=%s listener joined room %s (daily webhook) — bridging the call in",
+		wr.rc.sessionID, room)
+	bridgeLiveRoom(wr.callID, wr.rc)
+}
+
+// registerDailyWebhook points Daily's participant.joined at this process.
+//
+// Runs in the background: it is a couple of round trips including Daily's
+// validation POST back to us, and startup must not wait on it. Failure is
+// logged and left — the presence poller still covers the case, slowly, which is
+// exactly the behaviour this replaces.
+func registerDailyWebhook(publicURL string) {
+	if dailyClient == nil || publicURL == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		target := strings.TrimRight(publicURL, "/") + dailyWebhookPath
+		if err := dailyClient.EnsureWebhook(ctx, target, []string{"participant.joined"}); err != nil {
+			log.Printf("rexa: daily webhook registration failed — barge falls back to presence polling (~6s slower): %v", err)
+			return
+		}
+		log.Printf("rexa: daily webhook active at %s — operator joins arrive instantly", target)
+	}()
+}

@@ -635,6 +635,10 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 	// this is rexa-dialer's own `join_call_url`, and answering it is what makes
 	// barging immediate instead of waiting on Daily's presence API.
 	mux.HandleFunc("/join-call", handleJoinCall)
+	// Daily pushes participant.joined here, which is how an operator opening
+	// the listen-in room is noticed at once instead of ~6s later.
+	mux.HandleFunc(dailyWebhookPath, handleDailyWebhook)
+	registerDailyWebhook(publicURL)
 
 	ceiling := "unlimited"
 	if cfg.Server.MaxGPUCalls > 0 {
