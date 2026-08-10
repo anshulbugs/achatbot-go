@@ -147,7 +147,12 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 	// No recording: this room exists so an operator can listen to a PHONE call,
 	// and Telnyx is already recording that call end to end. A second copy would
 	// bill twice and give the platform two recordings of one conversation.
-	room, err := dailyClient.CreateRoom(ctx, roomTTL, false)
+	//
+	// Public: see RoomOptions.Public. A private room needs the dialer to thread
+	// the meeting token into the Daily SDK, and it did not — "You are not
+	// allowed to join this meeting", both before and after we started publishing
+	// the token correctly.
+	room, err := dailyClient.CreateRoom(ctx, daily.RoomOptions{TTL: roomTTL, Public: true})
 	if err != nil || room == nil {
 		// Never fail the call over the listening feature. The call is the
 		// product; this is a window onto it.
@@ -157,18 +162,10 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 	rc.roomName = room.Name
 	rc.roomSIP = room.SIPURI
 	rc.joinURL = room.JoinURL
-	// The token, NOT just the tokenised URL.
-	//
-	// This published room.JoinURL with an empty token. The URL does carry the
-	// token in its query string, but the consumer hands `room_url` and `token`
-	// to the Daily client as separate fields, and an empty token against a
-	// PRIVATE room is refused with "You are not invited to this meeting" — the
-	// exact error an operator saw when they pressed Join.
+	// Still sends the token, even though the room no longer needs one: a client
+	// that does use it gets owner rights, which is what lets an operator unmute
+	// and speak rather than only listen.
 	rc.live.JoinDaily(room.URL, room.JoinURL, room.Token)
-	if room.Token == "" {
-		log.Printf("rexa: session=%s live room %s has NO meeting token — an operator pressing Join will be refused",
-			rc.sessionID, room.Name)
-	}
 	log.Printf("rexa: session=%s live room %s ready", rc.sessionID, room.Name)
 	return room.Name
 }

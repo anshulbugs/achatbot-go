@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"achatbot/pkg/common"
+	"achatbot/pkg/daily"
 	"achatbot/pkg/modules/llm"
 	"achatbot/pkg/modules/speech/asr"
 	"achatbot/pkg/modules/speech/tts"
@@ -435,7 +436,7 @@ func (d *platformDispatcher) DispatchWebrtc(ctx context.Context, req rexa.Webrtc
 
 	// Recorded: a browser call has no carrier, so nothing else records it. This
 	// is the only copy that will ever exist of these conversations.
-	room, err := dailyClient.CreateRoom(ctx, webrtcRoomTTL, true)
+	room, err := dailyClient.CreateRoom(ctx, daily.RoomOptions{TTL: webrtcRoomTTL, Record: true})
 	if err != nil || room == nil {
 		return rexa.WebrtcDispatchResponse{}, rexa.Errorf(rexa.ErrCodeProviderUnavailable,
 			"could not create a room: %v", err)

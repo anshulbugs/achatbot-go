@@ -74,7 +74,32 @@ type roomResp struct {
 	} `json:"config"`
 }
 
-// CreateRoom makes a private, SIP-enabled room that expires after ttl.
+// RoomOptions configures a room. A struct rather than a run of booleans
+// because the call sites read as prose this way and "true, false" does not.
+type RoomOptions struct {
+	// TTL bounds the room's life.
+	TTL time.Duration
+	// Record turns on cloud recording. Only browser calls set it: a phone call
+	// is already recorded by the carrier, so recording its listen-in room too
+	// would bill twice for two copies of one conversation.
+	Record bool
+	// Public drops the meeting-token requirement.
+	//
+	// Set for the LISTEN-IN room, and the reason is a failure rather than a
+	// preference. A private room needs the client to receive the token and hand
+	// it to the Daily SDK, and when that did not happen the operator got
+	// "You are not allowed to join this meeting" — twice, once with no token
+	// published and once with the token published correctly. A listening
+	// feature that cannot be joined is worth less than the secrecy of a room
+	// name that is a random twenty-character string, published only to the
+	// tenant's own Redis, deleted when the call ends and expired within hours.
+	//
+	// The browser-call room stays private: that path hands the token back in
+	// the dispatch response and is known to work.
+	Public bool
+}
+
+// CreateRoom makes a SIP-enabled room that expires after opt.TTL.
 //
 // Private, not public: the room carries a live recording of a real customer
 // conversation, and a public room URL is a working link for anyone who ever
@@ -83,15 +108,11 @@ type roomResp struct {
 //
 // eject_at_room_exp is set as well as exp — expiry alone stops new joins but
 // leaves anyone already inside connected, and billing with them.
-// record turns on cloud recording for the room. Only browser calls pass true:
-// a phone call is already recorded by the carrier, and its Daily room exists
-// solely so an operator can listen in, so recording that too would bill twice
-// for two copies of the same conversation.
-func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration, record bool) (*Room, error) {
+func (c *Client) CreateRoom(ctx context.Context, opt RoomOptions) (*Room, error) {
 	if c == nil {
 		return nil, nil
 	}
-	exp := time.Now().Add(ttl).Unix()
+	exp := time.Now().Add(opt.TTL).Unix()
 	props := map[string]any{
 		"exp":               exp,
 		"eject_at_room_exp": true,
@@ -108,10 +129,14 @@ func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration, record bool)
 			"video":         false,
 		},
 	}
-	if record {
+	if opt.Record {
 		props["enable_recording"] = "cloud"
 	}
-	body := map[string]any{"privacy": "private", "properties": props}
+	privacy := "private"
+	if opt.Public {
+		privacy = "public"
+	}
+	body := map[string]any{"privacy": privacy, "properties": props}
 	var out roomResp
 	if err := c.do(ctx, http.MethodPost, "/rooms", body, &out); err != nil {
 		return nil, err
@@ -119,13 +144,13 @@ func (c *Client) CreateRoom(ctx context.Context, ttl time.Duration, record bool)
 
 	room := &Room{
 		Name: out.Name, URL: out.URL, JoinURL: out.URL,
-		SIPURI: out.Config.SIPURI.Endpoint, TokenTTL: ttl,
+		SIPURI: out.Config.SIPURI.Endpoint, TokenTTL: opt.TTL,
 	}
 
 	// A token failure is not fatal for listening: an operator with the bare URL
 	// can still be let in manually, which beats failing a call over it. It IS
 	// fatal for a browser dispatch, so that caller checks Token itself.
-	if tok, err := c.meetingToken(ctx, out.Name, exp, record); err == nil && tok != "" {
+	if tok, err := c.meetingToken(ctx, out.Name, exp, opt.Record); err == nil && tok != "" {
 		room.Token = tok
 		room.JoinURL = out.URL + "?t=" + tok
 	}
