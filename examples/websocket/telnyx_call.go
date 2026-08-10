@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -1047,8 +1048,8 @@ func watchLateAMD(id string, p *callParams) {
 // runVoicemailCall handles a call that answered as a machine, without ever
 // acquiring a pipeline slot: stop the greeting, wait for the beep, play the
 // pre-rendered message, hang up.
-func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWriter, ser *telnyx.Serializer,
-	rate int, p *callParams, beep <-chan string) {
+func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.WebsocketTransportWriter,
+	ser *telnyx.Serializer, rate int, p *callParams, beep <-chan string) {
 
 	// Release this call's GPU capacity: the greeting was cut, the pipeline
 	// never started, and the message plays from the announcement cache, so it
@@ -1085,13 +1086,32 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 		return
 	}
 
-	// Wait for the beep. Telnyx times its own beep detection out at 30s and
-	// reports not_sure, so this bound only covers the event never arriving.
+	// Wait for the beep. Telnyx times its own beep detection out and reports
+	// no_beep_detected, so this bound only covers the event never arriving.
+	beepResult := ""
 	select {
-	case res := <-beep:
-		log.Printf("telnyx amd: beep signal (%s) call=%s", res, id)
+	case beepResult = <-beep:
+		log.Printf("telnyx amd: beep signal (%s) call=%s", beepResult, id)
 	case <-time.After(35 * time.Second):
 		log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
+	}
+
+	// NO BEEP MEANS TELNYX GAVE UP, NOT THAT THE MAILBOX IS READY.
+	//
+	// greeting_duration_millis maxes out at 10000 — the carrier will not sell
+	// more — and a mailbox with a leisurely outgoing greeting outlasts it. What
+	// comes back then is no_beep_detected, which reads like a cue and is not
+	// one: on a real call the message started 14s after answer, straight over a
+	// greeting still in progress, and the machine began recording after we had
+	// finished. The caller got a mailbox entry of silence.
+	//
+	// So when the carrier could not find the beep, listen for the end of the
+	// greeting ourselves. The inbound audio is already arriving on this socket
+	// and nothing else is reading it — the pipeline never started on this path
+	// — so the machine talking is simply energy on the line, and the gap before
+	// the tone is a stretch of quiet.
+	if beepResult != "beep_detected" {
+		waitForMailboxToFinish(id, conn, ser)
 	}
 
 	spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(rate)
@@ -1110,6 +1130,93 @@ func runVoicemailCall(id string, tw *achatbot_processors.WebsocketTransportWrite
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
+}
+
+// Silence detection for the voicemail path.
+const (
+	// mailboxSilenceNeeded is how much continuous quiet marks the end of the
+	// mailbox's outgoing greeting. Long enough not to trip on the pauses
+	// between sentences, short enough that the message still starts promptly.
+	mailboxSilenceNeeded = 1500 * time.Millisecond
+	// mailboxWaitCap bounds the whole wait. A greeting longer than this is
+	// rare, and talking over the tail of one beats never leaving a message.
+	mailboxWaitCap = 30 * time.Second
+	// mailboxSilenceRMS is the amplitude below which a frame counts as quiet,
+	// on the 16-bit scale. Telephone silence is never zero — there is line and
+	// comfort noise under it — so this sits well above nothing and well below
+	// speech.
+	mailboxSilenceRMS = 500
+)
+
+// waitForMailboxToFinish blocks until the answering machine stops talking, or
+// until the cap expires.
+//
+// Reads the call's own inbound audio, which is safe HERE precisely because this
+// path never starts a pipeline: nothing else is consuming this socket, so there
+// is no second reader to race. On any other path this would steal frames from
+// the pipeline and must not be used.
+//
+// A read error ends the wait rather than failing the call: if the socket has
+// gone, the message cannot be delivered anyway.
+func waitForMailboxToFinish(id string, conn *telnyx.Conn, ser *telnyx.Serializer) {
+	if conn == nil || ser == nil {
+		return
+	}
+	started := time.Now()
+	var quietFor time.Duration
+	var heardSpeech bool
+
+	log.Printf("telnyx amd: no beep — listening for the mailbox greeting to finish call=%s", id)
+	for time.Since(started) < mailboxWaitCap {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("telnyx amd: media read ended while waiting for the greeting call=%s: %v", id, err)
+			return
+		}
+		frame, err := ser.Deserialize(data)
+		if err != nil || frame == nil {
+			continue // keepalives, marks, anything that is not audio
+		}
+		audio, ok := frame.(*frames.AudioRawFrame)
+		if !ok || len(audio.Audio) < 2 || audio.SampleRate == 0 {
+			continue
+		}
+		dur := time.Duration(len(audio.Audio)/2) * time.Second / time.Duration(audio.SampleRate)
+		if pcmRMS(audio.Audio) >= mailboxSilenceRMS {
+			heardSpeech = true
+			quietFor = 0
+			continue
+		}
+		// Quiet BEFORE any speech is the carrier still connecting the mailbox,
+		// not the end of a greeting. Requiring speech first is what stops the
+		// message going out into the pause before the greeting even starts.
+		if !heardSpeech {
+			continue
+		}
+		if quietFor += dur; quietFor >= mailboxSilenceNeeded {
+			log.Printf("telnyx amd: mailbox greeting finished after %.1fs call=%s",
+				time.Since(started).Seconds(), id)
+			return
+		}
+	}
+	log.Printf("telnyx amd: mailbox still talking after %s, speaking anyway call=%s",
+		mailboxWaitCap, id)
+}
+
+// pcmRMS is the root-mean-square amplitude of signed 16-bit little-endian mono
+// audio — a cheap, robust measure of "is anyone talking", unlike a peak, which
+// a single click sends to the ceiling.
+func pcmRMS(b []byte) float64 {
+	n := len(b) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i+1 < len(b); i += 2 {
+		s := float64(int16(uint16(b[i]) | uint16(b[i+1])<<8))
+		sum += s * s
+	}
+	return math.Sqrt(sum / float64(n))
 }
 
 func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
@@ -1254,7 +1361,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			stopOnce.Do(func() { close(stop) })
 			if isMachineVerdict(verdict) {
 				log.Printf("telnyx amd: machine verdict=%q on call=%s (greeting cut=%t) -- no pipeline will be used", verdict, id, !finished)
-				runVoicemailCall(id, tw, ser, ttsRate, p, p.beepCh)
+				runVoicemailCall(id, conn, tw, ser, ttsRate, p, p.beepCh)
 				log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
 				return
 			}
