@@ -854,6 +854,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// of the calls in flight invoked it.
 	if sc.call != nil && sc.callID != "" {
 		registerTransferTool(session, sc.call, sc.callID)
+		// Repair the case where the model TELLS the caller it is connecting
+		// them and never invokes the tool. Installed after the observer above
+		// so it runs alongside whatever else watches agent turns.
+		session.SetAgentTurnObserver(chainAgentObservers(
+			sc.agentTurnObserver, transferOnPromise(session, sc.callID)))
 	}
 	session.InitChatMessage(map[string]any{
 		"role": "system", "content": withCallStyle(sc.systemPrompt, sc.spokenGreeting),

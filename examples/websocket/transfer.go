@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"achatbot/pkg/common"
@@ -220,4 +222,97 @@ func describeCallerID(from, contact string) string {
 		return fmt.Sprintf("contact %s", from)
 	}
 	return fmt.Sprintf("tenant %s", from)
+}
+
+// transferPromises are the ways the agent tells a caller it is handing them
+// over. Matched against the agent's own words, lowercased.
+//
+// Deliberately narrow: each one is a STATEMENT that the handover is happening,
+// not an offer to arrange one. "I can connect you if you like" is a question
+// and must not move the call.
+var transferPromises = []string{
+	"transfer you",
+	"transferring you",
+	"connect you with",
+	"connecting you",
+	"connect you to",
+	"put you through",
+	"get you over to",
+	"hand you over",
+	"getting you connected",
+}
+
+// transferDenials are phrasings that CONTAIN a promise phrase but mean the
+// opposite. Checked first, because "I can't transfer you" contains
+// "transfer you" and acting on it would put a caller through after being told
+// they could not be.
+var transferDenials = []string{
+	"cannot transfer", "can not transfer", "can't transfer",
+	"cannot connect", "can't connect",
+	"unable to transfer", "unable to connect",
+	"not able to transfer", "not able to connect",
+	"no one available", "nobody available",
+	"do not have transfer", "don't have transfer",
+}
+
+// promisesTransfer reports whether an agent turn told the caller they are being
+// handed to a human.
+func promisesTransfer(text string) bool {
+	s := strings.ToLower(text)
+	for _, d := range transferDenials {
+		if strings.Contains(s, d) {
+			return false
+		}
+	}
+	for _, p := range transferPromises {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// transferOnPromise returns an agent-turn observer that performs the transfer
+// the model said it was performing.
+//
+// WHY THIS IS NEEDED. gemma-4 will not reliably emit the tool call. Replaying a
+// real call's history against the model shows it answering "I completely
+// understand that you'd prefer to speak with a person. Let me transfer you
+// right now..." with finish_reason=stop and zero tool calls — while the SAME
+// request with tool_choice forced returns a correct call_transfer. The model
+// decides to transfer and then declines to say so in the one way that does
+// anything. Sharpening the tool description was tried first and did not fix it.
+//
+// So the trigger is the model's own statement to the caller. That is a
+// heuristic, and it is the RIGHT heuristic: by the time those words have been
+// spoken, the caller has been promised a human, and the only question left is
+// whether we keep the promise. Doing nothing is the one option that is
+// certainly wrong.
+//
+// Fires at most once. The tool itself is also idempotent — it reports "already
+// transferred" on a second call — but the caller should never see two attempts
+// from one promise.
+func transferOnPromise(session *common.Session, callID string) func(string) {
+	var once sync.Once
+	return func(text string) {
+		if !promisesTransfer(text) {
+			return
+		}
+		fn := session.Func("call_transfer")
+		if fn == nil {
+			return
+		}
+		once.Do(func() {
+			log.Printf("transfer: agent promised a handover without calling the tool on call=%s — transferring anyway (%q)",
+				callID, firstChars(text, 120))
+			result, err := fn.Execute(map[string]any{
+				"reason": "the agent told the caller it was connecting them to a person",
+			})
+			if err != nil {
+				log.Printf("transfer: promise repair FAILED on call=%s: %v", callID, err)
+				return
+			}
+			log.Printf("transfer: promise repair on call=%s -> %s", callID, result)
+		})
+	}
 }
