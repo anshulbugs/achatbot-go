@@ -175,7 +175,24 @@ func amdConfigFor(amd string) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"total_analysis_time_millis": 10000,
+		// How long detection gets before it gives up.
+		//
+		// 10000 was manufacturing "not_sure". Every verdict in the log tells
+		// the same story: human_residence lands at 3-4s, machine at 4-5s,
+		// silence at 5s — and every single not_sure at 9, 10 or 11 seconds,
+		// twelve of them, all pressed against a ten second deadline. That is
+		// not detection being uncertain, it is detection running out of time,
+		// and because not_sure is treated as human those calls put the agent
+		// into a conversation with a voicemail. It is the long-ringing numbers
+		// that land here: the ones whose mailbox picks up after a lengthy ring
+		// and opens with a slow greeting are exactly the ones that need more
+		// than ten seconds to characterise.
+		//
+		// Raising it does NOT slow down the calls that already work — a real
+		// verdict still arrives in 3-5s and the pipeline starts the moment it
+		// does. This only extends the deadline for the cases currently being
+		// timed out into a wrong answer.
+		"total_analysis_time_millis": 15000,
 		// How long to keep listening for the beep after concluding "machine".
 		//
 		// THIS IS WHY A VOICEMAIL RECORDED SILENCE. The default is a few

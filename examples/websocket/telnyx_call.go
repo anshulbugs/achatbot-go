@@ -228,6 +228,28 @@ func (r *callRegistry) handedOver(id string) bool {
 	return p != nil && p.handedOver
 }
 
+// amdSaysMachine reports whether the verdict recorded so far already means "no
+// human is listening", so a later machine signal can be skipped as redundant
+// rather than mistaken for new information.
+func (r *callRegistry) amdSaysMachine(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	return p != nil && p.platform != nil && isMachineVerdict(p.platform.amdVerdict)
+}
+
+// amdVerdictOf returns the verdict recorded so far, for logging. "" when none
+// has arrived or the call carries no platform context.
+func (r *callRegistry) amdVerdictOf(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	if p == nil || p.platform == nil {
+		return ""
+	}
+	return p.platform.amdVerdict
+}
+
 // hasAMDVerdict reports whether a detection verdict has already been recorded
 // for this call.
 func (r *callRegistry) hasAMDVerdict(id string) bool {
@@ -647,9 +669,19 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// detection.ended. Waiting only for detection.ended therefore meant
 		// every answering machine was treated as a person and got a full
 		// pipeline talking to it until the call cap.
-		if !calls.hasAMDVerdict(id) {
-			log.Printf("telnyx amd: greeting.ended result=%q with no detection verdict on call=%s -- treating as machine",
-				ev.Data.Payload.Result, id)
+		//
+		// It also OVERRIDES a verdict that was not a machine, which is a
+		// stronger claim and the evidence supports it. This event is only ever
+		// emitted for an answering machine, so if detection has already
+		// answered human_residence or not_sure, this arriving afterwards means
+		// detection was wrong. Gating on "no verdict yet" let every one of the
+		// twelve not_sure calls keep its wrong answer, because not_sure counts
+		// as a verdict — and not_sure is what detection returns when it runs
+		// out of time, which is exactly the long-ringing mailbox this is meant
+		// to catch.
+		if !calls.amdSaysMachine(id) {
+			log.Printf("telnyx amd: greeting.ended result=%q on call=%s -- machine (previous verdict %q)",
+				ev.Data.Payload.Result, id, calls.amdVerdictOf(id))
 			calls.recordAMD(id, "machine")
 			calls.signalAMD(id, "machine")
 		}
@@ -1185,14 +1217,28 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// peek ran a few milliseconds after answer, always found nothing,
 			// and sent every answering machine down the human path.
 			//
-			// Waiting here costs the caller nothing -- they are listening to
-			// the greeting the whole time -- so the window is the audio's own
-			// duration, less a lead so the pipeline is warm when it ends.
-			const pipelineLead = 1500 * time.Millisecond
+			// THE WINDOW IS THE DETECTION DEADLINE, NOT THE GREETING.
+			//
+			// It used to be the greeting's own duration, on the reasoning that
+			// waiting only costs the caller something once the audio has
+			// stopped. True, and it made the window about 8.3s — while twelve
+			// verdicts in the log arrived at 9, 10 and 11 seconds. Every one of
+			// those started a pipeline first and learned it was a machine
+			// afterwards, which is the agent holding a conversation with a
+			// voicemail.
+			//
+			// So the wait is now sized to when a verdict can still arrive.
+			// This is not a delay: the select returns the instant one lands,
+			// and the calls that already work land at 3-5s, well inside the old
+			// window and unaffected. The extra seconds are only ever spent on a
+			// call that has not answered the question yet — and those are
+			// overwhelmingly machines, which do not mind the silence. A human
+			// pays nothing for it.
+			const amdWaitCap = 16 * time.Second
 			verdict := ""
-			if wait := spoken - time.Since(announceStart) - pipelineLead; finished && wait > 0 {
-				log.Printf("telnyx amd: waiting up to %s for a verdict while the greeting plays call=%s",
-					wait.Round(time.Millisecond), id)
+			if wait := amdWaitCap - time.Since(announceStart); finished && wait > 0 {
+				log.Printf("telnyx amd: waiting up to %s for a verdict (greeting is %.1fs) call=%s",
+					wait.Round(time.Millisecond), spoken.Seconds(), id)
 				timer := time.NewTimer(wait)
 				select {
 				case verdict = <-got:
