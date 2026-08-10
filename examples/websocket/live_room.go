@@ -182,9 +182,10 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 //
 // So the outer loop redials a leg that died, and the inner one waits for a leg
 // that is still being answered.
-// takeover decides which of the two things an operator is doing: listening in
-// silently, or taking the call off the agent. See the DialSIP call below.
-func bridgeLiveRoom(id string, rc *rexaCall, takeover bool) {
+// listenOnly decides which of the two things an operator is doing. False --
+// the zero value -- is barge, the behaviour that shipped, so a path that never
+// sets it cannot silently turn a takeover into a silent monitor.
+func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 	if rc == nil || rc.roomSIP == "" || rc.client == nil || rc.bridged {
 		return
 	}
@@ -237,7 +238,7 @@ func bridgeLiveRoom(id string, rc *rexaCall, takeover bool) {
 			// barge   -> an ordinary participant everyone hears, and the agent
 			//            leaves so it is not talking over the person taking over.
 			role := ""
-			if !takeover {
+			if listenOnly {
 				role = "monitor"
 			}
 			_, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "", confName, role)
@@ -247,16 +248,16 @@ func bridgeLiveRoom(id string, rc *rexaCall, takeover bool) {
 				time.Sleep(time.Second)
 				continue
 			}
-			mode := "listen (monitor, agent stays)"
-			if takeover {
-				mode = "barge (agent leaves)"
+			mode := "barge (agent leaves)"
+			if listenOnly {
+				mode = "listen (monitor, agent stays)"
 			}
 			log.Printf("rexa: session=%s live room bridged in %s as %s (conference %s, dial+join %s, joined at ringback)",
 				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond), mode,
 				confAt.Round(time.Millisecond),
 				(time.Since(bridgeStart) - confAt).Round(time.Millisecond))
 
-			if !takeover {
+			if listenOnly {
 				return // listening only: the agent keeps the call
 			}
 			// The operator has the call now — step out of it. Held for a moment
@@ -396,7 +397,7 @@ func pollForListeners() {
 			}
 			log.Printf("rexa: session=%s listener joined room %s — bridging the call in",
 				w.rc.sessionID, w.rc.roomName)
-			bridgeLiveRoom(w.callID, w.rc, w.rc.takeover)
+			bridgeLiveRoom(w.callID, w.rc, w.rc.listenOnly)
 		}
 	}
 }
@@ -443,7 +444,7 @@ func handleJoinCall(w http.ResponseWriter, r *http.Request) {
 
 	// mode=listen | barge. Anything else keeps the shipped behaviour, so an
 	// integration that does not send it yet is unaffected.
-	rc.takeover = r.URL.Query().Get("mode") != "listen"
+	rc.listenOnly = r.URL.Query().Get("mode") == "listen"
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -468,7 +469,7 @@ func handleJoinCall(w http.ResponseWriter, r *http.Request) {
 	})
 	log.Printf("rexa: session=%s join-call — operator is opening room %s", rc.sessionID, rc.roomName)
 
-	bridgeLiveRoom(id, rc, rc.takeover)
+	bridgeLiveRoom(id, rc, rc.listenOnly)
 }
 
 // ensureLiveRoom creates this call's listen-in room if it does not have one.
@@ -606,7 +607,7 @@ func handleDailyWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("rexa: session=%s listener joined room %s (daily webhook) — bridging the call in",
 		wr.rc.sessionID, room)
-	bridgeLiveRoom(wr.callID, wr.rc, wr.rc.takeover)
+	bridgeLiveRoom(wr.callID, wr.rc, wr.rc.listenOnly)
 }
 
 // registerDailyWebhook points Daily's participant.joined at this process.

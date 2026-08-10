@@ -134,8 +134,15 @@ type rexaCall struct {
 	//
 	// Set from /join-call?mode=, which is the only place the difference is
 	// known; the platform's Join and Barge buttons are otherwise identical
-	// requests. Defaults to takeover, which is the behaviour that shipped.
-	takeover bool
+	// requests.
+	//
+	// Stored as "listenOnly" rather than "takeover" so the ZERO VALUE is the
+	// behaviour that shipped. It was the other way round for one deploy and a
+	// barge came through the Daily webhook — which never sets it — as
+	// "listen (monitor, agent stays)", leaving the operator inaudible to the
+	// caller. A default that only holds when someone remembers to set it is
+	// not a default.
+	listenOnly bool
 
 	// startedAt anchors both the report's duration and the transcript's turn
 	// timings. Set when the call is answered, not when it was dispatched.
@@ -1578,11 +1585,20 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// margin, and the tail is sent while the head is still playing.
 			// Two messages, not the hundred-and-forty-five that caused an
 			// audible hole in the greeting once before.
-			const greetingHeadSecs = 6
+			// REVERTED TO ONE MESSAGE. The split is off.
+			//
+			// Holding a tail back was meant to stop a short mailbox recording
+			// our whole greeting, and it worked — but it put an audible break
+			// in the middle of the greeting on real calls. The seam has no
+			// margin when the verdict does not arrive: the tail is sent on the
+			// wait timeout, which lands it at Telnyx exactly as the head runs
+			// out. Seen on a live call — head at 06:13:09, tail at 06:13:15,
+			// head six seconds long.
+			//
+			// A mailbox recording a few extra seconds of greeting is a
+			// cosmetic problem on calls nobody listens to. A break in the
+			// greeting is heard by every real person we ring. Not a close call.
 			head, tail := pcm, []byte(nil)
-			if cut := greetingHeadSecs * ttsRate * 2; len(pcm) > cut {
-				head, tail = pcm[:cut], pcm[cut:]
-			}
 			spoken := time.Duration(len(head)/2) * time.Second / time.Duration(ttsRate)
 			announceStart := time.Now()
 			log.Printf("announce: playing greeting call=%s (%.1fs of %.1fs now, rest held back for the verdict)",
