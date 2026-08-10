@@ -167,6 +167,11 @@ func (p *LLMOpenAIApiProcessor) beginTurn() (context.Context, context.CancelFunc
 	return ctx, cancel
 }
 
+// maxEmptyTurnRetries bounds how many times one turn re-asks the model after an
+// empty completion. Three attempts total takes gemma-4's measured one-in-four
+// empty rate to roughly one in sixty.
+const maxEmptyTurnRetries = 2
+
 func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processors.FrameDirection) {
 	// The caller's reflex "hello" on pickup is not a turn. Dropped before it
 	// reaches history, the model or the transcript — answering it produces the
@@ -210,6 +215,10 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 
 	isToolCalls := true
 	cnToolCalls := 0
+	// Counted separately from cnToolCalls: an empty completion is not a tool
+	// call, and letting it consume the tool budget would mean a turn that
+	// stuttered once could no longer run the tool it was trying to run.
+	emptyTurns := 0
 	for isToolCalls {
 		if cnToolCalls > 3 {
 			logger.Error("chat", "err", "too many tool calls")
@@ -366,13 +375,36 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 				isToolCalls = false
 			}
 
-			// A turn that produced neither text nor a runnable tool call must
-			// not spin. Nothing was added to `messages`, so going round again
-			// re-sends a request that already failed to produce anything, and
-			// the only thing four more attempts buy the caller is a longer
-			// silence before the loop gives up.
+			// RETRY AN EMPTY COMPLETION. Do not give up on it, and do not spin
+			// on it either.
+			//
+			// gemma-4 with tools advertised returns a completion with no
+			// content, no tool call and finish_reason=stop a substantial part
+			// of the time. Measured by replaying one real call's exact history
+			// twelve times: nine correct tool calls, three empty. Nothing is
+			// wrong with the request — the same bytes succeed on the next
+			// attempt.
+			//
+			// Whatever this turn was carrying is simply lost, and on a phone
+			// call a lost turn is dead air: the caller asked to be transferred,
+			// heard nothing for eight and a half seconds, and asked again. It
+			// was the second ask that transferred them.
+			//
+			// Nothing was appended to `messages`, so a retry re-sends an
+			// identical request — which is exactly what makes it work, since
+			// the failure is in the sampling and not in the input. Three
+			// attempts takes a one-in-four failure to one-in-sixty, and an
+			// empty completion comes back in about 180ms, so the retry is
+			// inaudible next to a turn that would otherwise be silent.
 			if len(toolMsgs) == 0 && (len(acc.Choices) == 0 || acc.Choices[0].Message.Content == "") {
-				logger.Error("chat", "err", "turn produced no content and no runnable tool call")
+				if emptyTurns < maxEmptyTurnRetries {
+					emptyTurns++
+					logger.Warnf("chat: empty completion, retrying (attempt %d of %d)",
+						emptyTurns, maxEmptyTurnRetries)
+					isToolCalls = true
+					continue
+				}
+				logger.Error("chat", "err", "empty completion after retries — this turn is silent")
 				isToolCalls = false
 			}
 		} //end stream
