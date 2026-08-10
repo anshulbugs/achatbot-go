@@ -109,6 +109,18 @@ type ServerConfig struct {
 	// Set false ONLY once rexa-dialer's JOIN_CALL_URL points at this agent.
 	// Until it does, false means Join finds no room at all.
 	LiveRoomPrepublish bool `mapstructure:"live_room_prepublish"`
+	// JoinCallFallbackURL is where /join-call forwards a uuid this agent does
+	// not know.
+	//
+	// WHAT MAKES THE SWITCH SAFE. The platform has one join_call_url, and it
+	// currently points at the legacy agent's sidecar — so repointing it here
+	// would break Join for every call that agent still owns. With a fallback
+	// set, this endpoint answers for its own calls and proxies the rest
+	// unchanged, so both agents keep working through one URL and the platform
+	// never has to know which box owns a given call.
+	//
+	// Empty disables proxying and an unknown uuid gets a plain 404.
+	JoinCallFallbackURL string `mapstructure:"join_call_fallback_url"`
 	// DialTimeoutSecs is how long an outbound call is allowed to ring before
 	// the carrier gives up and reports no_answer.
 	//

@@ -14,8 +14,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -392,6 +394,12 @@ func handleJoinCall(w http.ResponseWriter, r *http.Request) {
 	}
 	p := calls.get(id)
 	if p == nil || p.platform == nil {
+		// Not one of ours. Hand it to whoever it does belong to, so the
+		// platform can point its single join_call_url here without cutting off
+		// the other agent's calls.
+		if proxyJoinCall(w, r, id) {
+			return
+		}
 		// 404 is the right answer and the caller expects it: it retries on
 		// 0/0.5/1/2s, which covers a Join pressed while the dial is still
 		// being registered.
@@ -456,3 +464,42 @@ func ensureLiveRoom(ctx context.Context, rc *rexaCall) error {
 }
 
 var errNoDaily = errors.New("daily is not configured")
+
+// proxyJoinCall forwards a Join for a call this agent does not own, and reports
+// whether it answered the request.
+//
+// Deliberately a dumb pipe: status and body are passed through exactly as the
+// other agent sent them, including its 404s, because the dialer's retry ladder
+// is written against that behaviour and reinterpreting it here would break
+// timing it already handles correctly.
+func proxyJoinCall(w http.ResponseWriter, r *http.Request, id string) bool {
+	target := cfg.Server.JoinCallFallbackURL
+	if target == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	sep := "?"
+	if strings.Contains(target, "?") {
+		sep = "&"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target+sep+"uuid="+url.QueryEscape(id), nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("rexa: join-call proxy to %s failed for uuid=%s: %v", target, id, err)
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	log.Printf("rexa: join-call uuid=%s is not ours — proxied to %s (%d)", id, target, resp.StatusCode)
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+	return true
+}
