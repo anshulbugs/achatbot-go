@@ -1208,23 +1208,26 @@ waitBeep:
 	}
 
 	spoken := time.Duration(len(pcm)/2) * time.Second / time.Duration(rate)
+	sendStarted := time.Now()
 	log.Printf("telnyx amd: playing voicemail message call=%s (%d bytes, %.1fs, no gpu)",
 		id, len(pcm), spoken.Seconds())
 
-	// PACED, not one blob. This is the difference between a message that plays
-	// and one that does not.
+	// ONE message, like the greeting — not paced.
 	//
-	// The greeting goes out as a single message and is audible — but it is sent
-	// the instant the stream opens. The voicemail message is the only audio we
-	// hand the carrier in one piece MID-CALL, and two recordings show the same
-	// thing: our greeting plays, then the 12-14s message we queued is fifteen
-	// seconds of silence, then one loud burst at the moment we hang up. That
-	// last detail is the tell — it looks like playback that never got going.
+	// Pacing was a workaround for the wrong problem. The message genuinely was
+	// not playing, and sending it as sixty small frames did make it audible;
+	// but the actual cause was the outbound RTP path going idle during the
+	// six-to-twelve second wait for detection and the beep, which
+	// send_silence_when_idle now prevents. With that fixed, the reason to pace
+	// is gone — and pacing carries a cost we already paid once on the greeting:
+	// message count is what puts an audible hole in the middle of a clip. Sixty
+	// frames reintroduced exactly that, a pause partway through the message.
 	//
-	// A live conversation does not have this problem, and it is the one
-	// outbound path that is known to work mid-call: TTS goes out as a stream of
-	// small frames, never as a blob. So the message now goes the same way.
-	playAnnouncementPaced(id, tw, pcm, rate)
+	// So this goes back to the shape that has always played cleanly: a single
+	// message, the same way the greeting is sent. The mark below confirms the
+	// carrier played it, so a regression here is visible immediately rather
+	// than in a recording days later.
+	playAnnouncement(tw, pcm, rate, make(chan struct{}))
 
 	// Ask the carrier to tell us when the message finishes playing.
 	//
@@ -1262,10 +1265,13 @@ waitBeep:
 	//
 	// markVoicemailAudio above is the honest version: it asks the carrier.
 
-	// The paced send already took the message's own duration, and the mark
-	// waited for the carrier to finish playing it, so by here the message has
-	// been heard. A short tail so the last syllable is not clipped by the
-	// hangup.
+	// The mark waited for the carrier to finish playing, so by here the message
+	// has been heard. A short tail so the last syllable is not clipped by the
+	// hangup — and a floor on the message's own length, in case the mark came
+	// back early or not at all.
+	if left := spoken - time.Since(sendStarted); left > 0 {
+		time.Sleep(left)
+	}
 	time.Sleep(1500 * time.Millisecond)
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
