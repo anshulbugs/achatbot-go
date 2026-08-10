@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1225,6 +1226,21 @@ waitBeep:
 	// small frames, never as a blob. So the message now goes the same way.
 	playAnnouncementPaced(id, tw, pcm, rate)
 
+	// Ask the carrier to tell us when the message finishes playing.
+	//
+	// Telnyx: "Telnyx sends a mark callback when the media immediately
+	// preceding a submitted mark finishes playing. If no audio is playing or
+	// queued, the mark is returned immediately." So the reply time is a direct
+	// answer to the question this path keeps failing to settle:
+	//
+	//   ~ the message's duration  -> it played, and the mailbox is at fault
+	//   immediate                 -> the audio was DISCARDED, never queued
+	//   never                     -> it was queued and the queue never drained
+	//
+	// Three different bugs that have so far been indistinguishable from a log
+	// that only ever said "sent".
+	markVoicemailAudio(id, conn, spoken)
+
 	// PROVE THE AUDIO ACTUALLY LEFT, rather than trusting the send.
 	//
 	// "announce: sent N bytes" is written whether or not anything went on the
@@ -1260,6 +1276,59 @@ waitBeep:
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
+}
+
+// markVoicemailAudio submits a Telnyx `mark` after the message and reports how
+// long the carrier takes to hand it back.
+//
+// A diagnostic, and the only one that can tell the three failure modes apart
+// from outside: a mark returning after roughly the message's own duration means
+// the audio played, returning instantly means it was discarded without being
+// queued, and never returning means it was queued behind a playout that is not
+// draining. Runs on the voicemail path only, where nothing else is reading the
+// socket.
+func markVoicemailAudio(id string, conn *telnyx.Conn, expect time.Duration) {
+	if conn == nil {
+		return
+	}
+	const name = "voicemail-message-end"
+	msg, err := json.Marshal(map[string]any{
+		"event": "mark",
+		"mark":  map[string]string{"name": name},
+	})
+	if err != nil {
+		return
+	}
+	if err := conn.WriteMessage(consts.TextMessage, msg); err != nil {
+		log.Printf("telnyx amd: could not submit mark on call=%s: %v", id, err)
+		return
+	}
+
+	started := time.Now()
+	deadline := time.Now().Add(expect + 10*time.Second)
+	for time.Now().Before(deadline) {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("telnyx amd: media socket closed before the mark came back on call=%s (after %s)",
+				id, time.Since(started).Round(time.Millisecond))
+			return
+		}
+		if !bytes.Contains(data, []byte(name)) {
+			continue
+		}
+		took := time.Since(started)
+		switch {
+		case took < expect/3:
+			log.Printf("telnyx amd: MARK CAME BACK IMMEDIATELY on call=%s (%s for a %s message) -- the carrier DISCARDED the audio, it was never queued",
+				id, took.Round(time.Millisecond), expect.Round(time.Millisecond))
+		default:
+			log.Printf("telnyx amd: mark returned after %s on call=%s (message is %s) -- the audio played",
+				took.Round(time.Millisecond), id, expect.Round(time.Millisecond))
+		}
+		return
+	}
+	log.Printf("telnyx amd: MARK NEVER RETURNED on call=%s after %s -- the audio was queued and the carrier never played it",
+		id, time.Since(started).Round(time.Millisecond))
 }
 
 // playAnnouncementPaced streams pre-rendered audio the way live speech goes

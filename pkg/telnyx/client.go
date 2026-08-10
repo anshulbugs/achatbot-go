@@ -130,6 +130,18 @@ func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd stri
 		"webhook_url":   webhookURL,
 		"client_state":  encodeState(clientState),
 		"timeout_secs":  ringSecs,
+		// Keep RTP flowing while we have nothing to say.
+		//
+		// THE VOICEMAIL MESSAGE MAY DEPEND ON THIS. Telnyx documents it as
+		// "generate silence RTP packets when no transmission available", and it
+		// defaults to false — so when we stop sending, the outbound path
+		// carries nothing at all. That is exactly the shape of the failure: the
+		// greeting plays because RTP flows from the instant the stream opens,
+		// then we send nothing for the six to twelve seconds it takes detection
+		// to answer and the mailbox to beep, and the message that follows is
+		// accepted by the socket and never heard. A live conversation never
+		// leaves a gap that long, which is why only this path breaks.
+		"send_silence_when_idle": true,
 		"answering_machine_detection": func() string {
 			if amd == "" {
 				return "disabled"
@@ -305,6 +317,13 @@ func (c *Client) StreamingStart(ctx context.Context, callControlID, streamURL st
 		"stream_track":               "inbound_track",
 		"stream_bidirectional_mode":  "rtp",
 		"stream_bidirectional_codec": "PCMU",
+		// Which leg our audio is played onto. Documented default is
+		// "opposite", which we were relying on without ever saying so — and it
+		// is the one parameter in this feature whose meaning depends on the
+		// call's leg topology, so it is the wrong thing to leave implicit on a
+		// call that gets conferenced, transferred, or handled by answering
+		// machine detection. "both" is unambiguous.
+		"stream_bidirectional_target_legs": "both",
 	}
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/streaming_start", body, nil)
 }
