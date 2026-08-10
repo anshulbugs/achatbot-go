@@ -272,35 +272,28 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			// exactly what it says while a leg is unanswered — 422 "Call not
 			// answered yet". When it stops saying that, the leg is up, and only
 			// then is it safe for the agent to step out.
-			answered := false
-			for probe := 0; probe < 40; probe++ {
-				if calls.get(id) == nil {
-					return
-				}
-				perr := rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
-				if perr == nil {
-					answered = true
-					break
-				}
-				// ONLY a nil error means the leg is live.
-				//
-				// This used to treat any error other than "not answered yet" as
-				// success, which is how a leg Daily had REJECTED got read as
-				// ready: the agent stepped out and left the caller with a dead
-				// SIP leg and nobody else. Anything unexpected now falls
-				// through to a redial instead.
-				if !strings.Contains(perr.Error(), "not answered yet") {
-					log.Printf("rexa: session=%s operator's leg is not usable (%v) — redialling", rc.sessionID, perr)
-					break
-				}
-				time.Sleep(250 * time.Millisecond)
+			// THE LEG IS ALREADY IN THE CONFERENCE. Do not try to join it again.
+			//
+			// conference_config puts it in at dial time — that is what
+			// early_media buys — so ConferenceJoin can never succeed here. It
+			// returns 90044 "Participant must not join the same conference
+			// twice", which the previous readiness probe read as a broken leg:
+			// it redialled six times, put six SIP legs in the operator's room,
+			// gave up after twenty-two seconds, and never let the agent leave.
+			// The bridge had been fine since the first dial.
+			//
+			// So there is no join to probe, and the only thing left to decide
+			// is when it is safe for the agent to go. Ringback means the leg is
+			// in the conference, not that Daily has answered it, and Daily
+			// takes a few seconds either way. A settle beats a probe that
+			// cannot observe what it is asking about.
+			const legSettle = 3500 * time.Millisecond
+			log.Printf("rexa: session=%s operator's leg is in the conference — agent stepping out in %s",
+				rc.sessionID, legSettle)
+			time.Sleep(legSettle)
+			if calls.get(id) == nil {
+				return
 			}
-			if !answered {
-				time.Sleep(time.Second)
-				continue // redial; the room may not have had anyone in it yet
-			}
-			log.Printf("rexa: session=%s operator's leg is live after %s — agent stepping out",
-				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond))
 			leaveCall(id, rc.client, "operator barged in")
 			return
 		}
