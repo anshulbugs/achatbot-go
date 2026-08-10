@@ -1155,14 +1155,38 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 		id, len(pcm), spoken.Seconds())
 	playAnnouncement(tw, pcm, rate, make(chan struct{}))
 
+	// PROVE THE AUDIO ACTUALLY LEFT, rather than trusting the send.
+	//
+	// "announce: sent N bytes" is written whether or not anything went on the
+	// wire: the serializer drops outbound audio while it is muted after an
+	// interruption and returns no payload, and an empty payload is not an
+	// error, so the send reports success either way. A voicemail that records
+	// silence looks identical in the log to one that worked, which is exactly
+	// the position we were in.
+	//
+	// PlaybackEnd is the serializer's own estimate of when the audio it
+	// ACCEPTED finishes playing. If the frames were swallowed it has not moved,
+	// and the difference says so plainly.
+	outstanding := time.Until(ser.PlaybackEnd())
+	if outstanding < spoken/2 {
+		log.Printf("telnyx amd: VOICEMAIL AUDIO WAS NOT SENT on call=%s -- serializer has only %s of playback queued for a %s message",
+			id, outstanding.Round(time.Millisecond), spoken.Round(time.Millisecond))
+	} else {
+		log.Printf("telnyx amd: voicemail message queued at the carrier call=%s (%s of playback ahead)",
+			id, outstanding.Round(time.Millisecond))
+	}
+
 	// Wait for the message to actually PLAY before hanging up.
 	//
-	// It is handed to Telnyx in one chunk and buffered there, so the send
-	// returns in milliseconds and tells us nothing about when the machine has
-	// heard it. The old quarter-of-the-duration wait worked only because
-	// sending used to take the duration itself; kept as-is it would cut every
-	// voicemail message off a few words in.
-	time.Sleep(spoken + 900*time.Millisecond)
+	// Timed off the serializer rather than off the audio's length, because that
+	// is the number that accounts for what was really accepted and when. It is
+	// handed to Telnyx in one chunk and buffered there, so the send returns in
+	// milliseconds and tells us nothing about when the machine has heard it.
+	wait := outstanding + 1500*time.Millisecond
+	if wait < spoken+900*time.Millisecond {
+		wait = spoken + 900*time.Millisecond
+	}
+	time.Sleep(wait)
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
