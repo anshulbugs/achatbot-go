@@ -90,6 +90,25 @@ type ServerConfig struct {
 	// MaxCallSecs hangs a call up after this many seconds. Needed for agent-to-agent
 	// load tests, where neither side ever hangs up. 0 disables the cap.
 	MaxCallSecs int `mapstructure:"max_call_secs"`
+	// LiveRoomPrepublish decides HOW an operator's Join reaches the agent, and
+	// the two modes cannot both be on — the dialer's own code makes it either/or.
+	//
+	// true (default, and what shipped): the listen-in room is created when the
+	// call is dispatched and its link published to Redis straight away. The
+	// dialer stashes that link and then SKIPS its own
+	// GET {join_call_url}?uuid=... on Join, because it already has a room
+	// (rexa-dialer calls.py `_bridge_daily_room`). With no request to answer,
+	// the agent can only notice the operator through Daily's presence API,
+	// which lags a real join by about 5.6 seconds — so barging takes ~10s.
+	//
+	// false: nothing is published up front, the dialer's fast path misses, and
+	// it calls /join-call on the click. Bridging starts immediately and barging
+	// takes ~2s. A room is also only created for calls somebody actually
+	// opened, rather than one per dispatch.
+	//
+	// Set false ONLY once rexa-dialer's JOIN_CALL_URL points at this agent.
+	// Until it does, false means Join finds no room at all.
+	LiveRoomPrepublish bool `mapstructure:"live_room_prepublish"`
 	// DialTimeoutSecs is how long an outbound call is allowed to ring before
 	// the carrier gives up and reports no_answer.
 	//
@@ -396,6 +415,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.voicemail_detection", "disabled")
 	// Telnyx's own default, so an unset key changes nothing.
 	v.SetDefault("server.dial_timeout_secs", 30)
+	// Safe by default: Join keeps working without any change on the platform
+	// side, at the cost of the slow path.
+	v.SetDefault("server.live_room_prepublish", true)
 	v.SetDefault("server.clarity_filter", true)
 
 	v.SetDefault("vad.model", "silero")

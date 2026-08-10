@@ -144,21 +144,21 @@ func stopSidecar(sessionID string) {
 // call as it connects, and a link that appears ten seconds into the
 // conversation has already missed the part they wanted.
 func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) string {
-	// DELIBERATELY DOES NOTHING NOW.
-	//
-	// The room used to be created here, before the dial, so the join link was
-	// in Redis while the phone rang. That turned out to be the reason barging
-	// took ten seconds: the dialer stashes the link from our join_daily event
-	// and then takes an "already have a room" shortcut past the very request
-	// that would have told us the operator had pressed Join
-	// (rexa-dialer calls.py `_bridge_daily_room`). Left with no push signal, the
-	// agent could only poll Daily's presence API, which lags a join by about
-	// five and a half seconds.
-	//
-	// The room is now made on demand in handleJoinCall, which also means a room
-	// exists only for calls somebody actually opened rather than one per
-	// dispatch.
-	return ""
+	if dailyClient == nil || rc == nil || !redisConfigured {
+		return ""
+	}
+	// See config.LiveRoomPrepublish. Publishing the link here is what makes the
+	// dialer skip its own Join request, so the fast path requires NOT doing it.
+	if !cfg.Server.LiveRoomPrepublish {
+		return ""
+	}
+	if err := ensureLiveRoom(ctx, rc); err != nil {
+		// Never fail the call over the listening feature. The call is the
+		// product; this is a window onto it.
+		log.Printf("rexa: session=%s live room creation failed (call continues): %v", rc.sessionID, err)
+		return ""
+	}
+	return rc.roomName
 }
 
 // bridgeLiveRoom puts the call and the room's SIP endpoint into one conference,
