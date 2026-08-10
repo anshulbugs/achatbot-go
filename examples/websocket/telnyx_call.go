@@ -1706,7 +1706,13 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 
 	conn := telnyx.NewConn(ws)
 
-	calls.setHushAgent(id, ser.Hush)
+	calls.setHushAgent(id, func() {
+		// Mute the agent AND stop the pipeline. Hush alone leaves VAD, ASR,
+		// the LLM and TTS running on the GPU for a call the agent has been
+		// taken off, producing replies that are discarded at the last step.
+		ser.Hush()
+		ser.Deafen()
+	})
 	// Hooks for live listening. Both stay unused — and cost nothing — on every
 	// call nobody opens, which is almost all of them.
 	//
