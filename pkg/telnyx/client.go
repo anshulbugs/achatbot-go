@@ -256,7 +256,7 @@ func amdConfigFor(amd string) map[string]any {
 //
 // It also removes the separate join round trip and the 422 "Call not answered
 // yet" retry loop that existed only because joining required an answered leg.
-func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState, conferenceName string) (string, error) {
+func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState, conferenceName, supervisorRole string) (string, error) {
 	if !strings.HasPrefix(sipURI, "sip:") {
 		sipURI = "sip:" + sipURI
 	}
@@ -269,7 +269,7 @@ func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState, c
 		"timeout_secs":  15,
 	}
 	if conferenceName != "" {
-		body["conference_config"] = map[string]any{
+		cfg := map[string]any{
 			"conference_name": conferenceName,
 			"early_media":     true,
 			// The conference already exists with the caller in it; this leg
@@ -277,6 +277,15 @@ func (c *Client) DialSIP(ctx context.Context, sipURI, webhookURL, clientState, c
 			"start_conference_on_enter": false,
 			"end_conference_on_exit":    false,
 		}
+		// supervisorRole is Telnyx's own listen/whisper/barge vocabulary.
+		// "monitor" is what makes silent listening possible at all: per their
+		// docs, "nobody can hear supervisor call, but supervisor can hear
+		// everything on the call". Empty leaves the default, which is an
+		// ordinary participant everyone can hear.
+		if supervisorRole != "" {
+			cfg["supervisor_role"] = supervisorRole
+		}
+		body["conference_config"] = cfg
 	}
 	var res DialResult
 	if err := c.do(ctx, http.MethodPost, "/calls", body, &res); err != nil {

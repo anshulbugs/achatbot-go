@@ -127,6 +127,15 @@ type rexaCall struct {
 	// bridged guards against dialling a second SIP leg into the room if the
 	// answered event ever arrives twice.
 	bridged bool
+	// takeover distinguishes the two things an operator can be doing. false is
+	// listen-in: the SIP leg joins as a Telnyx "monitor" — audible to nobody —
+	// and the agent keeps serving the caller. true is barge: an ordinary
+	// participant, and the agent leaves.
+	//
+	// Set from /join-call?mode=, which is the only place the difference is
+	// known; the platform's Join and Barge buttons are otherwise identical
+	// requests. Defaults to takeover, which is the behaviour that shipped.
+	takeover bool
 
 	// startedAt anchors both the report's duration and the transcript's turn
 	// timings. Set when the call is answered, not when it was dispatched.
