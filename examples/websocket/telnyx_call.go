@@ -1253,26 +1253,20 @@ waitBeep:
 	// PlaybackEnd is the serializer's own estimate of when the audio it
 	// ACCEPTED finishes playing. If the frames were swallowed it has not moved,
 	// and the difference says so plainly.
-	outstanding := time.Until(ser.PlaybackEnd())
-	if outstanding < spoken/2 {
-		log.Printf("telnyx amd: VOICEMAIL AUDIO WAS NOT SENT on call=%s -- serializer has only %s of playback queued for a %s message",
-			id, outstanding.Round(time.Millisecond), spoken.Round(time.Millisecond))
-	} else {
-		log.Printf("telnyx amd: voicemail message queued at the carrier call=%s (%s of playback ahead)",
-			id, outstanding.Round(time.Millisecond))
-	}
-
-	// Wait for the message to actually PLAY before hanging up.
+	// The old "was it queued?" check lived here and had to go: it compared
+	// PlaybackEnd against the whole message, which was a fair test of a single
+	// blob and is meaningless now the audio is paced. Pacing deliberately keeps
+	// only about a second queued, so the check fired on every call — including
+	// the one where the carrier's own mark confirmed the message had played in
+	// full. A diagnostic that cries wolf on a success is worse than none.
 	//
-	// Timed off the serializer rather than off the audio's length, because that
-	// is the number that accounts for what was really accepted and when. It is
-	// handed to Telnyx in one chunk and buffered there, so the send returns in
-	// milliseconds and tells us nothing about when the machine has heard it.
-	wait := outstanding + 1500*time.Millisecond
-	if wait < spoken+900*time.Millisecond {
-		wait = spoken + 900*time.Millisecond
-	}
-	time.Sleep(wait)
+	// markVoicemailAudio above is the honest version: it asks the carrier.
+
+	// The paced send already took the message's own duration, and the mark
+	// waited for the carrier to finish playing it, so by here the message has
+	// been heard. A short tail so the last syllable is not clipped by the
+	// hangup.
+	time.Sleep(1500 * time.Millisecond)
 	if err := p.tc().Hangup(context.Background(), id); err != nil {
 		log.Printf("telnyx amd hangup err call=%s: %v", id, err)
 	}
