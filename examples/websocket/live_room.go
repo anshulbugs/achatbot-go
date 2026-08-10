@@ -214,7 +214,6 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			rc.bridged = false
 			return
 		}
-		_ = confID
 
 		// ONE dial that joins itself to the conference at ringback.
 		//
@@ -241,7 +240,7 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			if listenOnly {
 				role = "monitor"
 			}
-			_, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "", confName, role)
+			sipLeg, err := rc.client.DialSIP(ctx, rc.roomSIP, "", "", confName, role)
 			if err != nil {
 				log.Printf("rexa: session=%s SIP dial to room failed (attempt %d): %v",
 					rc.sessionID, dial+1, err)
@@ -260,11 +259,37 @@ func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 			if listenOnly {
 				return // listening only: the agent keeps the call
 			}
-			// The operator has the call now — step out of it. Held for a moment
-			// so the leg is actually in the conference before the caller is
-			// left with only it: ringback means media is flowing, not that the
-			// far end has picked up.
-			time.Sleep(1500 * time.Millisecond)
+
+			// WAIT FOR THE LEG TO BE ANSWERED BEFORE LEAVING.
+			//
+			// early_media joins the conference at RINGBACK, which is what makes
+			// the bridge look instant — but ringback is not a media path. Daily
+			// still has to answer, and until it does the SIP leg carries no
+			// audio. Leaving on a timer after that put the caller and the
+			// operator in silence together: agent gone, leg not yet live.
+			//
+			// ConferenceJoin is the readiness probe, because we already know
+			// exactly what it says while a leg is unanswered — 422 "Call not
+			// answered yet". When it stops saying that, the leg is up, and only
+			// then is it safe for the agent to step out.
+			answered := false
+			for probe := 0; probe < 40; probe++ {
+				if calls.get(id) == nil {
+					return
+				}
+				perr := rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
+				if perr == nil || !strings.Contains(perr.Error(), "not answered yet") {
+					answered = true
+					break
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+			if !answered {
+				log.Printf("rexa: session=%s SIP leg never answered — keeping the agent on the call", rc.sessionID)
+				return
+			}
+			log.Printf("rexa: session=%s operator's leg is live after %s — agent stepping out",
+				rc.sessionID, time.Since(bridgeStart).Round(time.Millisecond))
 			leaveCall(id, rc.client, "operator barged in")
 			return
 		}
