@@ -201,12 +201,49 @@ func bridgeLiveRoom(id string, rc *rexaCall) {
 			log.Printf("rexa: session=%s SIP dial to room failed (call unaffected): %v", rc.sessionID, err)
 			return
 		}
-		// Muted: an operator dropping in must not accidentally speak over a
-		// live call. They unmute in the Daily UI when they mean to.
-		if err := rc.client.ConferenceJoin(ctx, confID, sipLeg, true); err != nil {
+		// Wait for the leg to be ANSWERED before conferencing it.
+		//
+		// Joining straight after the dial fails with 422 "Call not answered
+		// yet" — the leg is still being set up, and Daily has not picked it up.
+		// That is exactly what happened on a real barge: the conference was
+		// created, the SIP leg never entered it, and the operator sat in the
+		// room hearing nothing.
+		//
+		// Retried rather than waited on a webhook: this leg is dialled without
+		// a webhook override, so its events go to the application's configured
+		// URL rather than necessarily to us, and a poll of a command we are
+		// going to issue anyway needs no extra plumbing.
+		//
+		// UNMUTED. It joins muted only if the agent is staying, and it is not:
+		// see below.
+		joined := false
+		for attempt := 0; attempt < 20; attempt++ {
+			err = rc.client.ConferenceJoin(ctx, confID, sipLeg, false)
+			if err == nil {
+				joined = true
+				break
+			}
+			if !strings.Contains(err.Error(), "not answered yet") {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !joined {
 			log.Printf("rexa: session=%s room leg failed to join conference: %v", rc.sessionID, err)
 			return
 		}
+
+		// The operator has the call now — step out of it.
+		//
+		// Asked for explicitly: barging should behave like a transfer, with the
+		// agent gone rather than talking over the person who just took over.
+		// The conference keeps the caller and the operator connected without
+		// us, so leaving costs the caller nothing.
+		//
+		// NOTE this makes joining the room a TAKEOVER rather than a way to
+		// listen silently. There is no signal that distinguishes the two today
+		// — both are just "somebody appeared in the room".
+		leaveCall(id, rc.client, "operator barged in")
 		log.Printf("rexa: session=%s live room bridged (conference=%s)", rc.sessionID, confID)
 	}()
 }

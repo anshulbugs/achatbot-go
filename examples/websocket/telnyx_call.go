@@ -1325,3 +1325,32 @@ func chainAgentObservers(a, b func(string)) func(string) {
 		b(s)
 	}
 }
+
+// leaveCall removes the agent from a call that somebody else now owns —
+// a transfer destination, or an operator who barged in.
+//
+// THREE STEPS, and all three are needed. Marking the call handed over comes
+// first, because the carrier re-forks the audio the moment our socket closes
+// and a stream that reconnects in the gap would otherwise be greeted as a new
+// call. streaming_stop then ends the fork at the carrier, which is what stops
+// it reconnecting at all. Closing the socket last unblocks the pipeline so its
+// GPU slots go back.
+//
+// Deferred by a beat so whatever triggered this — a tool result, a conference
+// join — finishes its own work before the socket disappears underneath it.
+func leaveCall(id string, client *telnyx.Client, why string) {
+	calls.markHandedOver(id)
+	go func() {
+		time.Sleep(750 * time.Millisecond)
+		if client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := client.StreamingStop(ctx, id); err != nil {
+				log.Printf("rexa: streaming_stop failed on call=%s (%s): %v", id, why, err)
+			}
+		}
+		if calls.stopMediaFor(id) {
+			log.Printf("rexa: call=%s — agent has left the call (%s)", id, why)
+		}
+	}()
+}
