@@ -273,12 +273,31 @@ var transferDenials = []string{
 	"do not have transfer", "don't have transfer",
 }
 
+// transferOffers are phrasings that ASK whether to transfer rather than state
+// that one is happening. Sampling the model's no-tools replies turned up
+// "Would you like me to transfer you now, or did you have another question?"
+// and "I can certainly connect you with a member of our sales team if you'd
+// like. Before I do, ..." — both contain a promise phrase, and transferring on
+// either would move a caller in the middle of being asked whether they wanted
+// it.
+var transferOffers = []string{
+	"would you like", "do you want", "shall i", "should i",
+	"if you'd like", "if you would like", "if you prefer",
+	"before i do", "before i transfer", "before i connect",
+	"just to confirm", "is that okay", "is that alright",
+}
+
 // promisesTransfer reports whether an agent turn told the caller they are being
 // handed to a human.
 func promisesTransfer(text string) bool {
 	s := strings.ToLower(text)
 	for _, d := range transferDenials {
 		if strings.Contains(s, d) {
+			return false
+		}
+	}
+	for _, o := range transferOffers {
+		if strings.Contains(s, o) {
 			return false
 		}
 	}

@@ -397,6 +397,34 @@ func (p *LLMOpenAIApiProcessor) chat(frame *frames.TextFrame, direction processo
 			// empty completion comes back in about 180ms, so the retry is
 			// inaudible next to a turn that would otherwise be silent.
 			if len(toolMsgs) == 0 && (len(acc.Choices) == 0 || acc.Choices[0].Message.Content == "") {
+				// FIRST retry forces a tool call, because that is what the
+				// model was failing to produce.
+				//
+				// An empty completion is not random: every one in the logs
+				// sits on a turn where a tool was being invoked — a transfer
+				// request, or the turn straight after a transfer ran — and
+				// never on ordinary conversation. The model emits tool-call
+				// markup, the server's parser fails to turn it into a
+				// tool_calls field, and nothing reaches us. Re-asking the same
+				// question the same way just rolls the same dice: measured
+				// nine-in-ten with tool_choice=auto against ten-in-ten with it
+				// forced.
+				if emptyTurns == 0 {
+					emptyTurns++
+					if am, tms, ok := p.retryForcingTools(turnCtx, messages, direction); ok {
+						logger.Warn("chat: empty completion — recovered by forcing a tool call")
+						if !p.isHistoryThink {
+							am.Reasoning = ""
+						}
+						messages = append(messages, am)
+						p.appendHistoryChatMessages([]types.Message{am})
+						messages = append(messages, tms...)
+						p.appendHistoryChatMessages(tms)
+						isToolCalls = true
+						cnToolCalls++
+						continue
+					}
+				}
 				if emptyTurns < maxEmptyTurnRetries {
 					emptyTurns++
 					logger.Warnf("chat: empty completion, retrying (attempt %d of %d)",
@@ -529,4 +557,63 @@ func (p *LLMOpenAIApiProcessor) retryWithoutTools(
 	}
 	p.appendHistoryChatMessages([]types.Message{{ChatCompletionMessage: acc.Choices[0].Message}})
 	return true
+}
+
+// forcedToolStreamer is implemented by providers that can require a tool call.
+// Optional, so a provider without it simply falls through to the plain retry.
+type forcedToolStreamer interface {
+	ChatStreamForcingTools(ctx context.Context, args types.LMGenerateArgs,
+		messages []types.Message, respFunc common.OpenAIStreamChatCompletionRespFunc)
+	HasTools() bool
+}
+
+// retryForcingTools re-runs a turn that came back empty, requiring a tool call,
+// and executes whatever the model asks for.
+//
+// Returns the assistant message and the tool results so the caller can put both
+// into the conversation, plus whether anything was actually run. Reports false
+// when the provider cannot force a choice, when no tool is advertised, or when
+// the forced attempt came back empty as well — in each case the caller carries
+// on to the plain retry and then to the no-tools fallback.
+func (p *LLMOpenAIApiProcessor) retryForcingTools(
+	ctx context.Context, messages []types.Message, direction processors.FrameDirection,
+) (types.Message, []types.Message, bool) {
+	provider, ok := p.provider.(forcedToolStreamer)
+	if !ok || !provider.HasTools() {
+		return types.Message{}, nil, false
+	}
+
+	acc := openai.ChatCompletionAccumulator{}
+	provider.ChatStreamForcingTools(ctx, p.args, messages, func(chunk *openai.ChatCompletionChunk) error {
+		acc.AddChunk(*chunk)
+		return nil
+	})
+	if len(acc.Choices) == 0 || len(acc.Choices[0].Message.ToolCalls) == 0 {
+		return types.Message{}, nil, false
+	}
+
+	toolMsgs := []types.Message{}
+	for i, tool := range acc.Choices[0].Message.ToolCalls {
+		args, err := parseToolArgs(tool.Function.Arguments)
+		if err != nil {
+			logger.Error("forced tool arguments unparseable", "err", err,
+				"funcName", tool.Function.Name, "funcArgs", tool.Function.Arguments)
+			continue
+		}
+		result, err := p.execFunc(tool.Function.Name, args)
+		if err != nil {
+			logger.Error("Execute", "err", err, "funcName", tool.Function.Name)
+			continue
+		}
+		logger.Infof("forced tool call %s(%v) -> %s", tool.Function.Name, args, result)
+		toolMsgs = append(toolMsgs, types.Message{
+			ChatCompletionMessage: openai.ChatCompletionMessage{Role: "tool", Content: result},
+			ToolCallID:            tool.ID,
+		})
+		p.QueueFrame(achatbot_frames.NewFunctionCallFrame(tool.ID, tool.Function.Name, args, i), direction)
+	}
+	if len(toolMsgs) == 0 {
+		return types.Message{}, nil, false
+	}
+	return types.Message{ChatCompletionMessage: acc.Choices[0].Message}, toolMsgs, true
 }

@@ -333,3 +333,47 @@ func (p *OpenAIAPIProvider) ChatStreamWithoutTools(ctx context.Context, args typ
 		logger.Errorf("chat stream (no tools) error: %v", stream.Err())
 	}
 }
+
+// ChatStreamForcingTools runs one streamed turn with tool_choice="required", so
+// the model must answer with a tool call rather than prose.
+//
+// THE REPAIR FOR A FAILED TOOL CALL. An "empty completion" from this stack --
+// no content, no tool call, finish_reason=stop -- only ever happens on a turn
+// where the model was trying to invoke a tool: every one in the logs sits on a
+// transfer request or immediately after a transfer executed, and never anywhere
+// else. The model emits tool-call markup and SGLang's parser fails to turn it
+// into a tool_calls field, so what arrives is a response with nothing in it.
+//
+// Forcing the choice removes the ambiguity the parser is failing on. Measured
+// on the history of a call that produced empties: tool_choice=auto returned a
+// tool call nine times in ten, tool_choice=required ten times in ten.
+//
+// Only correct as a RETRY. Forcing on the first attempt would make the model
+// call a tool on turns where it should simply be talking.
+func (p *OpenAIAPIProvider) ChatStreamForcingTools(ctx context.Context, args types.LMGenerateArgs, messages []types.Message, respFunc common.OpenAIStreamChatCompletionRespFunc) {
+	params := p.getChatCompletionNewParams(messages, args)
+	if len(params.Tools) == 0 {
+		return
+	}
+	params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+		OfAuto: param.Opt[string]{Value: "required"},
+	}
+
+	stream := p.client.Chat.Completions.NewStreaming(ctx, params,
+		option.WithHeader("HTTP-Referer", "github.com/weedge"),
+		option.WithHeader("X-Title", "achatbot-go"),
+		option.WithMaxRetries(2),
+	)
+	for stream.Next() {
+		chunk := stream.Current()
+		if err := respFunc(&chunk); err != nil {
+			logger.Errorf("chat stream (forced tools) error: %v", err)
+		}
+	}
+	if stream.Err() != nil {
+		logger.Errorf("chat stream (forced tools) error: %v", stream.Err())
+	}
+}
+
+// HasTools reports whether any tool is advertised on this provider.
+func (p *OpenAIAPIProvider) HasTools() bool { return len(p.tools) > 0 }
