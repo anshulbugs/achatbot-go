@@ -292,6 +292,18 @@ func (c *Client) StreamingStart(ctx context.Context, callControlID, streamURL st
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/streaming_start", body, nil)
 }
 
+// StreamingStop ends the media fork started by StreamingStart.
+//
+// REQUIRED BEFORE WALKING AWAY FROM A CALL. Closing our end of the websocket
+// does not end the fork: streaming_start stays active on the call, so the
+// carrier simply reconnects, the media handler treats the new socket as a fresh
+// call, and it plays the greeting and starts another pipeline. That is exactly
+// what a transferred caller heard — the agent said goodbye, left, and then
+// introduced itself again to a call it had already handed over.
+func (c *Client) StreamingStop(ctx context.Context, callControlID string) error {
+	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/streaming_stop", nil, nil)
+}
+
 // Answer answers an inbound call (unused for outbound tests but handy).
 func (c *Client) Answer(ctx context.Context, callControlID string) error {
 	return c.do(ctx, http.MethodPost, "/calls/"+callControlID+"/actions/answer", nil, nil)

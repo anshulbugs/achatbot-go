@@ -164,8 +164,22 @@ func (t *transferTool) Execute(args map[string]any) (string, error) {
 	// conversation. Deferred by a beat so this tool's own result still reaches
 	// the model and the turn unwinds through its normal path rather than
 	// through a read error.
+	// Latch FIRST, before anything closes. The carrier re-forks the audio the
+	// moment our socket goes away, and without this the reconnecting stream is
+	// indistinguishable from a brand-new call: the handler greets the caller
+	// and starts a second pipeline on a call that has already been handed over.
+	calls.markHandedOver(t.callID)
+
 	go func() {
 		time.Sleep(750 * time.Millisecond)
+		// Stop the fork at the carrier. Closing our end is not enough —
+		// streaming_start stays active on the call, so Telnyx just reconnects.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := t.client.StreamingStop(ctx, t.callID); err != nil {
+			log.Printf("transfer: streaming_stop failed on call=%s (the handover stands): %v",
+				t.callID, err)
+		}
 		if calls.stopMediaFor(t.callID) {
 			log.Printf("transfer: call=%s handed over — agent has left the call", t.callID)
 		}

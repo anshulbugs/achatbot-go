@@ -43,6 +43,11 @@ type callParams struct {
 	// while the audio is driven from the media handler, so they meet here.
 	amdCh  chan string
 	beepCh chan string
+	// handedOver latches once the call has been transferred away. The carrier
+	// re-forks the audio when our socket closes, and this is what tells the
+	// media handler that the reconnecting stream belongs to a call the agent has
+	// already left.
+	handedOver bool
 	// amdSeen records that SOME detection verdict has already been delivered
 	// for this call, so a later event can fill in for a missing one without
 	// overriding one that actually arrived. Guarded by callRegistry.mu.
@@ -200,6 +205,25 @@ func (r *callRegistry) recordAMD(id, verdict string) {
 			p.platform.live.Event(rexa.EventMachineDetected, nil)
 		}
 	}
+}
+
+// markHandedOver records that this call has been transferred away, so a media
+// stream the carrier re-forks afterwards is refused instead of being treated as
+// a new call.
+func (r *callRegistry) markHandedOver(id string) {
+	r.mu.Lock()
+	if p := r.m[id]; p != nil {
+		p.handedOver = true
+	}
+	r.mu.Unlock()
+}
+
+// handedOver reports whether the agent has already left this call.
+func (r *callRegistry) handedOver(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	return p != nil && p.handedOver
 }
 
 // hasAMDVerdict reports whether a detection verdict has already been recorded
@@ -1059,6 +1083,16 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	p := calls.get(id)
 	if p == nil {
 		http.Error(w, "unknown call", http.StatusNotFound)
+		return
+	}
+	// The agent has already left this call. Refuse the stream rather than
+	// treating it as a new one: the carrier re-forks the audio when our socket
+	// closes, and accepting it here is what made a transferred caller hear the
+	// greeting a second time and get a fresh pipeline on a call that had been
+	// handed to a person nine seconds earlier.
+	if calls.handedOver(id) {
+		log.Printf("telnyx media stream refused call=%s — already transferred away", id)
+		http.Error(w, "call handed over", http.StatusGone)
 		return
 	}
 	ws, err := telnyxUpgrader.Upgrade(w, r, nil)
