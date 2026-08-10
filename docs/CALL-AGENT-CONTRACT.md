@@ -9,6 +9,8 @@ recording callbacks, mid-call sentiment and Redis live state implemented ·
 WebRTC **not** implemented
 · **Agent side:** `pkg/rexa/` in `achatbot-go`
 
+**Hardware, the 61-call ceiling and what each feature costs:** [RESOURCES.md](RESOURCES.md).
+
 ---
 
 ## 0. Read this first — differences from `packages/agent-contract`
