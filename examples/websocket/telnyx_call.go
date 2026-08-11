@@ -131,14 +131,6 @@ type rexaCall struct {
 	// bridged guards against dialling a second SIP leg into the room if the
 	// answered event ever arrives twice.
 	bridged bool
-	// confID is the barge conference, built when the call is answered rather
-	// than when someone barges. Empty means bridgeLiveRoom makes its own.
-	//
-	// Guarded because the two are written and read from different goroutines:
-	// preconferenceLiveRoom fills it from the answered event, and a barge
-	// arriving in the same second reads it.
-	confID string
-	confMu sync.Mutex
 	// takeover distinguishes the two things an operator can be doing. false is
 	// listen-in: the SIP leg joins as a Telnyx "monitor" — audible to nobody —
 	// and the agent keeps serving the caller. true is barge: an ordinary
@@ -722,10 +714,6 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 			// started one — so their barge paid the full 4.8s registration
 			// wait, every time, at the worst possible moment.
 			startPrewarm(p.platform)
-			// And build the conference the barge will need, for the same
-			// reason: it measured a full second, in series, at the worst
-			// possible moment.
-			preconferenceLiveRoom(id, p.platform)
 		}
 		if cfg.Server.RecordCalls {
 			go func() {
