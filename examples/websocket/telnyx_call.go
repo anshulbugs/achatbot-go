@@ -44,6 +44,10 @@ type callParams struct {
 	// between an operator committing to a barge and their leg being answered.
 	// Set by the media handler, which is the only place the serializer exists.
 	hushAgent func()
+	// tapInbound installs a listener on the caller's audio, for the live-listen
+	// relay. Set by the media handler, which is the only place the serializer
+	// exists. nil on every call nobody is listening to.
+	tapInbound func(func(pcm8 []byte, rate int))
 	// amdCh carries the answering-machine verdict (human/machine/not_sure) and
 	// beepCh the greeting-ended cue. Detection happens on the webhook goroutine
 	// while the audio is driven from the media handler, so they meet here.
@@ -482,6 +486,31 @@ func (r *callRegistry) setHushAgent(id string, hush func()) {
 		p.hushAgent = hush
 	}
 	r.mu.Unlock()
+}
+
+// setTapInstaller records how to tap this call's inbound audio.
+func (r *callRegistry) setTapInstaller(id string, install func(func([]byte, int))) {
+	r.mu.Lock()
+	if p := r.m[id]; p != nil {
+		p.tapInbound = install
+	}
+	r.mu.Unlock()
+}
+
+// setInboundTap points a call's caller-audio at fn, or removes it with nil.
+// Reports whether the call was still around to tap.
+func (r *callRegistry) setInboundTap(id string, fn func(pcm8 []byte, rate int)) bool {
+	r.mu.Lock()
+	var install func(func([]byte, int))
+	if p := r.m[id]; p != nil {
+		install = p.tapInbound
+	}
+	r.mu.Unlock()
+	if install == nil {
+		return false
+	}
+	install(fn)
+	return true
 }
 
 // hushAgentFor silences the agent on a call, once. Reports whether it did.
@@ -1671,6 +1700,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 	// had already handed to somebody else.
 	calls.setStopMedia(id, func() { _ = ws.Close() })
 	calls.setHushAgent(id, ser.Hush)
+	// How the live-listen relay reaches the caller's audio. Costs nothing until
+	// somebody actually listens, which is almost never.
+	calls.setTapInstaller(id, ser.SetInboundTap)
 
 	// Greeting first, from cache, before any pool slot is taken. Every call in a
 	// campaign says the same words, so synthesizing per call would burn a TTS

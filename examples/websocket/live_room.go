@@ -180,6 +180,48 @@ func startPrewarmProc(sessionID, roomName, roomURL string) {
 	}()
 }
 
+// relayReady reports whether listening can be served without a SIP leg.
+func relayReady() bool { return sidecarReady() }
+
+// listenViaRelay puts an operator on the call as a listener by copying the
+// caller's audio into their room, with no conference and no SIP leg.
+//
+// One way, by construction — see handleRelayMedia. Listening is silent to the
+// caller by definition, so nothing is lost by making the path physically
+// incapable of reaching them, and what is gained is that the echo loop cannot
+// be built by accident.
+//
+// The agent is untouched: it keeps talking to the caller exactly as it would if
+// nobody were listening, which is the whole point of listening rather than
+// barging.
+func listenViaRelay(id string, rc *rexaCall) {
+	started := time.Now()
+	registerRelay(rc.sessionID, id)
+	if err := startSidecarListen(rc.sessionID, rc.roomURL, rc.roomToken); err != nil {
+		log.Printf("rexa: session=%s listen relay failed to start (%v) — falling back to SIP", rc.sessionID, err)
+		endRelay(rc.sessionID)
+		rc.bridged = false
+		bridgeLiveRoomSIP(id, rc, true)
+		return
+	}
+	log.Printf("rexa: session=%s listening via relay in %s (no conference, no SIP leg)",
+		rc.sessionID, time.Since(started).Round(time.Millisecond))
+}
+
+// startSidecarListen runs the room agent pointed at the listen relay.
+func startSidecarListen(sessionID, roomURL, token string) error {
+	return startSidecar(sessionID, roomURL, token, relayAgentWS())
+}
+
+// relayAgentWS is where the sidecar sends and receives audio. Loopback: the
+// sidecar runs beside the agent, so routing through the public tunnel and back
+// would add latency and a dependency on the tunnel being up.
+// The sidecar appends ?session=<id> itself, exactly as it does for browser
+// calls on /room/media.
+func relayAgentWS() string {
+	return "ws://127.0.0.1:" + strings.TrimPrefix(cfg.Server.Addr, ":") + "/relay/media"
+}
+
 // stopPrewarm releases the room's session. Only safe once the call is over:
 // leaving while a supervisor is still arriving would end the session and take
 // the registration with it.
@@ -295,6 +337,33 @@ func startLiveRoom(ctx context.Context, rc *rexaCall, redisConfigured bool) stri
 // sets it cannot silently turn a takeover into a silent monitor.
 func bridgeLiveRoom(id string, rc *rexaCall, listenOnly bool) {
 	if rc == nil || rc.roomSIP == "" || rc.client == nil || rc.bridged {
+		return
+	}
+
+	// LISTENING NEVER USES THE CONFERENCE.
+	//
+	// A conference feeds its mix back on our media fork, so the agent hears
+	// itself. Barge survives that because it leaves within a second of the
+	// conference existing; listening is the one mode where the agent stays, and
+	// it produced 55 turns in 37 seconds — every one its own TTS, on a call
+	// where nobody was speaking.
+	//
+	// The relay has no such loop to build: it copies the caller's audio out to
+	// the room and cannot write back into the call. No conference, no SIP leg,
+	// no second carrier leg.
+	if listenOnly && relayReady() {
+		rc.bridged = true
+		listenViaRelay(id, rc)
+		return
+	}
+	bridgeLiveRoomSIP(id, rc, listenOnly)
+}
+
+// bridgeLiveRoomSIP is the carrier route: a conference holding the call, with
+// the room's SIP endpoint dialled into it. Used for barge, and for listening
+// only when the relay is unavailable.
+func bridgeLiveRoomSIP(id string, rc *rexaCall, listenOnly bool) {
+	if rc == nil || rc.roomSIP == "" || rc.client == nil {
 		return
 	}
 	rc.bridged = true
@@ -471,6 +540,8 @@ func endLiveRoom(rc *rexaCall) {
 	// The pre-joiner is holding this room's session open. Nothing else ends it,
 	// and a room cannot be deleted out from under a participant cleanly.
 	stopPrewarm(rc.sessionID)
+	// Same for a listen relay: it stops the sidecar and detaches the tap.
+	endRelay(rc.sessionID)
 	rc.roomName = ""
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

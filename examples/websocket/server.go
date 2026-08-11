@@ -1191,6 +1191,10 @@ func main() {
 	// harmless without a dispatch behind it (404s) and the contract endpoints
 	// are wired separately.
 	http.HandleFunc("/room/media", handleRoomMedia)
+	// The live-listen relay: caller audio out to an operator's room, one way.
+	// Same wire as /room/media, opposite meaning — there the room is the
+	// caller, here it is somebody listening to one.
+	http.HandleFunc("/relay/media", handleRelayMedia)
 
 	// Browser voice WS moves to /ws so the UI can be served at /.
 	http.Handle("/ws", rateLimiter.Middleware(http.HandlerFunc(handleWebSocket)))
