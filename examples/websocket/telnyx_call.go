@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -781,6 +782,7 @@ func handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		// spending a pipeline slot on a machine.
 		res := ev.Data.Payload.Result
 		log.Printf("telnyx amd verdict=%s call=%s", res, id)
+		amdVerdictSeen()
 		// Record before signalling. The media handler may tear the call down
 		// the instant it reads the verdict, and the report needs it too — a
 		// voicemail is precisely the case where no pipeline ever runs.
@@ -1207,6 +1209,53 @@ func playAnnouncement(tw *achatbot_processors.WebsocketTransportWriter, pcm []by
 		len(pcm), float64(len(pcm))/2/float64(rate),
 		(len(pcm)+chunk-1)/chunk, time.Since(started).Round(time.Millisecond))
 	return true
+}
+
+// AMD verdicts stop arriving sometimes, and when they do, waiting for them is
+// dead air on a live person.
+//
+// Telnyx delivered its last call.machine.premium.detection.ended at 19:51 on
+// 11 Aug and then nothing for eleven consecutive calls, while call.answered,
+// call.hangup and streaming.* kept arriving on the same webhook — so the events
+// were simply not sent. Every one of those calls paid the full grace before its
+// pipeline could start, and anything the caller said in that window was lost.
+//
+// So the grace is earned rather than assumed. Three consecutive calls with no
+// verdict and we stop waiting for one; a single verdict brings it back. When
+// AMD is healthy this changes nothing, because a verdict ends the wait long
+// before the grace matters.
+//
+// A machine that is detected late is still handled: watchLateAMD takes the
+// agent off the call and has the carrier speak the message.
+const (
+	amdWaitGrace        = 4 * time.Second
+	amdWaitCap          = 16 * time.Second
+	amdMissesBeforeSkip = 3
+)
+
+var amdMisses atomic.Int32
+
+// amdVerdictSeen records that detection is working.
+func amdVerdictSeen() {
+	if prev := amdMisses.Swap(0); prev >= amdMissesBeforeSkip {
+		log.Printf("telnyx amd: verdicts are arriving again — restoring the %s grace", amdWaitGrace)
+	}
+}
+
+// amdVerdictMissed records a call whose verdict never arrived.
+func amdVerdictMissed() {
+	if n := amdMisses.Add(1); n == amdMissesBeforeSkip {
+		log.Printf("telnyx amd: %d calls in a row with no verdict — carrier detection looks down, "+
+			"no longer holding the pipeline for it", n)
+	}
+}
+
+// amdGrace is how long to wait past the greeting for a verdict.
+func amdGrace() time.Duration {
+	if amdMisses.Load() >= amdMissesBeforeSkip {
+		return 0
+	}
+	return amdWaitGrace
 }
 
 // watchLateAMD ends a call whose machine verdict arrives after the pipeline has
@@ -1820,8 +1869,6 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// the pipeline starts: watchLateAMD takes the agent off the call
 			// and has the carrier speak the message, which is why the window no
 			// longer has to be long enough to catch everything.
-			const amdWaitGrace = 4 * time.Second
-			const amdWaitCap = 16 * time.Second
 			// The FIRST wait ends before the head does, because the tail has to
 			// be sent while the head is still playing or a human hears a seam.
 			const tailLead = 750 * time.Millisecond
@@ -1829,7 +1876,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			wait := spoken - time.Since(announceStart) - tailLead
 			if len(tail) == 0 {
 				// Nothing held back, so nothing to be early for.
-				wait = spoken - time.Since(announceStart) + amdWaitGrace
+				wait = spoken - time.Since(announceStart) + amdGrace()
 			}
 			if wait > amdWaitCap {
 				wait = amdWaitCap
@@ -1871,7 +1918,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 				// reaching it never. The tail is already at the carrier by now,
 				// so a mailbox hears the rest of the greeting either way; what
 				// this saves is the pipeline and the conversation with a machine.
-				if w := spoken - time.Since(announceStart) + amdWaitGrace; verdict == "" && w > 0 {
+				if w := spoken - time.Since(announceStart) + amdGrace(); verdict == "" && w > 0 {
 					timer := time.NewTimer(w)
 					select {
 					case verdict = <-got:
@@ -1898,6 +1945,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 					log.Printf("announce: %s of greeting still buffered at Telnyx; holding interrupts",
 						outstanding.Round(time.Millisecond))
 				}
+			}
+			if verdict == "" {
+				amdVerdictMissed()
 			}
 			log.Printf("announce: greeting done call=%s (finished=%t verdict=%q) -> starting pipeline", id, finished, verdict)
 			go watchLateAMD(id, p)
