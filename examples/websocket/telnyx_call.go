@@ -1235,6 +1235,9 @@ const (
 
 var amdMisses atomic.Int32
 
+// greetingMark names the carrier acknowledgement for the greeting's playout.
+const greetingMark = "greeting-end"
+
 // amdVerdictSeen records that detection is working.
 func amdVerdictSeen() {
 	if prev := amdMisses.Swap(0); prev >= amdMissesBeforeSkip {
@@ -1822,7 +1825,35 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			announceStart := time.Now()
 			log.Printf("announce: playing greeting call=%s (%.1fs of %.1fs now, rest held back for the verdict)",
 				id, spoken.Seconds(), float64(len(pcm)/2)/float64(ttsRate))
+			// MEASURE WHAT THE CALLER ACTUALLY HEARS.
+			//
+			// Our logs say the greeting is sent the same second the call is
+			// answered, every time — but a caller reports the first words
+			// arriving about twelve seconds in, and nothing on this side can
+			// see the difference between "sent" and "played". A mark is
+			// returned once the carrier has finished playing everything queued
+			// before it, so the gap between submitting it and getting it back
+			// is the playout as the caller experienced it.
+			//
+			// Roughly the greeting's own length means playback started at once
+			// and the delay is elsewhere. Much longer means the carrier sat on
+			// the audio, which is a question for Telnyx and not something we
+			// can fix from here.
+			markAt := time.Now()
+			ser.SetMarkHandler(func(name string) {
+				if name != greetingMark {
+					return
+				}
+				log.Printf("announce: carrier finished playing the greeting %s after it was sent (greeting is %.1fs) call=%s",
+					time.Since(markAt).Round(time.Millisecond), spoken.Seconds(), id)
+				ser.SetMarkHandler(nil)
+			})
 			finished := playAnnouncement(tw, head, ttsRate, stop)
+			if msg, err := ser.SubmitMark(greetingMark); err == nil {
+				if err := conn.WriteMessage(consts.TextMessage, msg); err != nil {
+					log.Printf("announce: could not submit the greeting mark on call=%s: %v", id, err)
+				}
+			}
 
 			// Wait out the greeting for a verdict.
 			//

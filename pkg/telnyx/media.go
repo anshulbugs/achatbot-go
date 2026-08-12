@@ -117,6 +117,9 @@ type mediaMessage struct {
 		Track   string `json:"track,omitempty"`
 		Payload string `json:"payload"`
 	} `json:"media,omitempty"`
+	Mark struct {
+		Name string `json:"name"`
+	} `json:"mark,omitempty"`
 }
 
 // Serializer converts between Telnyx media JSON (base64 µ-law/8 kHz) and the
@@ -166,6 +169,8 @@ type Serializer struct {
 	// tap receives a copy of inbound caller audio, for live listening. nil on
 	// every call nobody is listening to, which is almost all of them.
 	tap func(pcm8 []byte, rate int)
+	// onMark receives carrier playback acknowledgements. See SetMarkHandler.
+	onMark func(name string)
 
 	// holdInterruptsUntil suppresses the "clear" event while audio we have
 	// already sent is still playing at Telnyx.
@@ -376,6 +381,29 @@ func (s *Serializer) resetPlayback() {
 	s.mu.Unlock()
 }
 
+// SetMarkHandler installs a callback for carrier mark acknowledgements. nil
+// removes it.
+func (s *Serializer) SetMarkHandler(fn func(name string)) {
+	s.mu.Lock()
+	s.onMark = fn
+	s.mu.Unlock()
+}
+
+func (s *Serializer) markSeen() func(string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.onMark
+}
+
+// SubmitMark asks the carrier to acknowledge once everything queued before it
+// has finished playing.
+func (s *Serializer) SubmitMark(name string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"event": "mark",
+		"mark":  map[string]string{"name": name},
+	})
+}
+
 // SetInboundTap installs a callback receiving a COPY of the caller's audio, at
 // 8 kHz, before the echo gate. nil removes it.
 //
@@ -444,6 +472,17 @@ func (s *Serializer) Deserialize(data []byte) (frames.Frame, error) {
 	var m mediaMessage
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, nil // ignore anything unparseable rather than kill the read loop
+	}
+	// Marks come back when the carrier has finished PLAYING the audio they were
+	// submitted after, which is the only way to see the call from the caller's
+	// end. The pipeline owns this socket once a call is live, so a mark handler
+	// that reads the socket itself cannot run here — it has to be observed in
+	// passing, which is what this is.
+	if m.Event == "mark" {
+		if fn := s.markSeen(); fn != nil {
+			fn(m.Mark.Name)
+		}
+		return nil, nil
 	}
 	if m.Event != "media" || m.Media == nil || m.Media.Payload == "" {
 		return nil, nil
