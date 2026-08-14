@@ -610,7 +610,7 @@ func resolvePrompt(base, replace, suffix string) string {
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
-- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words.
+- Do not write filler sounds. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence.
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
 
@@ -646,10 +646,10 @@ Delivery rules for this call, which override any conflicting instruction above:
 // static per campaign, and is served by vLLM's prefix cache from the second
 // call onward. Only the tag instructions are re-sent, never the voice.
 const expressiveTagRules = `
-- The speech engine on this call can perform vocal reactions. Write them inline, in angle brackets, immediately after the word they belong to: "You're very welcome <laugh> have a great day."
-- Use ONLY these: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort> <cry> <scream> <sing> <whisper> <curious> <excited> <angry> <sad> is not valid; the mood tags are <curious> <excited> <angry> <sarcastic> <mischievous> <disappointed> <appalled>. Anything else in angle brackets is discarded before it is spoken.
-- Use them RARELY -- at most one in a reply, and only where a person genuinely would. A <sigh> when someone declines, a <laugh> at something funny, a <curious> on a real question. Constant reactions sound unhinged, not warm.
-- This replaces the rule above about not writing laughter: written "haha" is still wrong, but <laugh> is performed properly.`
+- The speech engine on this call performs real vocal reactions. Use them: a reply with no reaction sounds like a recording being played at the caller.
+- Write a reaction inline, in angle brackets, straight after the word it belongs to. For example: "You're very welcome <laugh> have a great rest of your day." or "I completely understand <sigh> and I won't take any more of your time." or "Ten thousand recruiters <gasp> that is a large team."
+- The reactions available are: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort> <cry> <scream> <whisper> <curious> <excited> <sarcastic> <mischievous> <disappointed> <appalled> <angry>. Any other word in angle brackets is deleted before the caller hears it, so never invent one.
+- Aim for a reaction in roughly every second or third reply, wherever a person naturally would: a <sigh> when someone declines, a <chuckle> at something light, a <gasp> at a surprising number, a <curious> on a genuine question. Never more than one in a reply, and never two replies running.`
 
 // ttsUnderstandsTags reports whether the configured speech engine performs
 // vocal-event tags rather than reading them out as words.

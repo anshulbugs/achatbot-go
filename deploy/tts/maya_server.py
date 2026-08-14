@@ -104,6 +104,7 @@ DEFAULT_PERSONA = os.environ.get("MAYA_VOICE", "brisk_warm")
 FIRST_EMIT_FRAMES = 4          # ~0.33s of audio
 THEN_EMIT_FRAMES = 12          # ~1s of audio
 WARMUP_SAMPLES = 2048          # decoder settling noise, dropped from the start
+TAIL_GUARD = 512               # unstable tail of a partial decode
 
 app = FastAPI()
 engine: AsyncLLMEngine | None = None
@@ -222,7 +223,7 @@ def health():
 async def _stream(text: str, voice: str):
     """Yield PCM as it is generated, rather than after the whole clip.
 
-    THIS IS THE DIFFERENCE BETWEEN 1.8s AND ~100ms PER TURN. The first live
+    THIS IS THE DIFFERENCE BETWEEN 1.8s AND ~200ms PER TURN. The first live
     call waited for the entire utterance before any audio played, and measured
     a median of 1796ms against kokoro's ~1000ms. The Go client already reads
     this response incrementally (HTTPTTSProvider.SynthesizeStream), so all that
@@ -231,6 +232,12 @@ async def _stream(text: str, voice: str):
     Frames are re-decoded from the start each time and only the new tail is
     emitted. Decoding just the new frames in isolation would put a seam at
     every block boundary, because the decoder has no left context there.
+
+    THE WARM-UP TRIM IS APPLIED ON EVERY DECODE, not only the first. Trimming
+    only the first pass left the emitted cursor counting from a trimmed array
+    while later passes indexed an untrimmed one -- so 2048 samples, about 85ms,
+    were re-sent right after the opening chunk. On a call that is a stutter at
+    the start of every single reply, which is exactly what was reported.
     """
     description, seed = resolve_voice(voice)
     sp = SamplingParams(temperature=0.4, top_p=0.9, repetition_penalty=1.1,
@@ -238,9 +245,19 @@ async def _stream(text: str, voice: str):
                         stop_token_ids=[CODE_END_TOKEN_ID])
     rid = f"tts-{abs(hash((text, voice, seed)))}"
 
-    emitted = 0          # samples already sent
+    emitted = 0          # samples already sent, counted in the trimmed frame
     last_frames = 0      # frames already decoded
     ids = []
+
+    def decode(levels):
+        codes = [torch.tensor(l, dtype=torch.long, device="cuda").unsqueeze(0)
+                 for l in levels]
+        with torch.inference_mode():
+            audio = snac_model.decoder(snac_model.quantizer.from_codes(codes))
+        a = audio[0, 0].float().cpu().numpy()
+        # Always the same origin, so `emitted` means the same thing every pass.
+        return a[WARMUP_SAMPLES:] if len(a) > 2 * WARMUP_SAMPLES else a
+
     async for out in engine.generate(
             {"prompt_token_ids": build_ids(description, text)}, sp, rid):
         ids = list(out.outputs[0].token_ids)
@@ -252,33 +269,22 @@ async def _stream(text: str, voice: str):
         if frames - last_frames < need:
             continue
         last_frames = frames
-        codes = [torch.tensor(l, dtype=torch.long, device="cuda").unsqueeze(0)
-                 for l in levels]
-        with torch.inference_mode():
-            audio = snac_model.decoder(snac_model.quantizer.from_codes(codes))
-        a = audio[0, 0].float().cpu().numpy()
-        if emitted == 0:
-            a = a[WARMUP_SAMPLES:] if len(a) > 2 * WARMUP_SAMPLES else a
-        # Hold back the last frame's worth: the tail of a partial decode is
-        # still changing as more codes arrive.
-        tail_guard = 512
-        new = a[emitted:max(emitted, len(a) - tail_guard)]
+        a = decode(levels)
+        # Hold back the very end: the tail of a partial decode is still
+        # changing as more codes arrive, and emitting it produces a click.
+        cut = max(emitted, len(a) - TAIL_GUARD)
+        new = a[emitted:cut]
         if len(new):
             emitted += len(new)
             yield to_pcm16(new)
 
-    # Whatever is left after generation stops.
-    levels = unpack(ids) if ids else None
-    if levels:
-        codes = [torch.tensor(l, dtype=torch.long, device="cuda").unsqueeze(0)
-                 for l in levels]
-        with torch.inference_mode():
-            audio = snac_model.decoder(snac_model.quantizer.from_codes(codes))
-        a = audio[0, 0].float().cpu().numpy()
-        if emitted == 0:
-            a = a[WARMUP_SAMPLES:] if len(a) > 2 * WARMUP_SAMPLES else a
-        if len(a) > emitted:
-            yield to_pcm16(a[emitted:])
+    # Whatever remains once generation has stopped.
+    if ids:
+        levels = unpack(ids)
+        if levels:
+            a = decode(levels)
+            if len(a) > emitted:
+                yield to_pcm16(a[emitted:])
 
 
 @app.post("/tts")
