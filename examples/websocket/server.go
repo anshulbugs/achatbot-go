@@ -645,11 +645,19 @@ Delivery rules for this call, which override any conflicting instruction above:
 // comes from the persona description, which lives in the TTS service, is
 // static per campaign, and is served by vLLM's prefix cache from the second
 // call onward. Only the tag instructions are re-sent, never the voice.
-const expressiveTagRules = `
-- The speech engine on this call performs real vocal reactions. Use them: a reply with no reaction sounds like a recording being played at the caller.
-- Write a reaction inline, in angle brackets, straight after the word it belongs to. For example: "You're very welcome <laugh> have a great rest of your day." or "I completely understand <sigh> and I won't take any more of your time." or "Ten thousand recruiters <gasp> that is a large team."
-- The reactions available are: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort> <cry> <scream> <whisper> <curious> <excited> <sarcastic> <mischievous> <disappointed> <appalled> <angry>. Any other word in angle brackets is deleted before the caller hears it, so never invent one.
-- Aim for a reaction in roughly every second or third reply, wherever a person naturally would: a <sigh> when someone declines, a <chuckle> at something light, a <gasp> at a surprising number, a <curious> on a genuine question. Never more than one in a reply, and never two replies running.`
+const expressiveTagRules = "\n" + `
+- The speech engine on this call performs REAL vocal reactions: an actual laugh, an actual sigh. Use them throughout the call. Most replies should carry one. A reply with none sounds like a recording being played at the caller.
+- PREFER THE REACTIONS THAT MAKE A SOUND: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort>. The caller hears these clearly. The tone-only tags <curious> <excited> <sarcastic> <mischievous> <disappointed> <appalled> <angry> <whisper> merely shade the delivery and are easy to miss, so never rely on them alone.
+- PLACE THE TAG MID-SENTENCE, immediately after the word it colours. NEVER at the end of a sentence and NEVER immediately before a full stop: there the reaction has nothing left to act on and the caller hears nothing at all.
+  Right: "You're very welcome <laugh> have a great rest of your day."
+  Right: "I completely understand <sigh> and I won't take any more of your time."
+  Right: "Fifty recruiters <gasp> that is a serious team you are running."
+  Right: "That is a fair question <chuckle> and I get asked it a lot."
+  Wrong: "That's great to hear <excited>." -- end of sentence, inaudible.
+  Wrong: "I understand it might not be clear yet <curious>." -- end of sentence, inaudible.
+- MATCH THE REACTION TO THE MOMENT. <chuckle> when they say something light or self-deprecating. <laugh> at a real joke. <sigh> when they decline, sound tired, or say they are busy. <exhale> before asking for something big. <gasp> at a genuinely surprising number. <gulp> when they describe a hard problem. A reaction in the wrong place is worse than no reaction, so never laugh at something that is not funny.
+- Never more than one in a reply, and never the same reaction twice in a row.
+- Any other word in angle brackets is deleted before the caller hears it, so never invent one.`
 
 // ttsUnderstandsTags reports whether the configured speech engine performs
 // vocal-event tags rather than reading them out as words.
