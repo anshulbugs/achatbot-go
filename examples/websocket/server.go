@@ -396,20 +396,6 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			}
 			return p, nil
 		})
-	} else if cfg.TTS.Model == "maya_http" {
-		// Maya1: expressive TTS. Speaks the same /tts contract as kokoro, so
-		// it needs no provider of its own — only a different URL and rate.
-		// cfg.TTS.HTTPVoice selects a persona (warm/excited/apologetic/firm),
-		// which is where the emotional style lives; inline tags in the text
-		// carry vocal events. See deploy/tts/maya_server.py.
-		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
-		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
-			p := tts.NewContractProvider(cfg.TTS.HTTPURL, cfg.TTS.HTTPVoice, "mayaHTTP", cfg.TTS.Speed, cfg.TTS.Gain, 24000)
-			if p == nil {
-				return nil, fmt.Errorf("failed to reach Maya1 TTS service at %s", cfg.TTS.HTTPURL)
-			}
-			return p, nil
-		})
 	} else if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
@@ -610,58 +596,9 @@ func resolvePrompt(base, replace, suffix string) string {
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
-- Do not write filler sounds. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence.
+- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words.
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
-
-// expressiveTagRules teaches the model to write vocal-event tags, and is added
-// ONLY when the speech engine understands them.
-//
-// This is the half that was missing from the first Maya1 call. The service
-// voices tags the model writes, nothing told the model to write any, and all
-// two hundred turns came out as plain text -- so the call sounded exactly as
-// flat as kokoro, which is what it was asked for.
-//
-// STRICTLY CONDITIONAL, because the same instruction is actively harmful on
-// kokoro: it has no tags, so it would pronounce "less than laugh greater than"
-// to a caller. That is not hypothetical here -- unparsed gemma-4 tool-call
-// markup was read out on a live call once already.
-//
-// Sparingly, and only these twenty, because a tag the model invents is markup
-// the service has to throw away; and a laugh in every sentence is worse than
-// none.
-//
-// WHAT THIS COSTS THE KV CACHE, and why it is still the right place. Like
-// callStyleRules it lands at the very end, after the platform's per-contact
-// block, so it falls outside the shared prefix and is re-prefilled on every
-// call — roughly two hundred tokens on top of the eighty those rules already
-// pay. That is deliberate: moving it in front of the tenant prompt would put
-// it inside the cached prefix, but instructions carry less weight the earlier
-// they appear, and a delivery rule the model quietly ignores is worth nothing.
-// Two hundred tokens is small against a campaign prefix of three thousand, and
-// it is only paid at all when Maya is the engine.
-//
-// The expensive half is already free: the emotional register of the VOICE
-// comes from the persona description, which lives in the TTS service, is
-// static per campaign, and is served by vLLM's prefix cache from the second
-// call onward. Only the tag instructions are re-sent, never the voice.
-const expressiveTagRules = "\n" + `
-- The speech engine on this call performs REAL vocal reactions: an actual laugh, an actual sigh. Use them throughout the call. Most replies should carry one. A reply with none sounds like a recording being played at the caller.
-- PREFER THE REACTIONS THAT MAKE A SOUND: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort>. The caller hears these clearly. The tone-only tags <curious> <excited> <sarcastic> <mischievous> <disappointed> <appalled> <angry> <whisper> merely shade the delivery and are easy to miss, so never rely on them alone.
-- PLACE THE TAG MID-SENTENCE, immediately after the word it colours. NEVER at the end of a sentence and NEVER immediately before a full stop: there the reaction has nothing left to act on and the caller hears nothing at all.
-  Right: "You're very welcome <laugh> have a great rest of your day."
-  Right: "I completely understand <sigh> and I won't take any more of your time."
-  Right: "Fifty recruiters <gasp> that is a serious team you are running."
-  Right: "That is a fair question <chuckle> and I get asked it a lot."
-  Wrong: "That's great to hear <excited>." -- end of sentence, inaudible.
-  Wrong: "I understand it might not be clear yet <curious>." -- end of sentence, inaudible.
-- MATCH THE REACTION TO THE MOMENT. <chuckle> when they say something light or self-deprecating. <laugh> at a real joke. <sigh> when they decline, sound tired, or say they are busy. <exhale> before asking for something big. <gasp> at a genuinely surprising number. <gulp> when they describe a hard problem. A reaction in the wrong place is worse than no reaction, so never laugh at something that is not funny.
-- Never more than one in a reply, and never the same reaction twice in a row.
-- Any other word in angle brackets is deleted before the caller hears it, so never invent one.`
-
-// ttsUnderstandsTags reports whether the configured speech engine performs
-// vocal-event tags rather than reading them out as words.
-func ttsUnderstandsTags() bool { return cfg.TTS.Model == "maya_http" }
 
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
@@ -678,15 +615,11 @@ func ttsUnderstandsTags() bool { return cfg.TTS.Model == "maya_http" }
 // there the model answers the caller instead of opening with a preamble of its
 // own.
 func withCallStyle(prompt, spokenGreeting string) string {
-	rules := callStyleRules
-	if ttsUnderstandsTags() {
-		rules += expressiveTagRules
-	}
 	out := prompt
 	if out == "" {
-		out = strings.TrimSpace(rules)
+		out = strings.TrimSpace(callStyleRules)
 	} else {
-		out += "\n" + rules
+		out += "\n" + callStyleRules
 	}
 	if spokenGreeting != "" {
 		out += "\n\n## What has already happened on this call\n" +
