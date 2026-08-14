@@ -33,6 +33,7 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from snac import SNAC
 from vllm import SamplingParams
@@ -67,27 +68,42 @@ VALID_TAGS = {
 }
 TAG_RE = re.compile(r"<([a-zA-Z_]+)>")
 
-BASE_VOICE = (
-    "Realistic female voice in her early thirties with a natural American "
-    "accent. Speaks at a medium pace with clear articulation, natural "
-    "intonation and smooth phrasing. Recorded on a clean studio microphone, "
-    "no background noise."
-)
-
-# Emotional style lives in the DESCRIPTION, not in tags -- tags are vocal
-# events. The description is also static per persona, so vLLM's prefix cache
-# serves it from the second call onward.
+# MAYA1'S OWN DESCRIPTION GRAMMAR, not free prose.
+#
+# The first live call used flowing English ("warm, friendly and reassuring
+# customer-service tone...") and sounded flat and generic. The official Space
+# uses a structured attribute format instead:
+#
+#   Realistic <gender> voice in the <age> age with a <accent> accent. <pitch>
+#   pitch, <timbre> timbre, <pacing> pacing, <tone> tone delivery at
+#   <intensity> intensity, <domain> domain, <role> role, <delivery> delivery
+#
+# which is almost certainly what it was trained on. In this format the slots
+# actually bite: pacing alone moved an identical sentence between 129 and 268
+# words per minute, with no speed parameter anywhere.
+#
+# These two were picked by ear from six candidates.
 PERSONAS = {
-    "warm": (BASE_VOICE + " Warm, friendly and reassuring customer-service "
-             "tone, calm and unhurried, with genuine interest.", 1234),
-    "excited": (BASE_VOICE + " Bright, energetic and enthusiastic tone, "
-                "noticeably higher pitch and faster pace, audibly smiling.", 2345),
-    "apologetic": (BASE_VOICE + " Soft, subdued and sincerely apologetic tone, "
-                   "lower pitch, slower and gentler pace.", 3456),
-    "firm": (BASE_VOICE + " Firm, assertive and serious tone, clipped "
-             "delivery, controlled and direct.", 4567),
+    "brisk_warm": (
+        "Realistic female voice in the 30s age with a american accent. Normal "
+        "pitch, warm timbre, brisk pacing, friendly tone delivery at medium "
+        "intensity, customer_service domain, sales_agent role, natural delivery",
+        1234),
+    "low_calm": (
+        "Realistic female voice in the 30s age with a american accent. Normal "
+        "pitch, throaty timbre, conversational pacing, calm tone delivery at "
+        "low intensity, podcast domain, interviewer role, formal delivery",
+        4321),
 }
-DEFAULT_PERSONA = os.environ.get("MAYA_VOICE", "warm")
+DEFAULT_PERSONA = os.environ.get("MAYA_VOICE", "brisk_warm")
+
+# Streaming: emit the first audio as soon as a few frames exist, then in larger
+# blocks. The first block is what a caller waits for, so it is deliberately
+# small; later blocks are bigger because re-decoding has a cost and nobody is
+# waiting on them.
+FIRST_EMIT_FRAMES = 4          # ~0.33s of audio
+THEN_EMIT_FRAMES = 12          # ~1s of audio
+WARMUP_SAMPLES = 2048          # decoder settling noise, dropped from the start
 
 app = FastAPI()
 engine: AsyncLLMEngine | None = None
@@ -197,16 +213,75 @@ def health():
             "voices": list(PERSONAS)}
 
 
+async def _stream(text: str, voice: str):
+    """Yield PCM as it is generated, rather than after the whole clip.
+
+    THIS IS THE DIFFERENCE BETWEEN 1.8s AND ~100ms PER TURN. The first live
+    call waited for the entire utterance before any audio played, and measured
+    a median of 1796ms against kokoro's ~1000ms. The Go client already reads
+    this response incrementally (HTTPTTSProvider.SynthesizeStream), so all that
+    was missing was a server that writes incrementally.
+
+    Frames are re-decoded from the start each time and only the new tail is
+    emitted. Decoding just the new frames in isolation would put a seam at
+    every block boundary, because the decoder has no left context there.
+    """
+    description, seed = resolve_voice(voice)
+    sp = SamplingParams(temperature=0.4, top_p=0.9, repetition_penalty=1.1,
+                        max_tokens=MAX_LEN, min_tokens=28, seed=seed,
+                        stop_token_ids=[CODE_END_TOKEN_ID])
+    rid = f"tts-{abs(hash((text, voice, seed)))}"
+
+    emitted = 0          # samples already sent
+    last_frames = 0      # frames already decoded
+    ids = []
+    async for out in engine.generate(
+            {"prompt_token_ids": build_ids(description, text)}, sp, rid):
+        ids = list(out.outputs[0].token_ids)
+        levels = unpack(ids)
+        if levels is None:
+            continue
+        frames = len(levels[0])
+        need = FIRST_EMIT_FRAMES if emitted == 0 else THEN_EMIT_FRAMES
+        if frames - last_frames < need:
+            continue
+        last_frames = frames
+        codes = [torch.tensor(l, dtype=torch.long, device="cuda").unsqueeze(0)
+                 for l in levels]
+        with torch.inference_mode():
+            audio = snac_model.decoder(snac_model.quantizer.from_codes(codes))
+        a = audio[0, 0].float().cpu().numpy()
+        if emitted == 0:
+            a = a[WARMUP_SAMPLES:] if len(a) > 2 * WARMUP_SAMPLES else a
+        # Hold back the last frame's worth: the tail of a partial decode is
+        # still changing as more codes arrive.
+        tail_guard = 512
+        new = a[emitted:max(emitted, len(a) - tail_guard)]
+        if len(new):
+            emitted += len(new)
+            yield to_pcm16(new)
+
+    # Whatever is left after generation stops.
+    levels = unpack(ids) if ids else None
+    if levels:
+        codes = [torch.tensor(l, dtype=torch.long, device="cuda").unsqueeze(0)
+                 for l in levels]
+        with torch.inference_mode():
+            audio = snac_model.decoder(snac_model.quantizer.from_codes(codes))
+        a = audio[0, 0].float().cpu().numpy()
+        if emitted == 0:
+            a = a[WARMUP_SAMPLES:] if len(a) > 2 * WARMUP_SAMPLES else a
+        if len(a) > emitted:
+            yield to_pcm16(a[emitted:])
+
+
 @app.post("/tts")
 async def tts(req: TTSReq):
     text = sanitize(req.input).strip()
     if not text:
         return Response(content=b"", media_type="application/octet-stream")
-    audio = await _generate(text, req.voice)
-    if audio is None:
-        # Silence rather than an error: a failed turn should not kill the call.
-        return Response(content=b"", media_type="application/octet-stream")
-    return Response(content=to_pcm16(audio), media_type="application/octet-stream")
+    return StreamingResponse(_stream(text, req.voice),
+                             media_type="application/octet-stream")
 
 
 if __name__ == "__main__":

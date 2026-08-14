@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/weedge/pipeline-go/pkg/logger"
@@ -198,7 +200,29 @@ func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSP
 	return NewContractProvider(baseURL, languageTag, "kaniHTTP", speed, gain, 22050)
 }
 
+// vocalTagRe matches the inline vocal-event markup some speech engines perform,
+// e.g. "<laugh>", "<sigh>".
+var vocalTagRe = regexp.MustCompile(`\s*<[a-zA-Z_]{2,20}>\s*`)
+
+// stripVocalTags removes that markup for engines that cannot perform it.
+//
+// Only Maya1 understands these. Every other engine here would pronounce the
+// brackets — "less than laugh greater than" — to a live caller. The system
+// prompt only asks for tags when Maya is configured, so this should never fire;
+// it exists because the same class of mistake already reached a caller once,
+// when unparsed gemma-4 tool-call markup was read out loud. A tenant prompt
+// mentioning tags, or a model that picks them up on its own, is all it takes.
+func stripVocalTags(text string) string {
+	if !strings.Contains(text, "<") {
+		return text
+	}
+	return strings.TrimSpace(vocalTagRe.ReplaceAllString(text, " "))
+}
+
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
+	if p.name != "mayaHTTP" {
+		text = stripVocalTags(text)
+	}
 	if p.openaiSpeech {
 		body, _ := json.Marshal(map[string]any{
 			"model":           p.model,

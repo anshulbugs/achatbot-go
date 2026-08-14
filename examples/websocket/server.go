@@ -614,6 +614,33 @@ Delivery rules for this call, which override any conflicting instruction above:
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
 
+// expressiveTagRules teaches the model to write vocal-event tags, and is added
+// ONLY when the speech engine understands them.
+//
+// This is the half that was missing from the first Maya1 call. The service
+// voices tags the model writes, nothing told the model to write any, and all
+// two hundred turns came out as plain text -- so the call sounded exactly as
+// flat as kokoro, which is what it was asked for.
+//
+// STRICTLY CONDITIONAL, because the same instruction is actively harmful on
+// kokoro: it has no tags, so it would pronounce "less than laugh greater than"
+// to a caller. That is not hypothetical here -- unparsed gemma-4 tool-call
+// markup was read out on a live call once already.
+//
+// Sparingly, and only these twenty, because a tag the model invents is markup
+// the service has to throw away; and a laugh in every sentence is worse than
+// none. The emotional register of the voice itself comes from the persona
+// description, which is static per campaign and therefore prefix-cached.
+const expressiveTagRules = `
+- The speech engine on this call can perform vocal reactions. Write them inline, in angle brackets, immediately after the word they belong to: "You're very welcome <laugh> have a great day."
+- Use ONLY these: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort> <cry> <scream> <sing> <whisper> <curious> <excited> <angry> <sad> is not valid; the mood tags are <curious> <excited> <angry> <sarcastic> <mischievous> <disappointed> <appalled>. Anything else in angle brackets is discarded before it is spoken.
+- Use them RARELY -- at most one in a reply, and only where a person genuinely would. A <sigh> when someone declines, a <laugh> at something funny, a <curious> on a real question. Constant reactions sound unhinged, not warm.
+- This replaces the rule above about not writing laughter: written "haha" is still wrong, but <laugh> is performed properly.`
+
+// ttsUnderstandsTags reports whether the configured speech engine performs
+// vocal-event tags rather than reading them out as words.
+func ttsUnderstandsTags() bool { return cfg.TTS.Model == "maya_http" }
+
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
 //
@@ -629,11 +656,15 @@ Delivery rules for this call, which override any conflicting instruction above:
 // there the model answers the caller instead of opening with a preamble of its
 // own.
 func withCallStyle(prompt, spokenGreeting string) string {
+	rules := callStyleRules
+	if ttsUnderstandsTags() {
+		rules += expressiveTagRules
+	}
 	out := prompt
 	if out == "" {
-		out = strings.TrimSpace(callStyleRules)
+		out = strings.TrimSpace(rules)
 	} else {
-		out += "\n" + callStyleRules
+		out += "\n" + rules
 	}
 	if spokenGreeting != "" {
 		out += "\n\n## What has already happened on this call\n" +
