@@ -50,6 +50,13 @@ async def asr(request: Request):
     raw = await request.body()
     if len(raw) < 2:
         return {"text": ""}
+    # The body is raw little-endian PCM16, so an odd length cannot be samples.
+    # The agent always sends whole int16s and never trips this; a client that
+    # posts a multipart upload by mistake does, and used to get a 500 and a
+    # stack trace rather than anything that explained the problem. Drop the
+    # stray byte and transcribe what is there.
+    if len(raw) % 2:
+        raw = raw[:-1]
     audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     with torch.no_grad():
         out = model.transcribe([audio], batch_size=1, verbose=False)
