@@ -122,14 +122,20 @@ def sanitize(text: str) -> str:
     return TAG_RE.sub(lambda m: m.group(0) if m.group(1).lower() in VALID_TAGS else "", text)
 
 
+# The persona used when nothing else resolves. Never indexed blindly: an
+# unknown MAYA_VOICE once crash-looped the whole service on startup, because
+# the fallback path assumed the default was itself a valid persona.
+FALLBACK = DEFAULT_PERSONA if DEFAULT_PERSONA in PERSONAS else next(iter(PERSONAS))
+
+
 def resolve_voice(voice: str) -> tuple[str, int]:
     """A persona name, or a raw description (seeded by its own hash)."""
-    key = (voice or DEFAULT_PERSONA).strip()
+    key = (voice or FALLBACK).strip()
     if key in PERSONAS:
         return PERSONAS[key]
     if len(key) > 40:                      # looks like a description, not a name
         return key, abs(hash(key)) % (2**31)
-    return PERSONAS[DEFAULT_PERSONA]
+    return PERSONAS[FALLBACK]
 
 
 def build_ids(description: str, text: str) -> list[int]:
@@ -178,7 +184,7 @@ async def startup():
     # call is two seconds of silence after the caller stops speaking.
     import asyncio
     for n in (1, 2, 4, 8, 16, 32):
-        await asyncio.gather(*[_generate("Warming up.", "warm") for _ in range(n)])
+        await asyncio.gather(*[_generate("Warming up.", FALLBACK) for _ in range(n)])
     print(f"maya1 ready ({MODEL}, {RATE}Hz, personas: {', '.join(PERSONAS)})",
           flush=True)
 

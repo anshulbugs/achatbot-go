@@ -11,7 +11,7 @@
 # Measured on one RTX 5090 (see docs/RESOURCES.md): 61 concurrent calls at
 # batch 16, 214 at batch 64, 104ms to first audio at 61 concurrent.
 #
-# Env overrides: MAYA_GPU (default 3), PORT (8881), MAYA_VOICE (warm),
+# Env overrides: MAYA_GPU (default 3), PORT (8881), MAYA_VOICE (brisk_warm),
 # MAYA_MAX_MODEL_LEN (2048), HF_CACHE, NAME.
 set -euo pipefail
 MAYA_GPU="${MAYA_GPU:-3}"
@@ -34,7 +34,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$MAYA_GPU" \
   --shm-size=8g \
   -e HF_HOME=/root/.cache/huggingface \
-  -e MAYA_VOICE="${MAYA_VOICE:-warm}" \
+  -e MAYA_VOICE="${MAYA_VOICE:-brisk_warm}" \
   -e MAYA_MAX_MODEL_LEN="${MAYA_MAX_MODEL_LEN:-2048}" \
   -e MAYA_GPU_FRACTION="${MAYA_GPU_FRACTION:-0.80}" \
   -e PORT=8881 \
@@ -56,5 +56,5 @@ echo "To use it, point the agent at it in config.yaml:"
 echo "  tts:"
 echo "    model: maya_http"
 echo "    http_url: http://127.0.0.1:$PORT"
-echo "    http_voice: warm      # warm | excited | apologetic | firm"
+echo "    http_voice: brisk_warm   # brisk_warm | low_calm"
 echo "Kokoro keeps running on 8880, so switching back is a config change."
