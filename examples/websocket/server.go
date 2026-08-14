@@ -588,6 +588,25 @@ func resolvePrompt(base, replace, suffix string) string {
 //     spoken as "three hundred twenty one million..." cannot be written down,
 //     and the caller has no way to ask for it again except to ask for all of it.
 //
+// The last two rules are measured against this voice at speed 1.28, not
+// inferred:
+//
+//   - 489 real agent turns ran to a median of 30 words, p95 51, max 90, and
+//     5.3% crossed kokoro's ~50-word chunk boundary. That boundary is where it
+//     synthesises separately and concatenates, so it is where prosody breaks.
+//   - The same sentence with different marks gave 230ms of pause for a full
+//     stop, 220ms for three dots, 200ms for a comma and 100ms for none. So a
+//     mid-sentence beat is worth having, but the whole usable range is about
+//     130ms — it is a refinement, not a transformation.
+//
+// Two things that sound plausible were measured and rejected. A double dash
+// around a word does nothing at all here (100ms, same as no punctuation),
+// despite being widely suggested. And IPA stress marks are actively dangerous:
+// "This part is ˈfree" is SPOKEN as "This part is stress-free", and the
+// secondary mark as "second or stress-free". Anything the engine does not
+// understand it reads out, which is the same way unparsed gemma-4 markup once
+// reached a caller.
+//
 // Appended LAST, after the tenant's own prompt. Later instructions carry more
 // weight with the model, and these have to survive a 3000-token prompt that
 // never mentions them. The cost is that they sit after the per-contact block
@@ -598,7 +617,9 @@ Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
 - Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words.
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
-- Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.`
+- Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.
+- Keep every reply under fifty words, and prefer two or three short sentences to one long one. The speech engine synthesises longer replies in separate pieces and joins them, and the joins are audible. A caller on the phone also stops listening well before fifty words.
+- Punctuation is your only control over rhythm, so use it deliberately. A full stop gives the longest pause, three dots give nearly the same pause without ending the sentence, and a comma gives a shorter one. Use three dots where a person would pause for thought mid-sentence.`
 
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
