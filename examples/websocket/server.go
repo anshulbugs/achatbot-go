@@ -629,8 +629,22 @@ Delivery rules for this call, which override any conflicting instruction above:
 //
 // Sparingly, and only these twenty, because a tag the model invents is markup
 // the service has to throw away; and a laugh in every sentence is worse than
-// none. The emotional register of the voice itself comes from the persona
-// description, which is static per campaign and therefore prefix-cached.
+// none.
+//
+// WHAT THIS COSTS THE KV CACHE, and why it is still the right place. Like
+// callStyleRules it lands at the very end, after the platform's per-contact
+// block, so it falls outside the shared prefix and is re-prefilled on every
+// call — roughly two hundred tokens on top of the eighty those rules already
+// pay. That is deliberate: moving it in front of the tenant prompt would put
+// it inside the cached prefix, but instructions carry less weight the earlier
+// they appear, and a delivery rule the model quietly ignores is worth nothing.
+// Two hundred tokens is small against a campaign prefix of three thousand, and
+// it is only paid at all when Maya is the engine.
+//
+// The expensive half is already free: the emotional register of the VOICE
+// comes from the persona description, which lives in the TTS service, is
+// static per campaign, and is served by vLLM's prefix cache from the second
+// call onward. Only the tag instructions are re-sent, never the voice.
 const expressiveTagRules = `
 - The speech engine on this call can perform vocal reactions. Write them inline, in angle brackets, immediately after the word they belong to: "You're very welcome <laugh> have a great day."
 - Use ONLY these: <laugh> <chuckle> <giggle> <sigh> <exhale> <gasp> <gulp> <snort> <cry> <scream> <sing> <whisper> <curious> <excited> <angry> <sad> is not valid; the mood tags are <curious> <excited> <angry> <sarcastic> <mischievous> <disappointed> <appalled>. Anything else in angle brackets is discarded before it is spoken.
