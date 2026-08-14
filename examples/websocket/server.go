@@ -396,6 +396,20 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			}
 			return p, nil
 		})
+	} else if cfg.TTS.Model == "maya_http" {
+		// Maya1: expressive TTS. Speaks the same /tts contract as kokoro, so
+		// it needs no provider of its own — only a different URL and rate.
+		// cfg.TTS.HTTPVoice selects a persona (warm/excited/apologetic/firm),
+		// which is where the emotional style lives; inline tags in the text
+		// carry vocal events. See deploy/tts/maya_server.py.
+		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
+		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
+			p := tts.NewContractProvider(cfg.TTS.HTTPURL, cfg.TTS.HTTPVoice, "mayaHTTP", cfg.TTS.Speed, cfg.TTS.Gain, 24000)
+			if p == nil {
+				return nil, fmt.Errorf("failed to reach Maya1 TTS service at %s", cfg.TTS.HTTPURL)
+			}
+			return p, nil
+		})
 	} else if cfg.TTS.Model == "kokoro_http" {
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {

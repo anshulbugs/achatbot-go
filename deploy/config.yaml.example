@@ -203,6 +203,20 @@ asr:
 
 tts:
   model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
+  # EXPRESSIVE ALTERNATIVE: maya_http. Maya1 is the only model of fifteen
+  # tested with both real emotion control and enough throughput (61 concurrent
+  # calls on one GPU, 104ms to first audio, Apache-2.0). It runs on port 8881
+  # via deploy/scripts/maya-start.sh, alongside kokoro rather than replacing
+  # it, so switching a campaign either way is a config change:
+  #
+  #   model: maya_http
+  #   http_url: "http://127.0.0.1:8881"
+  #   http_voice: warm         # warm | excited | apologetic | firm
+  #
+  # Emotional STYLE comes from http_voice (static per campaign, so vLLM's
+  # prefix cache serves it); vocal EVENTS come from tags the LLM writes inline
+  # -- <laugh>, <sigh>, <gasp>. Unknown tags are stripped by the service, so
+  # markup can never be read out to a caller.
   http_url: "http://127.0.0.1:8880"
   speaker_id: 3              # 3 = Heart (US female). See UI voice list for ids.
   speed: 1.28                 # 1.0 = normal
