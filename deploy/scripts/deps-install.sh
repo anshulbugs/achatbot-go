@@ -18,6 +18,15 @@ set -euo pipefail
 GO_VERSION="${GO_VERSION:-1.24.0}"
 PREFIX="${DEPS_PREFIX:-$HOME}"
 
+# Grace-Hopper boxes are aarch64, and the two downloads below are the only
+# things here that care. Everything else is either already on the box or
+# comes from a multi-arch container image.
+case "$(uname -m)" in
+  x86_64)        GOARCH="amd64" ;;
+  aarch64|arm64) GOARCH="arm64" ;;
+  *)             GOARCH="" ;;
+esac
+
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '    \033[1;32mOK\033[0m   %s\n' "$*"; }
 warn() { printf '    \033[1;33mMISS\033[0m %s\n' "$*"; }
@@ -56,13 +65,16 @@ log "Installing what does not need root (into $PREFIX)"
 
 # Go. Built from source rather than shipping a binary, because the agent links
 # CGO against sherpa-onnx and the build must happen on the target's libc.
+# sherpa-onnx-go-linux ships prebuilt aarch64 libs alongside x86_64, so the
+# CGO link works unchanged on Grace — nothing extra is needed for ARM.
 if command -v go >/dev/null 2>&1; then
   ok "go $(go version | awk '{print $3}')"
 elif [ -x "$PREFIX/go/bin/go" ]; then
   ok "go (at $PREFIX/go/bin/go — add it to PATH)"
 else
-  log "Installing Go $GO_VERSION"
-  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+  [ -n "$GOARCH" ] || die "unsupported CPU architecture $(uname -m)"
+  log "Installing Go $GO_VERSION (linux-$GOARCH)"
+  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
     | tar -xz -C "$PREFIX" || die "could not download Go"
   ok "go installed at $PREFIX/go/bin/go"
   echo "         add to your shell:  export PATH=\$PATH:$PREFIX/go/bin"
@@ -75,9 +87,10 @@ if command -v cloudflared >/dev/null 2>&1; then
 elif [ -x "$PREFIX/cloudflared" ]; then
   ok "cloudflared (at $PREFIX/cloudflared)"
 else
-  log "Installing cloudflared"
+  [ -n "$GOARCH" ] || die "unsupported CPU architecture $(uname -m)"
+  log "Installing cloudflared (linux-$GOARCH)"
   curl -fsSL -o "$PREFIX/cloudflared" \
-    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${GOARCH} \
     || die "could not download cloudflared"
   chmod +x "$PREFIX/cloudflared"
   ok "cloudflared installed at $PREFIX/cloudflared"
