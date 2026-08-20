@@ -1,15 +1,17 @@
-"""Verify kokoro's inline speech markup on real hardware, by ear and by ASR.
+"""Verify kokoro's markup, pause marks and reaction sounds on real hardware.
 
 Run this ONCE on a new box before trusting tts.markup, and again after any
-change to the kokoro image. It exists because this pipeline has twice shipped
-expressive markup that the engine did not understand and read aloud to a
-caller, and reading the misaki source is not the same as hearing the output.
+change to the kokoro image. It exists for two reasons. This pipeline has
+shipped expressive markup the engine did not understand and read aloud to a
+caller. And the previous round of punctuation measurement here tested the wrong
+characters — "-", "--" and "..." rather than the em dash and the ellipsis the
+engine actually knows — and drew the wrong conclusion from it.
 
     python3 deploy/scripts/verify-speech-markup.py
 
 Needs the kokoro service on :8880 and parakeet on :8890. Writes wavs to
-~/markupcheck so the differences can be heard, not just measured — the stress
-question is a quality question and the meter cannot answer it.
+~/markupcheck, because half of these questions are settled by ear, not by a
+meter.
 
 What each section decides:
 
@@ -19,9 +21,14 @@ What each section decides:
                 AND identical energy means misaki parsed it and the model
                 ignored it, which makes the prompt rule dead weight.
   3. LEXICON    Does the JobTalk entry fix the two-word reading?
-  4. BANNED     The four non-lexical interjections our prompt still forbids
-                ("Hmmm", "Ahh", "Ooh", "Aww"). If they come back as sounds
-                rather than as spelled-out letters, the ban can be relaxed.
+  4. SOUNDS     The eight reaction sounds the prompt allows, spelled the way
+                the prompt spells them. Decide by ear — whether one lands as a
+                sound a person makes is not something ASR can tell you.
+  5. PAUSES     What each mark buys INSIDE a sentence. Misaki's punctuation set
+                is ';:,.!?' plus the em dash and the ellipsis character; the
+                hyphen is junk to it and "..." ends the sentence. Both the real
+                marks and their ASCII lookalikes are measured here, so the
+                difference between them is visible rather than assumed.
 """
 import json
 import os
@@ -35,6 +42,9 @@ VOICE = "af_heart"
 SPEED = 1.10
 GAIN = 1.4
 OUT = os.path.expanduser("~/markupcheck")
+
+EM_DASH = "—"
+ELLIPSIS = "…"
 
 
 def synth(text, speed=SPEED):
@@ -73,6 +83,22 @@ def rms(a):
     return float(np.sqrt(np.mean(a ** 2))) if len(a) else 0.0
 
 
+def middle_gap(a, thresh=0.012):
+    """Longest internal silence in ms, ignoring lead-in and tail."""
+    win = int(0.01 * RATE)
+    frames = [float(np.sqrt(np.mean(a[i:i + win] ** 2)))
+              for i in range(0, len(a) - win, win)]
+    voiced = [i for i, f in enumerate(frames) if f >= thresh]
+    if not voiced:
+        return 0
+    frames = frames[voiced[0]:voiced[-1] + 1]
+    best = run = 0
+    for f in frames:
+        run = run + 1 if f < thresh else 0
+        best = max(best, run)
+    return best * 10
+
+
 os.makedirs(OUT, exist_ok=True)
 
 print("=== 1. SPOKEN? nothing in brackets may reach the caller ===")
@@ -102,24 +128,73 @@ base = np.frombuffer(synth("That part is free for you."), dtype="<i2")
 for level in ("+1", "+2", "-1"):
     a = np.frombuffer(synth(f"That part is [free]({level}) for you."), dtype="<i2")
     same_len = abs(len(a) - len(base)) < RATE * 0.01
+    flat = same_len and abs(rms(a) - rms(base)) < 0.001
     print(f"  [free]({level:2}): {len(a)/RATE:5.2f}s vs {len(base)/RATE:5.2f}s  "
           f"rms {rms(a):.4f} vs {rms(base):.4f}"
-          f"{'   <-- no measurable change' if same_len and abs(rms(a)-rms(base)) < 0.001 else ''}")
+          f"{'   <-- no measurable change' if flat else ''}")
 print("  Listen to stress_up.wav against plain.wav before believing the meter.")
 
 print("\n=== 3. LEXICON: is the brand name one word? ===")
-for name, text in (("brand plain", "Welcome to JobTalk, your hiring assistant."),
-                   ("brand forced", "Welcome to [JobTalk](/ʤˈɑbtˌɔk/), your hiring assistant.")):
+BRAND = [
+    ("brand plain", "Welcome to JobTalk, your hiring assistant."),
+    ("brand forced",
+     "Welcome to [JobTalk](/ʤˈɑbtˌɔk/), your hiring assistant."),
+]
+for name, text in BRAND:
     pcm = synth(text)
     save(name.replace(" ", "_"), pcm)
     print(f"  {name:14} {asr(pcm)[:56]}")
 
-print("\n=== 4. BANNED interjections: sound, or spelled-out letters? ===")
-for word in ("Hmmm… let me check.", "Ahh, now I see.", "Ooh — interesting.", "Aww, that is a shame."):
-    pcm = synth(word)
-    save("interj_" + word[:4].strip(" ,—…"), pcm)
-    print(f"  {word:26} -> {asr(pcm)[:44]}")
-print("  If these came back as words rather than letters, the prompt ban on the")
-print("  four non-lexical interjections can be lifted. Until then it stays.")
+print("\n=== 4. The eight reaction sounds, spelled as the prompt spells them ===")
+SOUNDS = [
+    ("hmmm",   "Hmmm" + ELLIPSIS + " let me check that for you."),
+    ("well",   "Well" + ELLIPSIS + " it depends on the size of your team."),
+    ("ahh",    "Ahh, now I see what you mean."),
+    ("aww",    "Aww, that is a shame."),
+    ("ooh",    "Ooh " + EM_DASH + " that is interesting."),
+    ("wow",    "Wow! That is a big team."),
+    ("oh",     "Oh! I should mention one thing."),
+    ("really", "Really? I had not heard that."),
+]
+for name, text in SOUNDS:
+    pcm = synth(text)
+    if not pcm:
+        print(f"  {name:8} NO AUDIO")
+        continue
+    save("sound_" + name, pcm)
+    print(f"  {name:8} {text[:34]:36} -> {asr(pcm)[:40]}")
+print("  ASR is the wrong judge here: parakeet writing Hmmm as Hm proves nothing")
+print("  either way. Play sound_*.wav and decide whether each one is a sound a")
+print("  person makes or a word being spelled out.")
+
+print("\n=== 5. Pause hierarchy, in the characters the engine actually knows ===")
+A, B = "I understand", "let me check that for you"
+MARKS = [
+    ("none",            f"{A} {B}."),
+    ("comma",           f"{A}, {B}."),
+    ("semicolon",       f"{A}; {B}."),
+    ("em dash U+2014",  f"{A} {EM_DASH} {B}."),
+    ("ellipsis U+2026", f"{A}{ELLIPSIS} {B}."),
+    # The lookalikes, for contrast. An earlier round measured THESE, found
+    # nothing, and concluded dashes do not work. They are not the same
+    # characters as the two above.
+    ("hyphen (junk)",   f"{A} - {B}."),
+    ("two hyphens",     f"{A} -- {B}."),
+    ("three stops",     f"{A}... {B}."),
+]
+print(f"  {'mark':17} {'dur':>6} {'longest internal pause':>24}")
+for name, text in MARKS:
+    pcm = synth(text)
+    if not pcm:
+        print(f"  {name:17}  NO AUDIO")
+        continue
+    a = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    save("pause_" + name.split()[0], pcm)
+    print(f"  {name:17} {len(a)/RATE:5.2f}s {middle_gap(a):20}ms")
+print("  The prompt asks for the em dash and the ellipsis specifically. If they")
+print("  do not separate from comma and semicolon here, say so and the rule can")
+print("  be simplified. Note the last row never happens on a real call: three")
+print("  full stops end the sentence for our aggregator, so the two halves go")
+print("  to kokoro as separate requests.")
 
 print(f"\nwavs in {OUT}")

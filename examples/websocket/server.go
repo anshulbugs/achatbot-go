@@ -594,9 +594,12 @@ func resolvePrompt(base, replace, suffix string) string {
 // consistent enough to be worth stating on every call rather than hoping each
 // tenant's prompt remembers them:
 //
-//   - Written filler ("hm", "uh") is not the natural hesitation it looks like
-//     on the page. TTS pronounces it as a word, which lands as a glitch rather
-//     than as thinking.
+//   - Written filler is only safe when it is spelled the way the engine expects.
+//     Eight reaction sounds are allowed and spelled exactly, punctuation
+//     included, because the punctuation IS part of the sound: the trailing
+//     ellipsis is what makes "Hmmm…" trail off. Everything outside that list
+//     ("uh", "um", "er", written laughter) stays banned — those come out as
+//     letters and land as a glitch rather than as thinking.
 //   - Digit strings read as quantities are unusable on a call. A phone number
 //     spoken as "three hundred twenty one million..." cannot be written down,
 //     and the caller has no way to ask for it again except to ask for all of it.
@@ -607,18 +610,22 @@ func resolvePrompt(base, replace, suffix string) string {
 //   - 489 real agent turns ran to a median of 30 words, p95 51, max 90, and
 //     5.3% crossed kokoro's ~50-word chunk boundary. That boundary is where it
 //     synthesises separately and concatenates, so it is where prosody breaks.
-//   - The same sentence with different marks gave 230ms of pause for a full
-//     stop, 220ms for three dots, 200ms for a comma and 100ms for none. So a
-//     mid-sentence beat is worth having, but the whole usable range is about
-//     130ms — it is a refinement, not a transformation.
+//   - The pause marks are the ones the engine knows, which is narrower than it
+//     looks. Misaki's PUNCTS is ';:,.!?—…"“”' — the EM DASH and the ELLIPSIS
+//     CHARACTER are in it; the hyphen is not, it sits in SUBTOKEN_JUNKS and is
+//     treated as junk inside a word. An earlier round of measurement here
+//     compared "-", "--" and "..." and concluded that dashes do nothing and
+//     that an ellipsis is worth 10ms over a comma. Both conclusions were about
+//     the wrong characters: "--" is junk to this engine and "..." ends the
+//     sentence, which sends the two halves as separate synthesis requests. The
+//     rules below ask for "…" and "—" and say so explicitly.
 //
-// Two things that sound plausible were measured and rejected. A double dash
-// around a word does nothing at all here (100ms, same as no punctuation),
-// despite being widely suggested. And IPA stress marks are actively dangerous:
-// "This part is ˈfree" is SPOKEN as "This part is stress-free", and the
-// secondary mark as "second or stress-free". Anything the engine does not
-// understand it reads out, which is the same way unparsed gemma-4 markup once
-// reached a caller.
+// One thing IS measured and rejected: IPA stress marks written bare in the
+// text. "This part is ˈfree" is SPOKEN as "This part is stress-free", and the
+// secondary mark as "second or stress-free". Nothing in the front end consumes
+// a bare mark, so it reaches the model as text — the same way unparsed gemma-4
+// markup once reached a caller. The link form "[free](+1)" IS consumed, which
+// is why speechMarkupRules below is safe and this is not.
 //
 // Appended LAST, after the tenant's own prompt. Later instructions carry more
 // weight with the model, and these have to survive a 3000-token prompt that
@@ -627,12 +634,14 @@ func resolvePrompt(base, replace, suffix string) string {
 // what a cold campaign prefix costs.
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
-- You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
-- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words. Real words are different and you may open with them: "Well," to soften what follows, "Oh," for something you have just realised, "Really?" for genuine surprise, "Wow," for something impressive. Those are said naturally because they are words.
+- You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no stage directions, and no symbol standing in for a word.
+- You have eight sounds for reacting, and only these eight. Write each one EXACTLY as shown, punctuation included, because the punctuation is part of the sound: "Hmmm…" for thinking or hesitating, "Well…" for easing gently into a point, "Ahh," for a warm realisation, "Aww," for sympathy, "Ooh —" for curiosity or pleasant surprise, "Wow!" for something impressive, "Oh!" for something you have just remembered, "Really?" for genuine surprise. Use at most one in a reply, at the start of a sentence, and only when you mean it.
+- Nothing outside that list. No "uh", no "um", no "er", no "aha", and no written laughter such as "ha", "haha" or "heh" — those are read out as letters and land as a fault rather than as thinking or amusement. If something is funny, say so in words, or use "Wow!" or "Oh!".
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.
 - Keep every reply under fifty words, and prefer two or three short sentences to one long one. The speech engine synthesises longer replies in separate pieces and joins them, and the joins are audible. A caller on the phone also stops listening well before fifty words.
-- Punctuation is your only control over rhythm, so use it deliberately. A full stop gives the longest pause, three dots give nearly the same pause without ending the sentence, and a comma gives a shorter one. Use three dots where a person would pause for thought mid-sentence.
+- Punctuation is your only control over rhythm, so use it deliberately. Within a sentence the pause runs longest to shortest: "…" then "—" then ";" then ",". Use "…" where a person would trail off or think, "—" to change direction mid-sentence, ";" to join two thoughts that belong together, and "," for an ordinary beat. A pause placed immediately BEFORE the word that matters — the benefit, the name, the ask — makes it land harder.
+- Write "…" and "—" as those single characters. Three full stops and two hyphens are not the same thing to the speech engine: three full stops end the sentence early, and two hyphens do nothing at all.
 - Write the way people talk, not the way people write. Use contractions every time one fits: "it's", "you're", "don't", "can't", "I'll", "there's". Keep sentences under twenty words. Put a question mark on every question, because that is what lifts your voice at the end of it — a question written as a statement sounds like a demand.
 - Spell out anything that is not a word as the words you want said. "Twenty-four seven", not "24/7". "Percent", not "%". "And", not "&". "About", not "approx". "Nine to five", not "9-5". The engine reads symbols literally and a caller cannot ask you to repeat a symbol.
 - Vary the energy. A reply where every sentence runs the same length at the same pitch reads as a recording, and callers hang up on recordings. Follow a long sentence with a short one. Put the word that matters at the end of the sentence, where it lands hardest. Use an exclamation mark where you genuinely mean it, and nowhere else.`

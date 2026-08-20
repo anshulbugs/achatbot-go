@@ -94,6 +94,14 @@ fails loudly if a bracket survives into the transcript. It also writes wavs to
 `~/markupcheck` — listen to `stress_up.wav` against `plain.wav`, because
 whether the emphasis is *audible* is a question no meter answers.
 
+Sections 4 and 5 settle two things that were previously decided on bad
+evidence. Section 5 measures the pause each mark buys against its ASCII
+lookalike, because an earlier round here tested `-`, `--` and `...` — none of
+which are in misaki's punctuation set — and wrongly concluded that dashes do
+nothing. Section 4 plays the eight reaction sounds the prompt allows; judge
+those by ear, since ASR cannot tell you whether "Hmmm…" landed as a hum or as
+letters.
+
 If anything comes back spoken, set `tts.markup: false`. The agent then strips
 markup before every request instead of forwarding it, and the prompt stops
 asking the model for it; nothing else changes.
