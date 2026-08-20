@@ -40,6 +40,10 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
 GPU="${GPU:-0}"
+# Hugging Face token, if one is present. Not needed for the models this stack
+# runs — they are all ungated — but sourcing it here means a gated model can be
+# tried later without the token ending up in shell history.
+[ -f deploy/hf.env ] && { set -a; . ./deploy/hf.env; set +a; }
 export HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 # 0.75 leaves roughly 24 GB for parakeet (~2.5 GB), kokoro (~0.3 GB), their CUDA
 # contexts and headroom for KV growth. Deliberately conservative: an LLM that
