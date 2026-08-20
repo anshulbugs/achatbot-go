@@ -134,7 +134,15 @@ sleep 2
 log "Public tunnel for the browser and Telnyx"
 [ -x "$CF" ] || command -v cloudflared >/dev/null || die "cloudflared not found (set CLOUDFLARED=)"
 rm -f "cf-${PORT}.log"
-nohup setsid "$CF" tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate \
+# --config /dev/null is NOT cosmetic. cloudflared reads /etc/cloudflared/config.yml
+# by default, and the Lambda GH200 image ships one for its own JupyterLab tunnel:
+# it names a credentials file and an ingress list ending in `- service:
+# http_status:404`. A quick tunnel started without --config inherits ALL of that,
+# so our trycloudflare hostname matches no ingress rule and every request to it
+# returns 404 — while cloudflared logs a healthy registered connection and the
+# service answers fine on localhost. Isolating the config is what makes the
+# public URL actually reach us.
+nohup setsid "$CF" --config /dev/null tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate \
   > "cf-${PORT}.log" 2>&1 < /dev/null &
 disown
 PUBLIC=""
