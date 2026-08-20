@@ -43,6 +43,21 @@ CONTEXT_LENGTH="${CONTEXT_LENGTH:-8192}"
 # and TTS sit on the same device and need what is left, so
 # up-voice-gh200.sh lowers this.
 MEM_FRACTION="${MEM_FRACTION:-0.85}"
+
+# gemma-4 is a vision-language model, and on aarch64 its VISION tower is what
+# crashes the scheduler: sgl_kernel there has no flash_ops, so the first real
+# request dies in gemma4_vision.py with "Can not import FA3 in sgl_kernel".
+# The HTTP frontend survives, so the symptom is every request hanging until it
+# times out rather than an obvious crash.
+#
+# --language-only loads the language weights and nothing else, which is what a
+# voice agent wants regardless of architecture: we never send an image, and
+# the vision tower is pure cost. LANGUAGE_ONLY=0 restores the full model, and
+# MM_ATTENTION_BACKEND=sdpa is the other way out if the tower is ever needed
+# on a box without FA3.
+EXTRA_ARGS=()
+[ "${LANGUAGE_ONLY:-1}" = "1" ] && EXTRA_ARGS+=(--language-only)
+[ -n "${MM_ATTENTION_BACKEND:-}" ] && EXTRA_ARGS+=(--mm-attention-backend "$MM_ATTENTION_BACKEND")
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
@@ -68,7 +83,8 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --cuda-graph-max-bs 256 \
     --schedule-policy lpm \
     --enable-metrics \
-    --tool-call-parser gemma4
+    --tool-call-parser gemma4 \
+    "${EXTRA_ARGS[@]}"
 
 echo "$NAME started (GPU $LLM_GPU, host port $PORT, model $LLM_MODEL)."
 echo "First run downloads the model into $HF_CACHE — watch: docker logs -f $NAME"
