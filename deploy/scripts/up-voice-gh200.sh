@@ -71,6 +71,9 @@ log "Preflight"
 if [ "${SKIP_DEPS:-0}" != "1" ]; then
   bash deploy/scripts/deps-install.sh || die "dependencies missing (see above)"
 fi
+# The agent loads silero_vad.onnx from <repo>/models directly. Nothing else
+# fetches it, and without it the agent exits at startup.
+bash deploy/scripts/models-install.sh || die "could not fetch VAD models"
 command -v docker >/dev/null || die "docker not installed"
 docker info 2>/dev/null | grep -qi nvidia || die "nvidia container runtime not available"
 
