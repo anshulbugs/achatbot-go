@@ -234,6 +234,10 @@ tts:
   # vocabulary is dropped by the model's tokeniser, which changes the word
   # quietly rather than failing — hear every entry once before trusting it.
   #
+  # Those stress marks belong HERE and nowhere else. Loose in a sentence they
+  # are read aloud: "This part is ˈfree" is spoken as "This part is stress-free"
+  # (measured on both boxes). Inside the slashes the link form consumes them.
+  #
   # Keys match whole words, case-insensitively.
   pronunciations:
     JobTalk: "ʤˈɑbtˌɔk"      # otherwise read as two words, "Job Talk"
