@@ -59,7 +59,21 @@ if [ ! -x "$OLLAMA_BIN" ]; then
   else
     log "Installing ollama into $HOME/ollama"
     mkdir -p "$HOME/ollama"
-    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz       | tar -xz -C "$HOME/ollama" || die "could not download ollama"
+    # ollama.com/download/ollama-linux-<arch>.tgz is GONE — it 404s for amd64
+    # and arm64 alike; upstream moved to zstd tarballs on the GitHub release.
+    # Resolved from the API so this does not rot again the next time they
+    # rename something, and so the arch is whatever the box actually is.
+    case "$(uname -m)" in
+      x86_64)        OARCH="amd64" ;;
+      aarch64|arm64) OARCH="arm64" ;;
+      *) die "unsupported CPU architecture $(uname -m) for ollama" ;;
+    esac
+    command -v zstd >/dev/null 2>&1 || die "zstd is needed to unpack ollama (apt-get install zstd)"
+    ASSET="ollama-linux-${OARCH}.tar.zst"
+    URL="$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | grep -o "https://[^\"]*${ASSET}" | head -1)"
+    [ -n "$URL" ] || die "could not find $ASSET in the latest ollama release"
+    log "Downloading $ASSET (about 1.5GB)"
+    curl -fsSL "$URL" | tar --zstd -x -C "$HOME/ollama" || die "could not download ollama"
     OLLAMA_BIN="$HOME/ollama/bin/ollama"
   fi
 fi
