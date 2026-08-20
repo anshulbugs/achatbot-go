@@ -109,4 +109,8 @@ if [ "$missing_root" = "1" ]; then
   echo "    start until they are installed. Everything else is ready."
   exit 1
 fi
-echo "    All dependencies present. Next:  bash deploy/scripts/up-voice-4gpu.sh"
+if [ "$GOARCH" = "arm64" ]; then
+  echo "    All dependencies present. Next:  bash deploy/scripts/up-voice-gh200.sh"
+else
+  echo "    All dependencies present. Next:  bash deploy/scripts/up-voice-4gpu.sh"
+fi
