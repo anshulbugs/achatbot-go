@@ -50,14 +50,18 @@ MEM_FRACTION="${MEM_FRACTION:-0.85}"
 # The HTTP frontend survives, so the symptom is every request hanging until it
 # times out rather than an obvious crash.
 #
-# --language-only loads the language weights and nothing else, which is what a
-# voice agent wants regardless of architecture: we never send an image, and
-# the vision tower is pure cost. LANGUAGE_ONLY=0 restores the full model, and
-# MM_ATTENTION_BACKEND=sdpa is the other way out if the tower is ever needed
-# on a box without FA3.
-EXTRA_ARGS=()
-[ "${LANGUAGE_ONLY:-1}" = "1" ] && EXTRA_ARGS+=(--language-only)
-[ -n "${MM_ATTENTION_BACKEND:-}" ] && EXTRA_ARGS+=(--mm-attention-backend "$MM_ATTENTION_BACKEND")
+# The fix is to point the tower's attention at a kernel that exists everywhere.
+# sdpa is torch's own scaled_dot_product_attention: no compiled extension, so it
+# is present on any build. The tower still loads, and since we never send an
+# image it never actually runs a batch — this only has to stop the import.
+#
+# --language-only would be tidier and is what a voice agent really wants, but
+# SGLang REJECTS it for this model: it routes through encoder disaggregation,
+# which supports only Qwen2VL, Qwen3VL, Qwen3.5, InternS2, Qwen2Audio,
+# Qwen2.5Omni, Kimi and MiMoV2 — not Gemma4ForConditionalGeneration. Left as an
+# opt-in for whenever that list grows.
+EXTRA_ARGS=(--mm-attention-backend "${MM_ATTENTION_BACKEND:-sdpa}")
+[ "${LANGUAGE_ONLY:-0}" = "1" ] && EXTRA_ARGS+=(--language-only)
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
