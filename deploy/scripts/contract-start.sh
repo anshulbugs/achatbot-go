@@ -32,6 +32,21 @@ CF="${CLOUDFLARED:-./cloudflared}"
 # Fall back to a system install, then to the one deps-install.sh puts in $HOME.
 [ -x "$CF" ] || CF="$(command -v cloudflared 2>/dev/null || echo "$HOME/cloudflared")"
 POOL="${POOL:-4}"
+
+# cfg <key> <fallback> — read a server setting out of config.yaml.
+#
+# These two are passed as environment variables, and the environment BEATS the
+# config file, so a hardcoded default here silently overrides whatever
+# config.yaml says. max_gpu_calls used to default to 61, which was measured on
+# 4x RTX 5090; carried onto different hardware it over-admits calls, and the
+# symptom is a p95 that falls apart while p50 still looks fine. config.yaml is
+# the documented place to set capacity, so config.yaml wins unless the caller
+# passes MAX_GPU_CALLS= explicitly.
+cfg() {
+  local v
+  v=$(grep -E "^  $1:" config.yaml 2>/dev/null | head -1 | cut -d: -f2- | sed 's/^ *//;s/ *#.*//;s/ *$//')
+  [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"
+}
 # The Daily sidecar: a Python process per browser call that joins the room
 # and pipes its audio to /room/media. Without it /connection_webrtc refuses
 # rather than handing back a room nobody is in. sidecar-install.sh makes it.
@@ -179,8 +194,8 @@ ACHATBOT_SERVER_ADDR=":${PORT}" \
 ACHATBOT_VAD_POOL_SIZE="$POOL" \
 ACHATBOT_ASR_POOL_SIZE="$POOL" \
 ACHATBOT_TTS_POOL_SIZE="$POOL" \
-ACHATBOT_SERVER_MAX_GPU_CALLS="${MAX_GPU_CALLS:-61}" \
-ACHATBOT_SERVER_MAX_TOTAL_CALLS="${MAX_TOTAL_CALLS:-200}" \
+ACHATBOT_SERVER_MAX_GPU_CALLS="${MAX_GPU_CALLS:-$(cfg max_gpu_calls 61)}" \
+ACHATBOT_SERVER_MAX_TOTAL_CALLS="${MAX_TOTAL_CALLS:-$(cfg max_total_calls 200)}" \
 TELNYX_PUBLIC_URL="$PUBLIC" \
 SIDECAR_PYTHON="$SIDECAR_PYTHON" \
 SIDECAR_SCRIPT="$SIDECAR_SCRIPT" \
