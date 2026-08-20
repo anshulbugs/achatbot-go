@@ -45,11 +45,26 @@ GPU="${GPU:-0}"
 # tried later without the token ending up in shell history.
 [ -f deploy/hf.env ] && { set -a; . ./deploy/hf.env; set +a; }
 export HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
-# 0.75 leaves roughly 24 GB for parakeet (~2.5 GB), kokoro (~0.3 GB), their CUDA
-# contexts and headroom for KV growth. Deliberately conservative: an LLM that
-# cannot allocate fails loudly at startup, while an ASR that cannot allocate
-# fails on a live call.
-LLM_MEM_FRACTION="${LLM_MEM_FRACTION:-0.75}"
+# MEASURED on this box, not estimated. The first attempt used 0.75 on the theory
+# that ASR and TTS need "a couple of GB", and it filled the card to 96.7 of 97.9
+# GB — parakeet then logged 272 allocation failures and served nothing, while
+# every health check still looked fine until you asked it for work.
+#
+# What the card actually holds, from nvidia-smi --query-compute-apps:
+#
+#   SGLang at 0.75          70.0 GB
+#   kokoro, 8 workers       24.9 GB   <-- NOT ~0.3 GB. Each worker carries its
+#   parakeet                 1.7 GB       own model copy AND CUDA context, so
+#                                         this scales with TTS_WORKERS.
+#
+# So the per-worker cost of the CPU-cheap services is what breaks the budget on
+# a shared card, and it is invisible on the 4-GPU layout where TTS and ASR each
+# owned a whole device. Budget: ~25 GB TTS + ~12 GB ASR + headroom, LLM gets the
+# rest. gemma-4-E4B weighs about 16 GB, so half the card still leaves a large
+# KV cache — the LLM is nowhere near its limit here (measured 59 req/s).
+LLM_MEM_FRACTION="${LLM_MEM_FRACTION:-0.50}"
+TTS_WORKERS="${TTS_WORKERS:-8}"
+ASR_WORKERS="${ASR_WORKERS:-4}"
 mkdir -p "$HF_CACHE"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -97,9 +112,9 @@ NAME=sglang PORT=8001 LLM_GPU="$GPU" MEM_FRACTION="$LLM_MEM_FRACTION" \
   bash deploy/scripts/sglang-start.sh >/dev/null
 
 log "ASR Parakeet (GPU $GPU) -> :8890"
-ASR_GPU="$GPU" bash deploy/scripts/parakeet-start.sh >/dev/null
+ASR_GPU="$GPU" ASR_WORKERS="$ASR_WORKERS" bash deploy/scripts/parakeet-start.sh >/dev/null
 log "TTS Kokoro (GPU $GPU) -> :8880"
-TTS_GPU="$GPU" bash deploy/scripts/kokoro-start.sh >/dev/null
+TTS_GPU="$GPU" TTS_WORKERS="$TTS_WORKERS" bash deploy/scripts/kokoro-start.sh >/dev/null
 
 log "Waiting for GPU services"
 wait_ready sglang     http://127.0.0.1:8001/v1/models 1800
