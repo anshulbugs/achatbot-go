@@ -17,9 +17,12 @@ What each section decides:
 
   1. SPOKEN?    Does any bracket reach the caller? A FAIL here means turn
                 tts.markup off in config.yaml and stop.
-  2. AUDIBLE?   Does [word](+1) actually change the audio? Identical duration
-                AND identical energy means misaki parsed it and the model
-                ignored it, which makes the prompt rule dead weight.
+  2. AUDIBLE?   Does [word](+1) change the audio at all? Compared by HASH, not
+                by RMS — an earlier version of this check used duration and
+                whole-clip RMS and called a real change "no measurable change",
+                because stressing one word redistributes energy without
+                altering the total. Identical bytes would mean misaki parsed
+                the mark and the model ignored it.
   3. LEXICON    Does the JobTalk entry fix the two-word reading?
   4. SOUNDS     The eight reaction sounds the prompt allows, spelled the way
                 the prompt spells them. Decide by ear — whether one lands as a
@@ -30,6 +33,7 @@ What each section decides:
                 marks and their ASCII lookalikes are measured here, so the
                 difference between them is visible rather than assumed.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -43,6 +47,7 @@ SPEED = 1.10
 GAIN = 1.4
 OUT = os.path.expanduser("~/markupcheck")
 
+SEC2 = chr(10) + "=== 2. AUDIBLE? does the mark change the audio at all ==="
 EM_DASH = "—"
 ELLIPSIS = "…"
 
@@ -76,6 +81,11 @@ def save(name, pcm):
         w.setframerate(RATE)
         w.writeframes(a.tobytes())
     return a
+
+
+def sha(pcm):
+    """Short content hash, for deciding whether two renders are the same audio."""
+    return hashlib.sha256(pcm).hexdigest()[:12]
 
 
 def rms(a):
@@ -123,16 +133,21 @@ for name, text in SPOKEN:
     bad = any(t in heard.lower() for t in ("plus", "minus", "bracket", "slash", "wibble"))
     print(f"{name:22} {len(a)/RATE:5.2f}s  {heard[:52]}{'   <-- FAIL' if bad else ''}")
 
-print("\n=== 2. AUDIBLE? does the mark change the audio at all ===")
-base = np.frombuffer(synth("That part is free for you."), dtype="<i2")
-for level in ("+1", "+2", "-1"):
-    a = np.frombuffer(synth(f"That part is [free]({level}) for you."), dtype="<i2")
-    same_len = abs(len(a) - len(base)) < RATE * 0.01
-    flat = same_len and abs(rms(a) - rms(base)) < 0.001
-    print(f"  [free]({level:2}): {len(a)/RATE:5.2f}s vs {len(base)/RATE:5.2f}s  "
-          f"rms {rms(a):.4f} vs {rms(base):.4f}"
-          f"{'   <-- no measurable change' if flat else ''}")
-print("  Listen to stress_up.wav against plain.wav before believing the meter.")
+print(SEC2)
+# COMPARE BYTES, NOT RMS. An earlier version of this check compared duration
+# and whole-clip RMS and reported "no measurable change" for [free](+1) — a
+# false negative. Stressing one word inside a sentence redistributes energy
+# without changing the total, so clip length and overall RMS both stay put
+# while the samples differ throughout. A hash cannot miss that.
+base = synth("That part is free for you.")
+print(f"  {'plain':13} {sha(base)}  {len(base)} bytes")
+for level in ("+1", "+2", "-1", "0.5"):
+    a = synth(f"That part is [free]({level}) for you.")
+    verdict = "IDENTICAL to plain  <-- the mark did nothing" if a == base else "differs"
+    print(f"  [free]({level:4}) {sha(a)}  {len(a)} bytes  {verdict}")
+print("  Differing bytes only prove the mark reached the model. Whether the")
+print("  emphasis is AUDIBLE, and whether it is pleasant, needs stress_up.wav")
+print("  against plain.wav and your ears.")
 
 print("\n=== 3. LEXICON: is the brand name one word? ===")
 BRAND = [
