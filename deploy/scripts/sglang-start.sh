@@ -38,6 +38,11 @@ LLM_MODEL="${LLM_MODEL:-google/gemma-4-E4B-it}"
 # 200 -- the LLM GPU sits at 0% and calls stall at a flat ~7s, looking like a
 # hang rather than a rejection. Raise it whenever the prompt grows.
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-8192}"
+# Share of the device SGLang reserves up front. 0.85 is right when the LLM
+# owns a card, which it did on the 4x 5090 box. On a single-GPU layout ASR
+# and TTS sit on the same device and need what is left, so
+# up-voice-gh200.sh lowers this.
+MEM_FRACTION="${MEM_FRACTION:-0.85}"
 HF_CACHE="${HF_CACHE:-$HOME/hf-cache}"
 NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
@@ -54,7 +59,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --model-path "$LLM_MODEL" \
     --host 0.0.0.0 --port 8000 \
     --context-length "$CONTEXT_LENGTH" \
-    --mem-fraction-static 0.85 \
+    --mem-fraction-static "$MEM_FRACTION" \
     --cuda-graph-max-bs 256 \
     --schedule-policy lpm \
     --enable-metrics \
