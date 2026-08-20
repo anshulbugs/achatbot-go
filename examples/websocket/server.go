@@ -594,12 +594,15 @@ func resolvePrompt(base, replace, suffix string) string {
 // consistent enough to be worth stating on every call rather than hoping each
 // tenant's prompt remembers them:
 //
-//   - Written filler is only safe when it is spelled the way the engine expects.
-//     Eight reaction sounds are allowed and spelled exactly, punctuation
-//     included, because the punctuation IS part of the sound: the trailing
-//     ellipsis is what makes "Hmmm…" trail off. Everything outside that list
-//     ("uh", "um", "er", written laughter) stays banned — those come out as
-//     letters and land as a glitch rather than as thinking.
+//   - Reaction words are allowed; reaction NOISES are not, and the line is
+//     whether it is a real word. Eight were tried on a live call: "Well…",
+//     "Really?", "Wow!" and "Oh!" sounded like a person and stayed. "Hmmm…",
+//     "Aww,", "Ooh —" and "Ahh," did not and were removed — kokoro pronounces
+//     them cleanly enough (ASR reads them back as words, not letters), so this
+//     is not the old "spoken as letters" failure. They simply sound like an
+//     imitation of the noise rather than someone making it, which no amount of
+//     spelling fixes. Judged by ear on a real call, which is the only way this
+//     question can be settled.
 //   - Digit strings read as quantities are unusable on a call. A phone number
 //     spoken as "three hundred twenty one million..." cannot be written down,
 //     and the caller has no way to ask for it again except to ask for all of it.
@@ -635,8 +638,8 @@ func resolvePrompt(base, replace, suffix string) string {
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no stage directions, and no symbol standing in for a word.
-- You have eight sounds for reacting, and only these eight. Write each one EXACTLY as shown, punctuation included, because the punctuation is part of the sound: "Hmmm…" for thinking or hesitating, "Well…" for easing gently into a point, "Ahh," for a warm realisation, "Aww," for sympathy, "Ooh —" for curiosity or pleasant surprise, "Wow!" for something impressive, "Oh!" for something you have just remembered, "Really?" for genuine surprise. Use at most one in a reply, at the start of a sentence, and only when you mean it.
-- Nothing outside that list. No "uh", no "um", no "er", no "aha", and no written laughter such as "ha", "haha" or "heh" — those are read out as letters and land as a fault rather than as thinking or amusement. If something is funny, say so in words, or use "Wow!" or "Oh!".
+- You have four words for reacting, and only these four. Write each one EXACTLY as shown, punctuation included, because the punctuation is part of the delivery: "Well…" for easing gently into a point, "Really?" for genuine surprise, "Wow!" for something impressive, "Oh!" for something you have just remembered. Use at most one in a reply, at the start of a sentence, and only when you mean it.
+- Nothing outside that list, and in particular no NON-WORD sounds. Never write "hmm", "hmmm", "ahh", "aww", "ooh", "uh", "um", "er", "aha", or written laughter such as "ha", "haha" or "heh". The speech engine does pronounce them, but they come out as an impression of a sound rather than as a person making it, which is worse than not reaching for it at all. If you need a beat, use a comma or a short sentence; if something is funny, say so in words, or use "Wow!" or "Oh!".
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.
 - Keep every reply under fifty words, and prefer two or three short sentences to one long one. The speech engine synthesises longer replies in separate pieces and joins them, and the joins are audible. A caller on the phone also stops listening well before fifty words.
