@@ -25,7 +25,13 @@ sleep 1
 # returns 404 — while cloudflared logs a healthy registered connection and the
 # service answers fine on localhost. Isolating the config is what makes the
 # public URL actually reach us.
-nohup setsid "$CF" --config /dev/null tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate \
+#
+# --protocol http2 goes with it. Dropping the host config also dropped the
+# `protocol: http2` it was setting, and cloudflared then defaults to QUIC, which
+# cannot dial out from this box: every attempt fails with `CRYPTO_ERROR 0x178
+# (remote): tls: no application protocol` and the tunnel registers ZERO
+# connections while still printing a URL. UDP egress is evidently filtered here.
+nohup setsid "$CF" --config /dev/null --protocol http2 tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate \
   > cloudflared.log 2>&1 < /dev/null &
 disown
 
