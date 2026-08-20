@@ -13,9 +13,14 @@ TTS_WORKERS="${TTS_WORKERS:-8}"
 NAME="${NAME:-kokoro-tts}"
 PORT="${PORT:-8880}"
 
+# --runtime=nvidia is not universal: this box may expose GPUs through CDI
+# instead, and passing the wrong one fails the container outright.
+source "$(dirname "$0")/gpu-flags.sh"
+gpu_docker_flags "$TTS_GPU" || exit 1
+
 docker rm -f "$NAME" 2>/dev/null || true
 docker run -d --name "$NAME" --restart unless-stopped \
-  --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$TTS_GPU" \
+  "${GPU_FLAGS[@]}" \
   --shm-size=8g \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -p 127.0.0.1:"$PORT":8880 \

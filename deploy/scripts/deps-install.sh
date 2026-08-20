@@ -45,8 +45,12 @@ else
   missing_root=1
 fi
 
-if docker info 2>/dev/null | grep -qi nvidia; then
-  ok "nvidia container runtime"
+# NOT a plain grep for "nvidia" in docker info. That matched the CDI device
+# lines on the GH200 box and reported OK while --runtime=nvidia — what the
+# start scripts passed — failed outright. gpu-flags.sh checks for the exact
+# mechanism the scripts will use and names which one it found.
+if source "$(dirname "$0")/gpu-flags.sh" && gpu_docker_flags 0 2>/dev/null; then
+  ok "nvidia container runtime (via $GPU_MODE_RESOLVED)"
 else
   warn "nvidia container runtime — the GPU services cannot start without it:"
   echo "         https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"

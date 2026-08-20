@@ -48,9 +48,14 @@ NAME="${NAME:-sglang}"
 PORT="${PORT:-8001}"
 mkdir -p "$HF_CACHE"
 
+# --runtime=nvidia is not universal: this box may expose GPUs through CDI
+# instead, and passing the wrong one fails the container outright.
+source "$(dirname "$0")/gpu-flags.sh"
+gpu_docker_flags "$LLM_GPU" || exit 1
+
 docker rm -f "$NAME" 2>/dev/null || true
 docker run -d --name "$NAME" --restart unless-stopped \
-  --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES="$LLM_GPU" \
+  "${GPU_FLAGS[@]}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -v "$HF_CACHE":/root/.cache/huggingface \
   -p 127.0.0.1:"$PORT":8000 --shm-size=8g \
