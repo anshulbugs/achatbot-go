@@ -10,6 +10,7 @@ import (
 	"github.com/weedge/pipeline-go/pkg/logger"
 
 	"achatbot/pkg/common"
+	"achatbot/pkg/ttsmarkup"
 )
 
 // VoiceProvider is a TTS provider whose voice and speed can be set per session.
@@ -70,6 +71,40 @@ type HTTPTTSProvider struct {
 	// voiceName, when set, is sent as the /tts "voice" (a fixed voice or, for
 	// Kani, a language tag) instead of mapping the numeric speaker id.
 	voiceName string
+
+	// markup says this service's front end understands kokoro's inline speech
+	// markup. OFF by default, and off is the safe state: when it is off the
+	// markup is removed before the request rather than sent to an engine that
+	// might read it out. Only the kokoro path sets it, because only kokoro
+	// runs misaki.
+	markup bool
+	// lexicon forces the pronunciation of specific words. Applied last, so it
+	// sees the model's finished sentence.
+	lexicon *ttsmarkup.Lexicon
+}
+
+// SetSpeechMarkup declares what this service can be sent.
+//
+// enabled means the front end parses "[word](+1)" and "[word](/phonemes/)";
+// lexicon may be nil. With enabled false the provider strips markup instead of
+// forwarding it, and the lexicon is not applied at all — there is no point
+// writing phonemes for an engine that cannot read them.
+func (p *HTTPTTSProvider) SetSpeechMarkup(enabled bool, lexicon *ttsmarkup.Lexicon) {
+	p.markup = enabled
+	p.lexicon = lexicon
+}
+
+// prepare turns the model's sentence into the exact string the service is
+// asked to speak.
+//
+// Ordering matters: the lexicon runs after the model's own markup is already
+// in place, and skips anything already wrapped, so a word the model spelled
+// out itself keeps the model's phonemes rather than gaining a second set.
+func (p *HTTPTTSProvider) prepare(text string) string {
+	if !p.markup {
+		return ttsmarkup.Strip(text)
+	}
+	return p.lexicon.Apply(text)
 }
 
 const httpTTSRate = 24000
@@ -199,6 +234,7 @@ func NewKaniProvider(baseURL, languageTag string, speed, gain float32) *HTTPTTSP
 }
 
 func (p *HTTPTTSProvider) request(text string) (*http.Response, error) {
+	text = p.prepare(text)
 	if p.openaiSpeech {
 		body, _ := json.Marshal(map[string]any{
 			"model":           p.model,

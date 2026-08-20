@@ -45,6 +45,9 @@ tts:
   speed: 1.1                 # was 1.28; lowered 14 Aug and never tested on a call
   gain: 1.8                  # tuned for kokoro, which is quiet. Do not reuse for another engine
   pool_size: 240
+  markup: true               # added 20 Aug — see step 4 before trusting it
+  pronunciations:
+    JobTalk: "ʤˈɑbtˌɔk"
 
 vad:
   stop_secs: 0.5             # half of the ~1s per-turn latency is this
@@ -70,6 +73,30 @@ re-download on first run.
 Read the preflight block `contract-start.sh` prints. Every optional feature
 degrades SILENTLY when its key is missing — no Daily key means no listen-in and
 no browser calls, with no error anywhere.
+
+## 4. Verify the speech markup before a call goes out
+
+```bash
+python3 deploy/scripts/verify-speech-markup.py
+```
+
+`tts.markup` lets the model wrap a word as `[word](+1)` to emphasise it, and
+lets `tts.pronunciations` force how a brand name is said. Kokoro's front end
+(misaki) consumes those brackets before synthesis whether or not it recognises
+what is inside them, so unparsed markup is dropped rather than read aloud —
+which is what makes this safe where SSML tags, bracketed stage cues and bare
+IPA stress marks were not. All three of those were measured being SPOKEN to a
+caller.
+
+That is a source-level argument, and it has to be confirmed by ear once per
+image. The script synthesises marked text, reads it back through parakeet, and
+fails loudly if a bracket survives into the transcript. It also writes wavs to
+`~/markupcheck` — listen to `stress_up.wav` against `plain.wav`, because
+whether the emphasis is *audible* is a question no meter answers.
+
+If anything comes back spoken, set `tts.markup: false`. The agent then strips
+markup before every request instead of forwarding it, and the prompt stops
+asking the model for it; nothing else changes.
 
 ## What was lost and is not coming back
 

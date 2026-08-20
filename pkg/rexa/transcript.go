@@ -3,6 +3,8 @@ package rexa
 import (
 	"sync"
 	"time"
+
+	"achatbot/pkg/ttsmarkup"
 )
 
 // Transcript accumulates every turn of a call for the end-of-call report.
@@ -54,7 +56,10 @@ func (t *Transcript) SeedGreeting(text string) {
 		return
 	}
 	zero := 0.0
-	t.turns = append(t.turns, MessageTurn{Role: RoleAgent, Content: text, T: &zero})
+	// The greeting goes straight from the dispatch to the synthesiser without
+	// passing through the session, so this is the only place its markup can
+	// come off.
+	t.turns = append(t.turns, MessageTurn{Role: RoleAgent, Content: ttsmarkup.Strip(text), T: &zero})
 	t.greeted = true
 }
 
@@ -77,6 +82,11 @@ func (t *Transcript) Add(role, content string) {
 	if content == "" {
 		return
 	}
+	// Belt and braces. The session already strips speech markup on its way
+	// out, but the report is the contract surface the tenant reads, and it is
+	// worth one regexp per turn to guarantee no future caller can put our
+	// plumbing in front of them.
+	content = ttsmarkup.Strip(content)
 	mapped := mapRole(role)
 	// Anything the model produces before the caller has spoken is a reply to a
 	// greeting the model never made — the greeting went straight to TTS. It was

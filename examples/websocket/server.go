@@ -42,6 +42,7 @@ import (
 	"achatbot/pkg/services/middleware"
 	"achatbot/pkg/telnyx"
 	"achatbot/pkg/transports"
+	"achatbot/pkg/ttsmarkup"
 	"achatbot/pkg/turngate"
 	"achatbot/pkg/types"
 	achatbot_frames "achatbot/pkg/types/frames"
@@ -397,12 +398,24 @@ func load(cfg *config.Config) (*common.ModuleProviderPool, *common.ModuleProvide
 			return p, nil
 		})
 	} else if cfg.TTS.Model == "kokoro_http" {
+		// Compiled once, shared by every provider in the pool: the table is
+		// read-only after this point and the regexp is safe for concurrent use.
+		speechLexicon := ttsmarkup.NewLexicon(cfg.TTS.Pronunciations)
+		// Tells the prompt builder it may ask the model for stress marks.
+		speechMarkupEnabled = cfg.TTS.Markup
+		if cfg.TTS.Markup {
+			log.Printf("tts: speech markup on, %d forced pronunciations", len(cfg.TTS.Pronunciations))
+		}
 		ttsPoolType = reflect.TypeOf(&tts.HTTPTTSProvider{})
 		common.RegisterNewFunc(ttsPoolType, func() (common.IPoolInstance, error) {
 			p := tts.NewHTTPTTSProvider(cfg.TTS.HTTPURL, cfg.TTS.SpeakerID, cfg.TTS.Speed, cfg.TTS.Gain)
 			if p == nil {
 				return nil, fmt.Errorf("failed to reach TTS service at %s", cfg.TTS.HTTPURL)
 			}
+			// Kokoro is the one service that runs misaki, so it is the one
+			// service allowed to receive speech markup. Every other provider
+			// leaves this unset and strips instead.
+			p.SetSpeechMarkup(cfg.TTS.Markup, speechLexicon)
 			return p, nil
 		})
 	} else {
@@ -615,11 +628,49 @@ func resolvePrompt(base, replace, suffix string) string {
 const callStyleRules = `
 Delivery rules for this call, which override any conflicting instruction above:
 - You are speaking on a live phone call. Everything you write is read aloud by a speech engine, so write words to be spoken, never text to be read. No markdown, no bullet points, no emoji, no symbols, no stage directions.
-- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words.
+- Do not write filler sounds or written laughter. Never write "hm", "hmm", "uh", "um", "er", "ah", "aha", "ha", "haha", "heh" or similar. A speech engine pronounces them as words, so they land as a fault rather than as thinking or amusement. If you need a pause, use a comma or a short sentence; if something is funny, say so in words. Real words are different and you may open with them: "Well," to soften what follows, "Oh," for something you have just realised, "Really?" for genuine surprise, "Wow," for something impressive. Those are said naturally because they are words.
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.
 - Keep every reply under fifty words, and prefer two or three short sentences to one long one. The speech engine synthesises longer replies in separate pieces and joins them, and the joins are audible. A caller on the phone also stops listening well before fifty words.
-- Punctuation is your only control over rhythm, so use it deliberately. A full stop gives the longest pause, three dots give nearly the same pause without ending the sentence, and a comma gives a shorter one. Use three dots where a person would pause for thought mid-sentence.`
+- Punctuation is your only control over rhythm, so use it deliberately. A full stop gives the longest pause, three dots give nearly the same pause without ending the sentence, and a comma gives a shorter one. Use three dots where a person would pause for thought mid-sentence.
+- Write the way people talk, not the way people write. Use contractions every time one fits: "it's", "you're", "don't", "can't", "I'll", "there's". Keep sentences under twenty words. Put a question mark on every question, because that is what lifts your voice at the end of it — a question written as a statement sounds like a demand.
+- Spell out anything that is not a word as the words you want said. "Twenty-four seven", not "24/7". "Percent", not "%". "And", not "&". "About", not "approx". "Nine to five", not "9-5". The engine reads symbols literally and a caller cannot ask you to repeat a symbol.
+- Vary the energy. A reply where every sentence runs the same length at the same pitch reads as a recording, and callers hang up on recordings. Follow a long sentence with a short one. Put the word that matters at the end of the sentence, where it lands hardest. Use an exclamation mark where you genuinely mean it, and nowhere else.`
+
+// speechMarkupEnabled mirrors cfg.tts.markup for the prompt builder.
+//
+// Process-wide rather than per-session on purpose: it describes what the ONE
+// speech service behind this process can parse, which no individual call gets
+// to disagree with. Written once while the TTS pool is registered, before any
+// session exists, and only read after that.
+var speechMarkupEnabled bool
+
+// speechMarkupRules are appended only when the service in front of us parses
+// them, because they are the one instruction here that would be unsafe to give
+// blindly.
+//
+// Safe to give when kokoro IS the engine, and that is worth being precise
+// about, because the last two attempts at expressive markup on this pipeline
+// both ended with the markup being read to a caller. Kokoro's front end is
+// misaki, whose G2P preprocesses "[word](target)" before anything is
+// synthesised: the bracketed text is KEPT and the parenthesised target is
+// CONSUMED whether or not it is recognised (misaki/en.py, G2P.preprocess). So
+// a mark the model gets wrong is silently ignored rather than spoken — which
+// is exactly what bare IPA stress marks failed to do, since nothing in the
+// pipeline was there to consume them, and "ˈfree" reached a caller as
+// "stress-free".
+//
+// Deliberately small. Misaki also accepts half steps (+0.5), levels past one,
+// and a lexicon-alias form, and none of them are here: three or four
+// emphasised words is what makes a sentence sound intended, and a larger
+// vocabulary of marks only gives the model more ways to over-mark.
+//
+// Pronunciation markup is NOT asked of the model. That one is deterministic —
+// a brand name's phonemes never change — so it lives in tts.pronunciations and
+// is applied on the way into the request instead of being something the model
+// has to remember on every turn.
+const speechMarkupRules = `
+- You have one piece of markup, and it is the single exception to the no-markdown rule above. Writing a word as [word](+1) tells the speech engine to lean on it, and [word](-1) tells it to pass over it lightly. Put [word](+1) on the word that carries the point of the sentence — the benefit, the number, the "your", the "free" — and use it on no more than three or four words in a whole reply. Emphasising everything is the same as emphasising nothing and comes back out as a monotone. The brackets are an instruction to the engine: they are never spoken and nobody ever sees them.`
 
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
@@ -636,11 +687,15 @@ Delivery rules for this call, which override any conflicting instruction above:
 // there the model answers the caller instead of opening with a preamble of its
 // own.
 func withCallStyle(prompt, spokenGreeting string) string {
+	rules := callStyleRules
+	if speechMarkupEnabled {
+		rules += speechMarkupRules
+	}
 	out := prompt
 	if out == "" {
-		out = strings.TrimSpace(callStyleRules)
+		out = strings.TrimSpace(rules)
 	} else {
-		out += "\n" + callStyleRules
+		out += "\n" + rules
 	}
 	if spokenGreeting != "" {
 		out += "\n\n## What has already happened on this call\n" +

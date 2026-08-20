@@ -205,10 +205,38 @@ tts:
   model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
   http_url: "http://127.0.0.1:8880"
   speaker_id: 3              # 3 = Heart (US female). See UI voice list for ids.
-  speed: 1.28                 # 1.0 = normal
+  speed: 1.10                # 1.0 = normal. Kokoro already runs 176-195 wpm at
+                             # 1.0 against 150-160 for natural phone speech, so
+                             # this is a small lift, not a rescue. 1.28 was
+                             # measured at 212-232 wpm and sounded rushed.
   gain: 1.4                  # output loudness multiplier (per-call overridable)
   pool_size: 64
   num_threads: 12            # only used by the CPU sherpa model
+
+  # Inline speech markup. Kokoro's front end (misaki) parses "[word](+1)" to
+  # raise the stress on a word and "[word](/phonemes/)" to force a
+  # pronunciation, and CONSUMES the brackets whether or not it understands the
+  # target — so unlike SSML or stage cues, unparsed markup here is dropped
+  # rather than read to the caller.
+  #
+  # On: the model is told it may emphasise words, and the table below is
+  # applied. Off: any markup is stripped before the request. Only kokoro_http
+  # honours this; every other TTS provider strips regardless.
+  markup: true
+
+  # Forced pronunciations, applied deterministically just before synthesis so a
+  # name sounds the same on every turn of every call. Requires markup: true.
+  #
+  # The alphabet is misaki's, NOT plain IPA. Affricates are single characters
+  # ("ʤ" and "ʧ", never "dʒ" or "tʃ"), and the diphthongs are written A I O W Y
+  # (A = ay, I = eye, O = oh, W = ow, Y = oy). Stress is "ˈ" primary and "ˌ"
+  # secondary, placed before the stressed syllable. A character outside that
+  # vocabulary is dropped by the model's tokeniser, which changes the word
+  # quietly rather than failing — hear every entry once before trusting it.
+  #
+  # Keys match whole words, case-insensitively.
+  pronunciations:
+    JobTalk: "ʤˈɑbtˌɔk"      # otherwise read as two words, "Job Talk"
 
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)

@@ -339,6 +339,22 @@ type TTSConfig struct {
 	// HTTPVoice is the voice name for OpenAI-speech-style GPU TTS services
 	// (used when Model is "voxtral_http"), e.g. "casual_female".
 	HTTPVoice string `mapstructure:"http_voice"`
+	// Markup enables kokoro's inline speech markup: "[only](+1)" to raise the
+	// stress on a word and "[JobTalk](/ʤˈɑbtˌɔk/)" to force a pronunciation.
+	//
+	// Only meaningful for the kokoro path, whose misaki front end parses it.
+	// Turning it on also tells the model it may use stress marks; leaving it
+	// off strips any that appear rather than forwarding them.
+	Markup bool `mapstructure:"markup"`
+	// Pronunciations forces how specific words are said, as word -> misaki
+	// phonemes (slashes optional). It is applied deterministically just before
+	// synthesis, so a brand or a contact name sounds the same on every turn of
+	// every call without the model having to remember it.
+	//
+	// The alphabet is misaki's, not plain IPA: affricates are the single
+	// characters "ʤ" and "ʧ", and the diphthongs are written A I O W Y.
+	// Requires Markup.
+	Pronunciations map[string]string `mapstructure:"pronunciations"`
 }
 
 // LLMConfig selects the language-model provider, endpoint, and generation mode.

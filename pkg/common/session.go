@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"achatbot/pkg/ttsmarkup"
 )
 
 // LLMObserver receives the time a caller waited for the first token of one
@@ -195,6 +197,16 @@ func (s *Session) FlushAgentTurn(interrupted bool) {
 	s.spokenSecs = 0
 	fn := s.agentObserver
 	s.llmMu.Unlock()
+
+	// Speech markup comes off here, before anything else touches the turn.
+	//
+	// This is the only exit from the session into transcripts, reports and
+	// live feeds, so it is the right place to draw the line between what the
+	// synthesiser was told and what the caller heard. It has to happen before
+	// the trim below as well: trimToSpoken measures the text in characters
+	// against the audio actually sent, and markup adds characters that were
+	// never spoken, which would cut an interrupted turn in the wrong place.
+	text = ttsmarkup.Strip(text)
 
 	if interrupted {
 		text = trimToSpoken(text, spoken, rate)
