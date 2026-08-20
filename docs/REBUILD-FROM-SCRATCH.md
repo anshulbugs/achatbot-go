@@ -79,3 +79,25 @@ no browser calls, with no error anywhere.
 - **Built docker images and model caches.** Both rebuild from this repo.
 - **`config.yaml.kokoro`**, a hand-made rollback copy. Superseded by the block
   above.
+
+## Secrets status (as of 14 Aug, after the box was lost)
+
+Held locally in `deploy/rexa-secrets.env` and `deploy/telnyx.env`, both
+gitignored. Copy them to the new instance by hand — scp them, do not commit
+them.
+
+| variable | status |
+|---|---|
+| `REXA_OUTBOUND_HMAC_SECRET` | have it |
+| `REXA_INBOUND_HMAC_SECRET` | have it |
+| `TELNYX_API_KEY` | recovered from `Agentv2/demo.env`. 58 chars, the same length the lost box ran |
+| `TELNYX_APP_ID` | recovered, `2580092767426316174` — matches the connection id seen in the running config |
+| `TELNYX_FROM_NUMBER` | `+18483010124`, from the agent's own startup line |
+| `DAILY_API_KEY` | recovered from `Agentv2/demo.env` — **verify it is current**, that file belongs to another project and may hold a rotated key |
+| `REXA_REDIS_PASSWORD` | **still missing.** Only needed when a dispatch names a Redis host without a password; live call events fail silently without it |
+| `AGENT_BASE_URL` | not a secret. The tunnel hostname changes on every restart and `contract-start.sh` sets it |
+
+A `.gitignore` hole was closed at the same time: `deploy/rexa-secrets.env` was
+not matched by any rule, so a `git add -A` would have committed the HMAC
+secrets that authenticate every platform callback. The rules now cover `*.env`
+with an exception for `*.env.example`.

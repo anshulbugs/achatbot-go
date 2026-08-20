@@ -62,3 +62,10 @@ telnyx.env
 deploy/avatar/*.mp4
 deploy/avatar/*.png
 deploy/avatar/*.jpg
+
+# Real secrets. rexa-secrets.env was NOT covered here, so a `git add -A` would
+# have committed the HMAC secrets that authenticate every platform callback.
+# Cover the whole family rather than naming files one at a time.
+*.env
+!*.env.example
+rexa-secrets.env
