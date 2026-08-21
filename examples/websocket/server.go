@@ -594,18 +594,27 @@ func resolvePrompt(base, replace, suffix string) string {
 // consistent enough to be worth stating on every call rather than hoping each
 // tenant's prompt remembers them:
 //
-//   - NO reaction words or sounds at all, and this one is settled by ear over
-//     three rounds of live calls rather than by argument. Eight were tried:
-//     "Hmmm…", "Aww,", "Ooh —" and "Ahh," went first, then "Wow!" and "Oh!",
-//     then "Well…" and "Really?". Nothing survived.
+//   - NO reaction words or sounds at all. Settled by ear, and BOTH ways of
+//     producing them have now been tried and rejected.
 //
-//     None of it was the old "spoken as letters" failure — kokoro pronounces
-//     all of them cleanly and our own ASR reads them back as words. They simply
-//     sound performed rather than felt. Being a real English word turned out
-//     not to be enough, which was the hypothesis each earlier round rested on;
-//     it was wrong three times, so the rule is now a flat prohibition rather
-//     than a shorter list. Do not re-add one on the theory that it ought to
-//     work — only a call can settle it, and every call so far has said no.
+//     By SPELLING, over three rounds: "Hmmm…", "Aww,", "Ooh —" and "Ahh," went
+//     first, then "Wow!" and "Oh!", then "Well…" and "Really?". Each round
+//     rested on the idea that being a real English word was what separated the
+//     good from the bad; that was wrong every time, and nothing survived.
+//
+//     By FORCED PHONEMES, which was the obvious remaining hypothesis — that
+//     the failure was kokoro reading letters rather than the sound itself.
+//     Twenty-odd variants were rendered through the phoneme override
+//     ("[x](/hˈɑhɑ/)" and so on) covering laughter, hmm, mhm, uh-huh, ah, oh,
+//     ooh, aww, wow and yeah, both standalone and inside real sentences. None
+//     worked either.
+//
+//     So the constraint is the MODEL, not the input. Kokoro is trained on read
+//     speech; laughter and hesitation noises are not in that distribution, and
+//     stating the phonemes precisely makes it SAY the sound more precisely
+//     rather than make it. No amount of spelling or phonetics fixes that —
+//     only a different engine would, and that is a model decision, not a
+//     prompt one. Do not spend another round here.
 //
 //   - Digit strings read as quantities are unusable on a call. A phone number
 //     spoken as "three hundred twenty one million..." cannot be written down,
