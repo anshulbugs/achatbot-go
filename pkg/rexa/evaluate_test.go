@@ -137,6 +137,29 @@ func TestEvaluatorTreatsAQueuedLLMAsBusy(t *testing.T) {
 	}
 }
 
+// The queue almost never moves on this hardware: measured at 100 concurrent
+// requests, num_queue_reqs stayed 0 while num_running_reqs sat at ~105. If
+// running requests did not also count as busy, the gate would be inert exactly
+// when it is needed.
+func TestEvaluatorTreatsRunningRequestsAsBusyEvenWithAnEmptyQueue(t *testing.T) {
+	m := NewMetrics(100)
+	m.setSGLang(SGLangSnapshot{OK: true, QueuedReqs: 0, RunningReqs: 105, at: time.Now()})
+	e, _ := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
+	if !e.busy() {
+		t.Error("a busy LLM with an empty queue must still count as busy")
+	}
+}
+
+func TestEvaluatorIgnoresATrickleOfLLMTraffic(t *testing.T) {
+	m := NewMetrics(100)
+	// A handful in flight is what normal call traffic looks like.
+	m.setSGLang(SGLangSnapshot{OK: true, RunningReqs: EvalBusyRunningReqs - 1, at: time.Now()})
+	e, _ := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
+	if e.busy() {
+		t.Error("ordinary call traffic must not block evaluations forever")
+	}
+}
+
 func TestEvaluatorRefusesIncompleteRequests(t *testing.T) {
 	e, _ := newTestEvaluator(&fakeLLM{}, NewMetrics(10), time.Second)
 	_, err := e.Run(context.Background(), EvalRequest{SessionID: "s1"})
