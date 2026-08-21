@@ -1,0 +1,33 @@
+# Named tunnel for the GH200 voice agent -> https://agent.rexa.ai
+#
+# WHY NAMED AND NOT A QUICK TUNNEL: a quick tunnel gets a new random hostname
+# every time it restarts, which is fine for testing and useless as a platform
+# base URL. This one is stable across restarts and reboots.
+#
+# It lives at its OWN path, not cloudflared's default, and every invocation
+# names it explicitly with --config. Reading the default config is exactly what
+# silently broke things twice on this project: a quick tunnel here inherited the
+# Lambda image's /etc/cloudflared/config.yml and returned 404 for everything,
+# and on the DGX box "cloudflared tunnel route dns" used that config's tunnel
+# instead of the one named on the command line, pointing DNS at the wrong
+# tunnel entirely.
+tunnel: fd427124-c88e-489f-8722-55e71bc4bead
+credentials-file: /home/ubuntu/.cloudflared/fd427124-c88e-489f-8722-55e71bc4bead.json
+
+# http2, not the QUIC default. UDP egress is filtered on this box: QUIC fails
+# with "CRYPTO_ERROR 0x178 (remote): tls: no application protocol" and registers
+# ZERO connections while still printing a healthy-looking startup.
+protocol: http2
+
+# Only what should be public. The contract instance on :4399 carries HMAC and
+# bearer auth; nothing else on this box is exposed, and the catch-all 404 means
+# a stray hostname pointed here reaches nothing rather than something.
+ingress:
+  - hostname: agent.rexa.ai
+    service: http://127.0.0.1:4399
+  # Second name on the SAME tunnel, on a zone whose bot rules do not block the
+  # OpenAI SDK User-Agent. Costs nothing to carry and gives the platform a way
+  # in that needs no WAF change.
+  - hostname: voiceagent.aptask.com
+    service: http://127.0.0.1:4399
+  - service: http_status:404
