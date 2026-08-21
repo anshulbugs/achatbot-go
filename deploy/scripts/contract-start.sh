@@ -3,6 +3,10 @@
 #
 #   bash deploy/scripts/contract-start.sh
 #
+# PUBLIC_URL=https://agent.rexa.ai skips the quick tunnel entirely and uses that
+# hostname — for boxes where a NAMED tunnel is managed separately and the URL
+# must stay stable across restarts.
+#
 # Idempotent: stops the previous instance and its tunnel, starts a new one,
 # waits for readiness, and prints both addresses. Assumes the GPU services are
 # already up (deploy/scripts/up-voice-4gpu.sh does those).
@@ -131,6 +135,21 @@ pkill -f "cloudflared tunnel --url http://127.0.0.1:${PORT}" 2>/dev/null || true
 pkill -f "deploy/sidecar/room_agent.py" 2>/dev/null || true
 sleep 2
 
+# A NAMED tunnel, if one is already fronting this port, wins over a quick one.
+#
+# PUBLIC_URL is how a deployment says "the hostname is stable and managed
+# elsewhere". A quick tunnel gets a new random trycloudflare name on every
+# restart, which is fine for testing and useless as a base URL the platform has
+# configured — so when a named tunnel exists we must not start a second tunnel
+# competing for the same port, and must not overwrite the URL we print.
+if [ -n "${PUBLIC_URL:-}" ]; then
+  log "Public URL (named tunnel, managed outside this script)"
+  PUBLIC="${PUBLIC_URL%/}"
+  echo "    $PUBLIC"
+  printf '%s
+' "$PUBLIC" > "tunnel-url-${PORT}.txt"
+else
+
 log "Public tunnel for the browser and Telnyx"
 [ -x "$CF" ] || command -v cloudflared >/dev/null || die "cloudflared not found (set CLOUDFLARED=)"
 rm -f "cf-${PORT}.log"
@@ -160,6 +179,8 @@ done
 [ -n "$PUBLIC" ] || die "tunnel did not come up — see cf-${PORT}.log"
 echo "$PUBLIC" > "tunnel-url-${PORT}.txt"
 echo "    $PUBLIC"
+
+fi   # end of the quick-tunnel branch
 
 log "Starting the contract instance on :${PORT}"
 set -a

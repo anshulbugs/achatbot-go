@@ -11,7 +11,7 @@ works.
 
 | | |
 |---|---|
-| Base URL | `https://<agent-host>/v1` |
+| Base URL | `https://agent.rexa.ai/v1` |
 | Auth | `Authorization: Bearer <REXA_LLM_API_KEY>` |
 | Model | `google/gemma-4-E4B-it` (or omit `model` — it fills in) |
 | Context window | 8192 tokens, prompt + reply combined |
@@ -20,7 +20,7 @@ works.
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="https://<agent-host>/v1", api_key=REXA_LLM_API_KEY)
+client = OpenAI(base_url="https://agent.rexa.ai/v1", api_key=REXA_LLM_API_KEY)
 
 resp = client.chat.completions.create(
     model="google/gemma-4-E4B-it",
@@ -37,7 +37,7 @@ print(resp.choices[0].message.content)
 `curl` equivalent:
 
 ```bash
-curl https://<agent-host>/v1/chat/completions \
+curl https://agent.rexa.ai/v1/chat/completions \
   -H "Authorization: Bearer $REXA_LLM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":100}'
@@ -91,15 +91,15 @@ or a mobile client.
 To rotate: we regenerate it on the agent and hand you the new one. Old key stops
 working at that moment, so coordinate.
 
-## The agent host, and a caveat
+## The agent host
 
-Today the agent is reachable on a **Cloudflare quick tunnel**, and that hostname
-**changes every time the agent restarts**. Fine for testing, wrong for a
-configured integration.
+```
+https://agent.rexa.ai
+```
 
-Before you wire this into anything that matters, ask us for the stable hostname
-— we will move it onto a named Cloudflare tunnel with a fixed name. Until then,
-expect the URL to change and do not hard-code it.
+Stable. It is a **named Cloudflare tunnel**, so it survives agent restarts and
+reboots — unlike the temporary `*.trycloudflare.com` names used during
+bring-up, which changed every time. Safe to put in config.
 
 Do **not** use `http://<box-ip>:4399`. That port is firewalled from the
 internet, and it would be plain HTTP, which is wrong for anything carrying a
@@ -109,10 +109,10 @@ key.
 
 ```bash
 # is the agent up?
-curl https://<agent-host>/health
+curl https://agent.rexa.ai/health
 
 # is the key good?  (200 = yes, 401 = no)
-curl -o /dev/null -w '%{http_code}\n' -X POST https://<agent-host>/v1/chat/completions \
+curl -o /dev/null -w '%{http_code}\n' -X POST https://agent.rexa.ai/v1/chat/completions \
   -H "Authorization: Bearer $REXA_LLM_API_KEY" -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":5}'
 ```
