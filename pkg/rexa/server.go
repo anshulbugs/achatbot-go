@@ -81,12 +81,10 @@ type Server struct {
 	verifier   *Verifier
 	dispatcher Dispatcher
 	metrics    *Metrics
-	// eval backs POST /evaluate. Nil until SetEvaluator is called, and the
-	// route is only registered when it is non-nil — a deployment without an
-	// LLM answers 404 rather than accepting work it cannot do.
-	eval *Evaluator
-	// llmProxy backs POST /v1/chat/completions. Same rule: no key configured,
-	// no route, rather than an unauthenticated model on a public URL.
+	// llmProxy backs POST /v1/chat/completions. Nil until SetLLMProxy is
+	// called, and the route is only registered when it is non-nil — no key
+	// configured means no route, rather than an unauthenticated model on a
+	// public URL.
 	llmProxy *LLMProxy
 }
 
@@ -119,10 +117,6 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /connection", s.handlePhone)
 	mux.HandleFunc("POST /incoming", s.handleIncoming)
 	mux.HandleFunc("POST /connection_webrtc", s.handleWebrtc)
-	// Registered only when an evaluator exists. See SetEvaluator.
-	if s.eval != nil {
-		mux.HandleFunc("POST /evaluate", s.handleEvaluate)
-	}
 	// Registered only when a bearer key is configured. See SetLLMProxy.
 	if s.llmProxy != nil {
 		mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)

@@ -163,21 +163,15 @@ type ServerConfig struct {
 	// RecordCalls asks Telnyx to record every answered call (dual channel, mp3).
 	// Recordings are billed and stored by Telnyx — keep this off for large runs.
 	RecordCalls bool `mapstructure:"record_calls"`
-	// EvalEnabled turns on POST /evaluate, the end-of-call evaluation endpoint.
-	//
-	// Off by default. It runs the SAME LLM the calls use, so it is a deliberate
-	// decision to share that capacity, not something a deployment should
-	// acquire by upgrading.
-	EvalEnabled bool `mapstructure:"eval_enabled"`
-	// EvalConcurrency is how many evaluations may run at once. Small on
-	// purpose: a burst of hangups must not become a burst of transcript-sized
+	// LLMConcurrency is how many platform LLM requests may run at once. Small
+	// on purpose: a burst from the platform must not become a burst of large
 	// prefills in front of live callers. Zero means 2.
-	EvalConcurrency int `mapstructure:"eval_concurrency"`
-	// EvalMaxWaitSecs is how long background work waits for a quiet box before
+	LLMConcurrency int `mapstructure:"llm_concurrency"`
+	// LLMMaxWaitSecs is how long such a request waits for a quiet box before
 	// running anyway. Seconds, not minutes — a request that waits forever is a
 	// broken feature, and past this point the concurrency cap is what bounds
 	// the cost. Zero means 60.
-	EvalMaxWaitSecs int `mapstructure:"eval_max_wait_secs"`
+	LLMMaxWaitSecs int `mapstructure:"llm_max_wait_secs"`
 	// LLMAPIKey enables POST /v1/chat/completions, the OpenAI-compatible
 	// endpoint the platform can point any SDK at. Empty means the route is not
 	// registered at all.

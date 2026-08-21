@@ -105,17 +105,6 @@ Do **not** use `http://<box-ip>:4399`. That port is firewalled from the
 internet, and it would be plain HTTP, which is wrong for anything carrying a
 key.
 
-## If you want call evaluation specifically
-
-There is also `POST /evaluate` — HMAC-signed like `/connection`, takes a
-transcript and a rubric, returns the model's answer. It handles the fiddly parts
-for you: it trims over-long transcripts from the middle rather than the ends,
-and tells the model the text came from speech recognition so it does not mark
-the agent down for the recogniser's mistakes.
-
-Use `/v1/chat/completions` if you would rather own the prompt. Both share the
-same 60-second gate and the same 2-request budget.
-
 ## Quick checks
 
 ```bash
