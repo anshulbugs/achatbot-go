@@ -8,11 +8,11 @@ import (
 // Gate is the admission control that keeps background GPU work off the calls'
 // critical path.
 //
-// ONE GATE FOR ALL BACKGROUND WORK, deliberately. Evaluations and ad-hoc
-// generation both run on the same GPU the calls run on, and giving each its own
-// cap would mean the real limit is the sum of them — which is a limit nobody
-// chose. Sharing one Gate means the agent has a single, stated budget for
-// everything that is not a live call.
+// ONE GATE FOR ALL BACKGROUND WORK, deliberately. Anything the platform asks
+// the model for runs on the same GPU the calls run on, so the agent keeps a
+// single, stated budget for everything that is not a live call rather than one
+// budget per feature — which would make the real limit their sum, a limit
+// nobody chose.
 //
 // What it does, in order:
 //
@@ -55,11 +55,11 @@ func NewGate(metrics *Metrics, concurrency int, maxWait time.Duration) *Gate {
 	}
 }
 
-// EvalBusyRunningReqs is how many in-flight LLM generations count as "the box
+// GateBusyRunningReqs is how many in-flight LLM generations count as "the box
 // is working". Live calls generate few concurrent requests — a turn takes about
 // a second and a caller speaks every fifteen or so, so even sixty calls sit
 // around five in flight. Anything well above that is a real burst.
-const EvalBusyRunningReqs = 8
+const GateBusyRunningReqs = 8
 
 // busy reports whether the box is currently too loaded to take background work.
 //
@@ -94,7 +94,7 @@ func (g *Gate) busy() bool {
 		if snap.SGLang.QueuedReqs > 0 {
 			return true
 		}
-		if snap.SGLang.RunningReqs >= EvalBusyRunningReqs {
+		if snap.SGLang.RunningReqs >= GateBusyRunningReqs {
 			return true
 		}
 	}

@@ -644,34 +644,31 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 	srv := rexa.NewServer(outbound, rexa.NewMemoryNonceStore(),
 		&platformDispatcher{publicURL: strings.TrimRight(publicURL, "/")}, rexaMetrics)
 	// End-of-call evaluation, if this deployment opted in. Installed BEFORE
-	// Routes, because Routes only registers /evaluate when an evaluator exists
+	// Routes, because Routes only registers the path when a proxy exists
 	// — an agent without one answers 404 rather than accepting work it cannot
 	// do.
-	// ONE gate for both background endpoints. Giving each its own cap would
-	// make the real limit their sum, which is a limit nobody chose.
-	if cfg.Server.EvalEnabled || os.Getenv("REXA_LLM_API_KEY") != "" {
+	// The platform's own use of the model: POST /v1/chat/completions, bearer
+	// auth. Installed BEFORE Routes, because Routes only registers the path
+	// when a proxy exists — no key configured means no route, rather than an
+	// unauthenticated model on a public URL.
+	if key := os.Getenv("REXA_LLM_API_KEY"); key != "" {
 		if cfg.LLM.BaseURL == "" || cfg.LLM.Model == "" {
-			log.Printf("rexa: background LLM endpoints DISABLED — llm.base_url or llm.model is empty")
+			log.Printf("rexa: /v1/chat/completions DISABLED — REXA_LLM_API_KEY is set but " +
+				"llm.base_url or llm.model is empty")
 		} else {
-			client := newEvalLLMClient(cfg.LLM.BaseURL, cfg.LLM.Model)
-			gate := rexa.NewGate(rexaMetrics, cfg.Server.EvalConcurrency,
-				time.Duration(cfg.Server.EvalMaxWaitSecs)*time.Second)
-			if cfg.Server.EvalEnabled {
-				srv.SetEvaluator(rexa.NewEvaluator(client, gate))
-				log.Printf("rexa: /evaluate enabled")
-			}
-			if key := os.Getenv("REXA_LLM_API_KEY"); key != "" {
-				proxy := rexa.NewLLMProxy(client, gate, key, cfg.LLM.Model, cfg.Server.LLMMaxTokensCap)
-				srv.SetLLMProxy(proxy)
-				// The EFFECTIVE cap, not the config value: an absent setting
-				// would otherwise log "capped at 0", which reads as "no
-				// generation allowed" and is the opposite of what is enforced.
-				log.Printf("rexa: /v1/chat/completions enabled (bearer auth, non-streaming, "+
-					"max_tokens capped at %d)", proxy.MaxTokensCap())
-			}
-			log.Printf("rexa: background LLM work shares model=%s with live calls and yields to "+
-				"them (concurrency=%d, max wait=%ds)",
-				cfg.LLM.Model, cfg.Server.EvalConcurrency, cfg.Server.EvalMaxWaitSecs)
+			gate := rexa.NewGate(rexaMetrics, cfg.Server.LLMConcurrency,
+				time.Duration(cfg.Server.LLMMaxWaitSecs)*time.Second)
+			proxy := rexa.NewLLMProxy(newLLMClient(cfg.LLM.BaseURL, cfg.LLM.Model),
+				gate, key, cfg.LLM.Model, cfg.Server.LLMMaxTokensCap)
+			srv.SetLLMProxy(proxy)
+			// The EFFECTIVE cap, not the config value: an absent setting would
+			// otherwise log "capped at 0", which reads as "no generation
+			// allowed" and is the opposite of what is enforced.
+			log.Printf("rexa: /v1/chat/completions enabled (bearer auth, non-streaming, "+
+				"model=%s, max_tokens capped at %d) — it shares the LLM with live calls "+
+				"and yields to them (concurrency=%d, max wait=%ds)",
+				cfg.LLM.Model, proxy.MaxTokensCap(),
+				cfg.Server.LLMConcurrency, cfg.Server.LLMMaxWaitSecs)
 		}
 	}
 	srv.Routes(mux)

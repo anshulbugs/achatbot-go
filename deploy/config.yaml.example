@@ -150,7 +150,8 @@ server:
   # SGLang base URLs (not the /v1 path) whose /metrics is polled every 5s for
   # prefix-cache hit rate and queue depth. Shown on /dashboard and /health;
   # nothing here refuses traffic. Empty disables it.
-  # REQUIRED for /evaluate to yield properly, and worth setting regardless:
+  # REQUIRED for /v1/chat/completions to yield to calls properly, and worth
+  # setting regardless:
   # without it the dashboard shows a permanently idle LLM. One entry per
   # replica, base URL not /metrics.
   sglang_metrics_urls: ["http://127.0.0.1:8001"]
@@ -249,40 +250,30 @@ tts:
   pronunciations:
     JobTalk: "ʤˈɑbtˌɔk"      # otherwise read as two words, "Job Talk"
 
-  # END-OF-CALL EVALUATION — POST /evaluate on the contract instance (:4399).
+  # PLATFORM ACCESS TO THE LLM — POST /v1/chat/completions on the contract
+  # instance (:4399), OpenAI-compatible, bearer auth.
   #
-  # Lets the platform have a call transcript judged by the LLM without ever
-  # reaching the LLM itself. That matters: sglang listens on 127.0.0.1 with NO
-  # api key, so it is safe only because nothing outside the box can reach it.
-  # This endpoint reuses the same HMAC envelope as /connection.
-  #
-  # It shares the GPU with live calls, so it is built to get out of their way:
-  # it waits for a quiet box before starting, runs at most eval_concurrency at
-  # once, and gives up waiting after eval_max_wait_secs and runs anyway (a
-  # request that waits forever is a broken feature). Expect seconds of latency,
-  # by design.
-  #
-  # Off by default — sharing call capacity should be a decision, not something
-  # a deployment inherits.
-  eval_enabled: false
-  eval_concurrency: 2        # simultaneous evaluations; a burst of hangups must
-                             # not become a burst of transcript-sized prefills
-  eval_max_wait_secs: 60     # how long to wait for a lull before running anyway
-  llm_max_tokens_cap: 2048   # ceiling on /v1/chat/completions regardless of the
-                             # request; generation time is what holds a slot
-
-  # POST /v1/chat/completions — an OpenAI-compatible endpoint for the platform
-  # to use the model for anything: summaries, extraction, drafting. Point any
-  # OpenAI SDK at https://<agent>/v1 with the bearer key.
+  # Lets the platform use the model for anything — summaries, extraction,
+  # scoring, drafting — without an agent deploy per use case. That matters:
+  # sglang listens on 127.0.0.1 with NO api key, so it is safe only because
+  # nothing outside the box can reach it. The agent is the gatekeeper.
   #
   # Enabled by REXA_LLM_API_KEY in rexa-secrets.env, NOT here — it is a
-  # credential. Empty means the route is not registered at all, rather than an
-  # unauthenticated model on a public URL.
+  # credential. Empty means the route is not registered at all.
   #
-  # Non-streaming only: a stream holds a background slot for the whole
-  # generation and would make the gate's accounting a lie. It shares
-  # eval_concurrency and eval_max_wait_secs with /evaluate, so there is ONE
-  # budget for everything that is not a live call.
+  # It shares the GPU with live calls, so it is built to get out of their way:
+  # it waits for a quiet box before starting, runs at most llm_concurrency at
+  # once, and gives up waiting after llm_max_wait_secs and runs anyway (a
+  # request that waits forever is a broken feature). Expect seconds of latency
+  # under call load, by design — the response carries X-Agent-Waited-Ms and
+  # X-Agent-Deferred so the caller can see it happening.
+  #
+  # Non-streaming only: a stream holds a slot for the whole generation and
+  # would make that accounting a lie.
+  llm_concurrency: 2         # simultaneous platform requests
+  llm_max_wait_secs: 60      # how long to wait for a lull before running anyway
+  llm_max_tokens_cap: 2048   # ceiling regardless of the request; generation
+                             # time is what holds a slot
 
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)
