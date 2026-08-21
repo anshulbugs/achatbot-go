@@ -81,6 +81,10 @@ type Server struct {
 	verifier   *Verifier
 	dispatcher Dispatcher
 	metrics    *Metrics
+	// eval backs POST /evaluate. Nil until SetEvaluator is called, and the
+	// route is only registered when it is non-nil — a deployment without an
+	// LLM answers 404 rather than accepting work it cannot do.
+	eval *Evaluator
 }
 
 // NewServer builds the dispatch surface. secret is the platform's OUTBOUND
@@ -112,6 +116,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /connection", s.handlePhone)
 	mux.HandleFunc("POST /incoming", s.handleIncoming)
 	mux.HandleFunc("POST /connection_webrtc", s.handleWebrtc)
+	// Registered only when an evaluator exists. See SetEvaluator.
+	if s.eval != nil {
+		mux.HandleFunc("POST /evaluate", s.handleEvaluate)
+	}
 }
 
 // handleHealth is the load-balancer liveness probe: unauthenticated, and
