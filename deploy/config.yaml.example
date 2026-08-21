@@ -271,7 +271,22 @@ tts:
   eval_enabled: false
   eval_concurrency: 2        # simultaneous evaluations; a burst of hangups must
                              # not become a burst of transcript-sized prefills
-  eval_max_wait_secs: 20     # how long to wait for a lull before running anyway
+  eval_max_wait_secs: 60     # how long to wait for a lull before running anyway
+  llm_max_tokens_cap: 2048   # ceiling on /v1/chat/completions regardless of the
+                             # request; generation time is what holds a slot
+
+  # POST /v1/chat/completions — an OpenAI-compatible endpoint for the platform
+  # to use the model for anything: summaries, extraction, drafting. Point any
+  # OpenAI SDK at https://<agent>/v1 with the bearer key.
+  #
+  # Enabled by REXA_LLM_API_KEY in rexa-secrets.env, NOT here — it is a
+  # credential. Empty means the route is not registered at all, rather than an
+  # unauthenticated model on a public URL.
+  #
+  # Non-streaming only: a stream holds a background slot for the whole
+  # generation and would make the gate's accounting a lie. It shares
+  # eval_concurrency and eval_max_wait_secs with /evaluate, so there is ONE
+  # budget for everything that is not a live call.
 
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)

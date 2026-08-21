@@ -23,15 +23,22 @@ func (f *fakeLLM) Complete(_ context.Context, system, user string, _ int) (strin
 
 // newTestEvaluator drives the gate on a fake clock, so a test that exercises a
 // twenty-second wait still runs instantly and deterministically.
-func newTestEvaluator(llm LLMClient, m *Metrics, maxWait time.Duration) (*Evaluator, *time.Time) {
-	e := NewEvaluator(llm, m, 1, maxWait)
+func newTestEvaluator(llm LLMClient, m *Metrics, maxWait time.Duration) (*Evaluator, *Gate) {
+	g := newTestGate(m, 1, maxWait)
+	return NewEvaluator(llm, g), g
+}
+
+// newTestGate drives admission control on a fake clock, so a test that
+// exercises a sixty-second wait still runs instantly and deterministically.
+func newTestGate(m *Metrics, concurrency int, maxWait time.Duration) *Gate {
+	g := NewGate(m, concurrency, maxWait)
 	now := time.Unix(0, 0)
-	e.now = func() time.Time { return now }
-	e.sleep = func(_ context.Context, d time.Duration) error {
+	g.now = func() time.Time { return now }
+	g.sleep = func(_ context.Context, d time.Duration) error {
 		now = now.Add(d)
 		return nil
 	}
-	return e, &now
+	return g
 }
 
 func TestEvaluatorRunsImmediatelyOnAQuietBox(t *testing.T) {
@@ -94,12 +101,12 @@ func TestEvaluatorProceedsAsSoonAsTheBoxGoesQuiet(t *testing.T) {
 		m.TryReserve(sessionN(i))
 	}
 	llm := &fakeLLM{reply: "ok"}
-	e, _ := newTestEvaluator(llm, m, 20*time.Second)
+	e, g := newTestEvaluator(llm, m, 20*time.Second)
 
 	// Release the calls after the first poll.
 	polls := 0
-	realSleep := e.sleep
-	e.sleep = func(ctx context.Context, d time.Duration) error {
+	realSleep := g.sleep
+	g.sleep = func(ctx context.Context, d time.Duration) error {
 		polls++
 		if polls == 2 {
 			for i := 0; i < 6; i++ {
@@ -131,8 +138,8 @@ func TestEvaluatorProceedsAsSoonAsTheBoxGoesQuiet(t *testing.T) {
 func TestEvaluatorTreatsAQueuedLLMAsBusy(t *testing.T) {
 	m := NewMetrics(100) // nowhere near the call ceiling
 	m.setSGLang(SGLangSnapshot{OK: true, QueuedReqs: 3, at: time.Now()})
-	e, _ := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
-	if !e.busy() {
+	_, g := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
+	if !g.busy() {
 		t.Error("a non-zero LLM queue must count as busy")
 	}
 }
@@ -144,8 +151,8 @@ func TestEvaluatorTreatsAQueuedLLMAsBusy(t *testing.T) {
 func TestEvaluatorTreatsRunningRequestsAsBusyEvenWithAnEmptyQueue(t *testing.T) {
 	m := NewMetrics(100)
 	m.setSGLang(SGLangSnapshot{OK: true, QueuedReqs: 0, RunningReqs: 105, at: time.Now()})
-	e, _ := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
-	if !e.busy() {
+	_, g := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
+	if !g.busy() {
 		t.Error("a busy LLM with an empty queue must still count as busy")
 	}
 }
@@ -154,8 +161,8 @@ func TestEvaluatorIgnoresATrickleOfLLMTraffic(t *testing.T) {
 	m := NewMetrics(100)
 	// A handful in flight is what normal call traffic looks like.
 	m.setSGLang(SGLangSnapshot{OK: true, RunningReqs: EvalBusyRunningReqs - 1, at: time.Now()})
-	e, _ := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
-	if e.busy() {
+	_, g := newTestEvaluator(&fakeLLM{reply: "ok"}, m, 5*time.Second)
+	if g.busy() {
 		t.Error("ordinary call traffic must not block evaluations forever")
 	}
 }

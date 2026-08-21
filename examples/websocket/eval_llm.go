@@ -95,3 +95,30 @@ func (c *openAIEvalClient) Complete(ctx context.Context, system, user string, ma
 	}
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
 }
+
+// Forward implements rexa.ChatCompleter for the bearer-authed passthrough.
+//
+// Returns the upstream status and body untouched. That is the whole point: the
+// caller gets the model's own error text — "context length exceeded" rather
+// than a bare 500 — and a plain OpenAI response when it succeeds, so any SDK
+// works against it.
+func (c *openAIEvalClient) Forward(ctx context.Context, body []byte) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	// 8MB: generous for a completion, finite so a misbehaving upstream cannot
+	// exhaust memory.
+	out, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, out, nil
+}

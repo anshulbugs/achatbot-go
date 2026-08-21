@@ -173,11 +173,24 @@ type ServerConfig struct {
 	// purpose: a burst of hangups must not become a burst of transcript-sized
 	// prefills in front of live callers. Zero means 2.
 	EvalConcurrency int `mapstructure:"eval_concurrency"`
-	// EvalMaxWaitSecs is how long an evaluation waits for a quiet box before
+	// EvalMaxWaitSecs is how long background work waits for a quiet box before
 	// running anyway. Seconds, not minutes — a request that waits forever is a
 	// broken feature, and past this point the concurrency cap is what bounds
-	// the cost. Zero means 20.
+	// the cost. Zero means 60.
 	EvalMaxWaitSecs int `mapstructure:"eval_max_wait_secs"`
+	// LLMAPIKey enables POST /v1/chat/completions, the OpenAI-compatible
+	// endpoint the platform can point any SDK at. Empty means the route is not
+	// registered at all.
+	//
+	// A BEARER TOKEN, and a separate credential from the HMAC secrets on
+	// purpose: it goes to more places than dispatch signing does, so it has to
+	// be rotatable on its own. Read from REXA_LLM_API_KEY rather than
+	// config.yaml so it lives with the other secrets.
+	LLMAPIKey string `mapstructure:"-"`
+	// LLMMaxTokensCap bounds generation length on that endpoint regardless of
+	// what the caller asks for, because generation time is what holds a
+	// background slot. Zero means 2048.
+	LLMMaxTokensCap int `mapstructure:"llm_max_tokens_cap"`
 	// ClarityFilter enables the outbound telephone voice-enhancement filter
 	// (high-pass + presence boost) on Telnyx calls.
 	ClarityFilter bool `mapstructure:"clarity_filter"`
