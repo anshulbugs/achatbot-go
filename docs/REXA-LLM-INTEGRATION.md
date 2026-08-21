@@ -139,7 +139,7 @@ working at that moment, so coordinate.
 ## The agent host
 
 ```
-https://agent.rexa.ai
+https://voiceagent.aptask.com
 ```
 
 Stable. It is a **named Cloudflare tunnel**, so it survives agent restarts and
