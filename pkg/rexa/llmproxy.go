@@ -79,6 +79,13 @@ func NewLLMProxy(upstream ChatCompleter, gate *Gate, apiKey, defaultModel string
 	}
 }
 
+// MaxTokensCap reports the EFFECTIVE ceiling, after defaults.
+//
+// Exists so callers can log what is actually enforced. Logging the raw config
+// value printed "capped at 0" whenever the setting was absent, which reads as
+// "no generation allowed" and is the opposite of the truth.
+func (p *LLMProxy) MaxTokensCap() int { return p.maxTokensCap }
+
 // authorized checks the bearer token in constant time.
 //
 // Constant-time because a byte-by-byte comparison leaks the key one character
