@@ -11,25 +11,25 @@ works.
 
 | | |
 |---|---|
-| Base URL | `https://agent.rexa.ai/v1` |
+| Base URL | `https://voiceagent.aptask.com/v1` |
 | Auth | `Authorization: Bearer <REXA_LLM_API_KEY>` |
 | Model | `google/gemma-4-E4B-it` (or omit `model` — it fills in) |
 | Context window | 8192 tokens, prompt + reply combined |
 | Max reply | 2048 tokens, capped server-side whatever you ask for |
 
-### Two hostnames, and why you might want the second
+### The host
 
-| host | stock OpenAI Node SDK |
-|---|---|
-| `https://agent.rexa.ai/v1` | **blocked** — see below, needs a custom User-Agent |
-| `https://voiceagent.aptask.com/v1` | **works as-is** |
+```
+https://voiceagent.aptask.com
+```
 
-Same tunnel, same agent, same key — only the Cloudflare zone differs. The
-rexa.ai zone runs bot rules that reject the Node SDK's default User-Agent;
-aptask.com does not. Verified by sending an identical request to both.
+Everything lives here — the LLM endpoint, the call endpoints, the dashboard and
+the Telnyx webhooks. Stable, and the stock OpenAI SDK works against it with no
+header changes.
 
-Use `voiceagent.aptask.com` if you want the SDK to work untouched. Use
-`agent.rexa.ai` with the header below if you prefer the name. Both stay live.
+`agent.rexa.ai` still resolves to the same agent and is kept as a fallback, but
+the rexa.ai zone runs bot rules that reject the Node SDK's default User-Agent —
+see below — so prefer the name above.
 
 ### Set a User-Agent — the Node SDK's default is blocked
 
@@ -49,7 +49,7 @@ calling your own model, not an OpenAI crawler fetching a page.
 
 ```js
 const client = new OpenAI({
-  baseURL: "https://agent.rexa.ai/v1",
+  baseURL: "https://voiceagent.aptask.com/v1",
   apiKey: process.env.REXA_LLM_API_KEY,
   defaultHeaders: { "User-Agent": "rexa-platform/1.0" },   // REQUIRED on Node
 });
@@ -62,7 +62,7 @@ explicitly is still worth doing so a future SDK change cannot reintroduce this.
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://agent.rexa.ai/v1",
+    base_url="https://voiceagent.aptask.com/v1",
     api_key=REXA_LLM_API_KEY,
     default_headers={"User-Agent": "rexa-platform/1.0"},
 )
@@ -82,7 +82,7 @@ print(resp.choices[0].message.content)
 `curl` equivalent:
 
 ```bash
-curl https://agent.rexa.ai/v1/chat/completions \
+curl https://voiceagent.aptask.com/v1/chat/completions \
   -H "Authorization: Bearer $REXA_LLM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":100}'
@@ -154,10 +154,10 @@ key.
 
 ```bash
 # is the agent up?
-curl https://agent.rexa.ai/health
+curl https://voiceagent.aptask.com/health
 
 # is the key good?  (200 = yes, 401 = no)
-curl -o /dev/null -w '%{http_code}\n' -X POST https://agent.rexa.ai/v1/chat/completions \
+curl -o /dev/null -w '%{http_code}\n' -X POST https://voiceagent.aptask.com/v1/chat/completions \
   -H "Authorization: Bearer $REXA_LLM_API_KEY" -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":5}'
 ```
