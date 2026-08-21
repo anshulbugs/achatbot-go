@@ -246,6 +246,26 @@ tts:
   pronunciations:
     JobTalk: "ʤˈɑbtˌɔk"      # otherwise read as two words, "Job Talk"
 
+  # END-OF-CALL EVALUATION — POST /evaluate on the contract instance (:4399).
+  #
+  # Lets the platform have a call transcript judged by the LLM without ever
+  # reaching the LLM itself. That matters: sglang listens on 127.0.0.1 with NO
+  # api key, so it is safe only because nothing outside the box can reach it.
+  # This endpoint reuses the same HMAC envelope as /connection.
+  #
+  # It shares the GPU with live calls, so it is built to get out of their way:
+  # it waits for a quiet box before starting, runs at most eval_concurrency at
+  # once, and gives up waiting after eval_max_wait_secs and runs anyway (a
+  # request that waits forever is a broken feature). Expect seconds of latency,
+  # by design.
+  #
+  # Off by default — sharing call capacity should be a decision, not something
+  # a deployment inherits.
+  eval_enabled: false
+  eval_concurrency: 2        # simultaneous evaluations; a burst of hangups must
+                             # not become a burst of transcript-sized prefills
+  eval_max_wait_secs: 20     # how long to wait for a lull before running anyway
+
 llm:
   provider: openai_api                   # OpenAI-compatible (SGLang / vLLM / Ollama)
   base_url: "http://127.0.0.1:8001/v1"   # SGLang endpoint

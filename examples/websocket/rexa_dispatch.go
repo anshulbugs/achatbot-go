@@ -643,6 +643,25 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 
 	srv := rexa.NewServer(outbound, rexa.NewMemoryNonceStore(),
 		&platformDispatcher{publicURL: strings.TrimRight(publicURL, "/")}, rexaMetrics)
+	// End-of-call evaluation, if this deployment opted in. Installed BEFORE
+	// Routes, because Routes only registers /evaluate when an evaluator exists
+	// — an agent without one answers 404 rather than accepting work it cannot
+	// do.
+	if cfg.Server.EvalEnabled {
+		if cfg.LLM.BaseURL == "" || cfg.LLM.Model == "" {
+			log.Printf("rexa: /evaluate DISABLED — server.eval_enabled is set but llm.base_url or llm.model is empty")
+		} else {
+			srv.SetEvaluator(rexa.NewEvaluator(
+				newEvalLLMClient(cfg.LLM.BaseURL, cfg.LLM.Model),
+				rexaMetrics,
+				cfg.Server.EvalConcurrency,
+				time.Duration(cfg.Server.EvalMaxWaitSecs)*time.Second,
+			))
+			log.Printf("rexa: /evaluate enabled (model=%s, concurrency=%d, max wait=%ds) — "+
+				"it shares the LLM with live calls and yields to them",
+				cfg.LLM.Model, cfg.Server.EvalConcurrency, cfg.Server.EvalMaxWaitSecs)
+		}
+	}
 	srv.Routes(mux)
 	srv.RoutesDashboard(mux)
 	// The dialer's Join/Barge button. Not part of the platform contract —
