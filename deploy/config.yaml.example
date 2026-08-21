@@ -208,20 +208,21 @@ asr:
 tts:
   model: kokoro_http         # GPU Kokoro via deploy/tts (see also: kokoro for CPU)
   http_url: "http://127.0.0.1:8880"
-  speaker_id: 2              # 2 = Bella (US female). 3 = Heart. Full list in server.go.
+  speaker_id: 3              # 3 = Heart (US female). 2 = Bella. Full list in server.go.
   speed: 1.10                # 1.0 = normal. Kokoro already runs 176-195 wpm at
                              # 1.0 against 150-160 for natural phone speech, so
                              # this is a small lift, not a rescue. 1.28 was
                              # measured at 212-232 wpm and sounded rushed.
-  gain: 1.8                  # output loudness multiplier (per-call overridable).
-                             # MEASURED, not guessed: af_bella peaks at 0.510 of
-                             # full scale on real call lines, so it clips at
-                             # x1.96 and 1.8 leaves about 9% margin — 0.00% of
-                             # samples clipped. Loudness is PER VOICE, so
-                             # re-measure before reusing this on another one;
-                             # a gain tuned for kokoro clipped 0.27% of samples
-                             # on a louder engine and that was audible as a
-                             # torn speaker.
+  gain: 1.4                  # output loudness multiplier (per-call overridable).
+                             # Loudness is PER VOICE and this is af_heart's
+                             # figure. Measured headroom: af_heart peaks at
+                             # 0.455 of full scale on real call lines, so it
+                             # only clips past x2.20 — 1.8 was tried and is also
+                             # safe on this voice, but 1.4 is what it shipped
+                             # with. Re-measure before reusing either number on
+                             # another voice: a gain tuned for kokoro clipped
+                             # 0.27%% of samples on a louder engine and that was
+                             # audible as a torn speaker.
   pool_size: 64
   num_threads: 12            # only used by the CPU sherpa model
 
