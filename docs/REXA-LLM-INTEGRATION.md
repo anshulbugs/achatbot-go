@@ -17,6 +17,20 @@ works.
 | Context window | 8192 tokens, prompt + reply combined |
 | Max reply | 2048 tokens, capped server-side whatever you ask for |
 
+### Two hostnames, and why you might want the second
+
+| host | stock OpenAI Node SDK |
+|---|---|
+| `https://agent.rexa.ai/v1` | **blocked** — see below, needs a custom User-Agent |
+| `https://voiceagent.aptask.com/v1` | **works as-is** |
+
+Same tunnel, same agent, same key — only the Cloudflare zone differs. The
+rexa.ai zone runs bot rules that reject the Node SDK's default User-Agent;
+aptask.com does not. Verified by sending an identical request to both.
+
+Use `voiceagent.aptask.com` if you want the SDK to work untouched. Use
+`agent.rexa.ai` with the header below if you prefer the name. Both stay live.
+
 ### Set a User-Agent — the Node SDK's default is blocked
 
 The hostname sits behind Cloudflare, and the zone's bot rules **403 any
