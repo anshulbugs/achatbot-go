@@ -647,18 +647,27 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 	// Routes, because Routes only registers /evaluate when an evaluator exists
 	// — an agent without one answers 404 rather than accepting work it cannot
 	// do.
-	if cfg.Server.EvalEnabled {
+	// ONE gate for both background endpoints. Giving each its own cap would
+	// make the real limit their sum, which is a limit nobody chose.
+	if cfg.Server.EvalEnabled || os.Getenv("REXA_LLM_API_KEY") != "" {
 		if cfg.LLM.BaseURL == "" || cfg.LLM.Model == "" {
-			log.Printf("rexa: /evaluate DISABLED — server.eval_enabled is set but llm.base_url or llm.model is empty")
+			log.Printf("rexa: background LLM endpoints DISABLED — llm.base_url or llm.model is empty")
 		} else {
-			srv.SetEvaluator(rexa.NewEvaluator(
-				newEvalLLMClient(cfg.LLM.BaseURL, cfg.LLM.Model),
-				rexaMetrics,
-				cfg.Server.EvalConcurrency,
-				time.Duration(cfg.Server.EvalMaxWaitSecs)*time.Second,
-			))
-			log.Printf("rexa: /evaluate enabled (model=%s, concurrency=%d, max wait=%ds) — "+
-				"it shares the LLM with live calls and yields to them",
+			client := newEvalLLMClient(cfg.LLM.BaseURL, cfg.LLM.Model)
+			gate := rexa.NewGate(rexaMetrics, cfg.Server.EvalConcurrency,
+				time.Duration(cfg.Server.EvalMaxWaitSecs)*time.Second)
+			if cfg.Server.EvalEnabled {
+				srv.SetEvaluator(rexa.NewEvaluator(client, gate))
+				log.Printf("rexa: /evaluate enabled")
+			}
+			if key := os.Getenv("REXA_LLM_API_KEY"); key != "" {
+				srv.SetLLMProxy(rexa.NewLLMProxy(client, gate, key,
+					cfg.LLM.Model, cfg.Server.LLMMaxTokensCap))
+				log.Printf("rexa: /v1/chat/completions enabled (bearer auth, non-streaming, "+
+					"max_tokens capped at %d)", cfg.Server.LLMMaxTokensCap)
+			}
+			log.Printf("rexa: background LLM work shares model=%s with live calls and yields to "+
+				"them (concurrency=%d, max wait=%ds)",
 				cfg.LLM.Model, cfg.Server.EvalConcurrency, cfg.Server.EvalMaxWaitSecs)
 		}
 	}

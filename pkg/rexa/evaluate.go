@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"time"
 )
 
 // End-of-call evaluation, run on the agent so the platform never has to reach
@@ -90,111 +89,18 @@ const (
 )
 
 // Evaluator runs evaluations off the critical path.
+//
+// It owns no admission control of its own: the Gate is shared with every other
+// background user of the GPU, so the agent has one stated budget for work that
+// is not a live call rather than one per feature.
 type Evaluator struct {
-	llm     LLMClient
-	metrics *Metrics
-	// sem bounds how many evaluations may run at once.
-	sem chan struct{}
-	// maxWait is how long a request may sit waiting for a quiet window before
-	// running regardless.
-	maxWait time.Duration
-	// pollEvery is how often the gate re-checks while waiting.
-	pollEvery time.Duration
-	// now and sleep exist so tests can drive the gate without real time.
-	now   func() time.Time
-	sleep func(context.Context, time.Duration) error
+	llm  LLMClient
+	gate *Gate
 }
 
-// NewEvaluator builds an evaluator. concurrency and maxWait fall back to
-// sensible defaults when non-positive.
-func NewEvaluator(llm LLMClient, metrics *Metrics, concurrency int, maxWait time.Duration) *Evaluator {
-	if concurrency <= 0 {
-		concurrency = 2
-	}
-	if maxWait <= 0 {
-		maxWait = 20 * time.Second
-	}
-	return &Evaluator{
-		llm:       llm,
-		metrics:   metrics,
-		sem:       make(chan struct{}, concurrency),
-		maxWait:   maxWait,
-		pollEvery: 500 * time.Millisecond,
-		now:       time.Now,
-		// sleepCtx is shared with the callback poster.
-		sleep: sleepCtx,
-	}
-}
-
-// EvalBusyRunningReqs is how many in-flight LLM generations count as "the box
-// is working". Live calls generate few concurrent requests — a turn takes about
-// a second and a caller speaks every fifteen or so, so even sixty calls sit
-// around five in flight. Anything well above that is a real burst.
-const EvalBusyRunningReqs = 8
-
-// busy reports whether the box is currently too loaded to take an evaluation.
-//
-// THREE SIGNALS, ANSWERING DIFFERENT QUESTIONS.
-//
-// Queued LLM requests is the unambiguous one: something is already waiting for
-// a generation slot, so a large prefill in front of it makes a live caller wait
-// longer. It is also the one that almost never fires here — MEASURED on the
-// GH200 at 100 concurrent requests, num_queue_reqs stayed 0 while
-// num_running_reqs sat at ~105 and token_usage at 0.03. The KV cache is big
-// enough that SGLang admits everything and queues nothing, so treating an empty
-// queue as "idle" would have made this whole gate inert.
-//
-// Running requests is therefore the signal that actually fires. It says how
-// much generation is in flight regardless of whether anything had to wait.
-//
-// GPU-call occupancy is the predictive one: a call that is connected but
-// currently listening is not using the LLM this instant, yet it will within a
-// turn or two, so a box near its ceiling is about to be busy even if the LLM
-// looks idle right now.
-//
-// The thresholds are deliberately generous. Refusing to evaluate whenever a
-// single call is live would mean never evaluating on a busy fleet, and
-// evaluations that never run are worse than evaluations that cost a few
-// milliseconds of someone else's TTFT.
-func (e *Evaluator) busy() bool {
-	if e.metrics == nil {
-		return false
-	}
-	snap := e.metrics.Snapshot()
-	if snap.SGLang.OK {
-		// Anything queued means a caller is already waiting for a slot.
-		if snap.SGLang.QueuedReqs > 0 {
-			return true
-		}
-		if snap.SGLang.RunningReqs >= EvalBusyRunningReqs {
-			return true
-		}
-	}
-	// Past half the GPU-call ceiling, assume the lull is temporary.
-	if snap.Capacity.MaxGPUCalls > 0 {
-		if snap.Capacity.GPUCost*2 >= float64(snap.Capacity.MaxGPUCalls) {
-			return true
-		}
-	}
-	return false
-}
-
-// waitForQuiet blocks until the box is idle enough, the deadline passes, or ctx
-// ends. It reports how long it waited and whether it gave up waiting.
-func (e *Evaluator) waitForQuiet(ctx context.Context) (time.Duration, bool) {
-	start := e.now()
-	for {
-		if !e.busy() {
-			return e.now().Sub(start), false
-		}
-		waited := e.now().Sub(start)
-		if waited >= e.maxWait {
-			return waited, true
-		}
-		if err := e.sleep(ctx, e.pollEvery); err != nil {
-			return e.now().Sub(start), true
-		}
-	}
+// NewEvaluator builds an evaluator over a shared gate.
+func NewEvaluator(llm LLMClient, gate *Gate) *Evaluator {
+	return &Evaluator{llm: llm, gate: gate}
 }
 
 // Run performs one evaluation, waiting for a quiet window first.
@@ -202,28 +108,18 @@ func (e *Evaluator) Run(ctx context.Context, req EvalRequest) (EvalResponse, err
 	if e.llm == nil {
 		return EvalResponse{}, errors.New("no LLM client configured")
 	}
-	// The concurrency cap is taken BEFORE the quiet wait, not after. Taking it
-	// after would let an unbounded number of requests sit in the gate and then
-	// stampede the moment the box went quiet, which is the opposite of the
-	// intent.
-	select {
-	case e.sem <- struct{}{}:
-		defer func() { <-e.sem }()
-	case <-ctx.Done():
-		return EvalResponse{}, ctx.Err()
-	}
-
-	waited, deferred := e.waitForQuiet(ctx)
-	if ctx.Err() != nil {
-		return EvalResponse{}, ctx.Err()
-	}
-
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = EvalDefaultMaxTokens
 	}
-	out, err := e.llm.Complete(ctx, evalSystemPrompt(req.Instruction),
-		renderTranscript(req.Transcript), maxTokens)
+
+	var out string
+	waited, deferred, err := e.gate.Run(ctx, func(ctx context.Context) error {
+		var e2 error
+		out, e2 = e.llm.Complete(ctx, evalSystemPrompt(req.Instruction),
+			renderTranscript(req.Transcript), maxTokens)
+		return e2
+	})
 	if err != nil {
 		return EvalResponse{}, err
 	}
