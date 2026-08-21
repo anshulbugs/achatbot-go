@@ -150,7 +150,10 @@ server:
   # SGLang base URLs (not the /v1 path) whose /metrics is polled every 5s for
   # prefix-cache hit rate and queue depth. Shown on /dashboard and /health;
   # nothing here refuses traffic. Empty disables it.
-  sglang_metrics_urls: []
+  # REQUIRED for /evaluate to yield properly, and worth setting regardless:
+  # without it the dashboard shows a permanently idle LLM. One entry per
+  # replica, base URL not /metrics.
+  sglang_metrics_urls: ["http://127.0.0.1:8001"]
   # Mid-call sentiment classification. Empty base_url disables it entirely,
   # whatever a dispatch asks for.
   #

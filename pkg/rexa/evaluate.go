@@ -126,27 +126,49 @@ func NewEvaluator(llm LLMClient, metrics *Metrics, concurrency int, maxWait time
 	}
 }
 
+// EvalBusyRunningReqs is how many in-flight LLM generations count as "the box
+// is working". Live calls generate few concurrent requests — a turn takes about
+// a second and a caller speaks every fifteen or so, so even sixty calls sit
+// around five in flight. Anything well above that is a real burst.
+const EvalBusyRunningReqs = 8
+
 // busy reports whether the box is currently too loaded to take an evaluation.
 //
-// TWO SIGNALS, AND THEY ANSWER DIFFERENT QUESTIONS. Queued LLM requests is the
-// direct one: if anything is already waiting for a generation slot, adding a
-// large prefill makes a live caller wait longer, full stop. GPU-call occupancy
-// is the predictive one: a call that is connected but currently listening is
-// not using the LLM this instant, yet it will within a turn or two, so a box
-// near its ceiling is about to be busy even if the queue reads zero right now.
+// THREE SIGNALS, ANSWERING DIFFERENT QUESTIONS.
 //
-// The occupancy threshold is deliberately generous. Refusing to evaluate
-// whenever a single call is live would mean never evaluating on a busy fleet,
-// and evaluations that never run are worse than evaluations that cost a few
+// Queued LLM requests is the unambiguous one: something is already waiting for
+// a generation slot, so a large prefill in front of it makes a live caller wait
+// longer. It is also the one that almost never fires here — MEASURED on the
+// GH200 at 100 concurrent requests, num_queue_reqs stayed 0 while
+// num_running_reqs sat at ~105 and token_usage at 0.03. The KV cache is big
+// enough that SGLang admits everything and queues nothing, so treating an empty
+// queue as "idle" would have made this whole gate inert.
+//
+// Running requests is therefore the signal that actually fires. It says how
+// much generation is in flight regardless of whether anything had to wait.
+//
+// GPU-call occupancy is the predictive one: a call that is connected but
+// currently listening is not using the LLM this instant, yet it will within a
+// turn or two, so a box near its ceiling is about to be busy even if the LLM
+// looks idle right now.
+//
+// The thresholds are deliberately generous. Refusing to evaluate whenever a
+// single call is live would mean never evaluating on a busy fleet, and
+// evaluations that never run are worse than evaluations that cost a few
 // milliseconds of someone else's TTFT.
 func (e *Evaluator) busy() bool {
 	if e.metrics == nil {
 		return false
 	}
 	snap := e.metrics.Snapshot()
-	// Anything queued at the LLM means a caller is already waiting.
-	if snap.SGLang.OK && snap.SGLang.QueuedReqs > 0 {
-		return true
+	if snap.SGLang.OK {
+		// Anything queued means a caller is already waiting for a slot.
+		if snap.SGLang.QueuedReqs > 0 {
+			return true
+		}
+		if snap.SGLang.RunningReqs >= EvalBusyRunningReqs {
+			return true
+		}
 	}
 	// Past half the GPU-call ceiling, assume the lull is temporary.
 	if snap.Capacity.MaxGPUCalls > 0 {
