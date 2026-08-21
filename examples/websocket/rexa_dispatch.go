@@ -661,10 +661,13 @@ func registerRexaRoutes(mux *http.ServeMux) bool {
 				log.Printf("rexa: /evaluate enabled")
 			}
 			if key := os.Getenv("REXA_LLM_API_KEY"); key != "" {
-				srv.SetLLMProxy(rexa.NewLLMProxy(client, gate, key,
-					cfg.LLM.Model, cfg.Server.LLMMaxTokensCap))
+				proxy := rexa.NewLLMProxy(client, gate, key, cfg.LLM.Model, cfg.Server.LLMMaxTokensCap)
+				srv.SetLLMProxy(proxy)
+				// The EFFECTIVE cap, not the config value: an absent setting
+				// would otherwise log "capped at 0", which reads as "no
+				// generation allowed" and is the opposite of what is enforced.
 				log.Printf("rexa: /v1/chat/completions enabled (bearer auth, non-streaming, "+
-					"max_tokens capped at %d)", cfg.Server.LLMMaxTokensCap)
+					"max_tokens capped at %d)", proxy.MaxTokensCap())
 			}
 			log.Printf("rexa: background LLM work shares model=%s with live calls and yields to "+
 				"them (concurrency=%d, max wait=%ds)",
