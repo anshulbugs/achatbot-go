@@ -17,10 +17,41 @@ works.
 | Context window | 8192 tokens, prompt + reply combined |
 | Max reply | 2048 tokens, capped server-side whatever you ask for |
 
+### Set a User-Agent — the Node SDK's default is blocked
+
+The hostname sits behind Cloudflare, and the zone's bot rules **403 any
+User-Agent starting `OpenAI/`** before the request ever reaches the agent.
+That is the OpenAI **Node** SDK's default (`OpenAI/JS 6.37.0`), so a stock
+`new OpenAI({...})` fails with `Your request was blocked.` — which looks like
+an agent outage and is not one.
+
+Measured against the live endpoint: `OpenAI/JS 6.37.0` → 403, `OpenAI/JS 4.0.0`
+→ 403, `OpenAI/NodeJS` → 403, but `openai-node/6.37.0` → 200 and
+`rexa-platform/1.0` → 200. It is the `OpenAI/` prefix, not a version, so
+upgrading the SDK will not help.
+
+Send your own instead. It is also the more truthful header: this is your worker
+calling your own model, not an OpenAI crawler fetching a page.
+
+```js
+const client = new OpenAI({
+  baseURL: "https://agent.rexa.ai/v1",
+  apiKey: process.env.REXA_LLM_API_KEY,
+  defaultHeaders: { "User-Agent": "rexa-platform/1.0" },   // REQUIRED on Node
+});
+```
+
+The Python SDK's default (`openai-python/...`) is not affected, but setting one
+explicitly is still worth doing so a future SDK change cannot reintroduce this.
+
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="https://agent.rexa.ai/v1", api_key=REXA_LLM_API_KEY)
+client = OpenAI(
+    base_url="https://agent.rexa.ai/v1",
+    api_key=REXA_LLM_API_KEY,
+    default_headers={"User-Agent": "rexa-platform/1.0"},
+)
 
 resp = client.chat.completions.create(
     model="google/gemma-4-E4B-it",
@@ -119,3 +150,7 @@ curl -o /dev/null -w '%{http_code}\n' -X POST https://agent.rexa.ai/v1/chat/comp
 
 `401` means the key is wrong or missing. `400` means read the body — it carries
 the model's own reason. A long pause before a `200` is the gate doing its job.
+
+**`403` with the body `Your request was blocked.` is Cloudflare, not us.** The
+response will carry `Server: cloudflare` and a `CF-RAY` header, and the agent
+never saw the request. Almost always it is the User-Agent above.
