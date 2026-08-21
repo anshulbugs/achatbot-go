@@ -206,6 +206,38 @@ func (s *Serializer) AllowInterrupts() {
 	s.mu.Unlock()
 }
 
+// NoteAnnouncement tells the echo gate that d of audio was handed to the
+// carrier OUTSIDE the normal outbound path.
+//
+// WHY THIS HAS TO EXIST. playbackEndsAt is what keepInbound uses to decide
+// whether the bot is speaking, and only noteOutbound advances it — which the
+// announcement path never calls, because it writes the greeting straight to
+// the socket in one message rather than frame by frame. So for the whole
+// length of a greeting the gate believed the bot was SILENT and passed every
+// inbound byte to ASR.
+//
+// The caller then gets transcribed while they are still listening to the
+// pitch, and because the model is told the greeting was fully delivered, their
+// half-sentence comes back as a reply to all of it. On one call that produced a
+// phantom "Yeah." at the exact moment the pipeline opened, 5.7s before the
+// greeting had finished playing, and the agent answered it with "I appreciate
+// you saying that".
+//
+// Same clock, same units as noteOutbound; this is the announcement path paying
+// the accounting it was skipping.
+func (s *Serializer) NoteAnnouncement(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	now := time.Now()
+	if now.After(s.playbackEndsAt) {
+		s.playbackEndsAt = now
+	}
+	s.playbackEndsAt = s.playbackEndsAt.Add(d)
+	s.mu.Unlock()
+}
+
 // HoldInterrupts suppresses "clear" events for d, covering audio already sent
 // but not yet played.
 func (s *Serializer) HoldInterrupts(d time.Duration) {
