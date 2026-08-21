@@ -1823,6 +1823,10 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			head, tail := pcm, []byte(nil)
 			spoken := time.Duration(len(head)/2) * time.Second / time.Duration(ttsRate)
 			announceStart := time.Now()
+			// The greeting is bot speech and the echo gate has to know it, or
+			// it treats the caller talking over the greeting as a reply to it.
+			// See Serializer.NoteAnnouncement.
+			ser.NoteAnnouncement(spoken)
 			log.Printf("announce: playing greeting call=%s (%.1fs of %.1fs now, rest held back for the verdict)",
 				id, spoken.Seconds(), float64(len(pcm)/2)/float64(ttsRate))
 			// MEASURE WHAT THE CALLER ACTUALLY HEARS.

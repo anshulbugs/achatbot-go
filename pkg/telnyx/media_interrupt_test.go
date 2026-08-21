@@ -125,3 +125,45 @@ func TestGateStaysOpenThroughMidSentenceDips(t *testing.T) {
 		t.Fatal("continued speech must pass")
 	}
 }
+
+// A greeting is bot speech, and the echo gate has to know it.
+//
+// REGRESSION. The announcement path writes the greeting to the socket in one
+// message rather than frame by frame, so it never called noteOutbound and
+// playbackEndsAt stayed in the past. For the whole length of a greeting the
+// gate reported the bot idle and passed every inbound byte straight to ASR —
+// so a caller talking over the greeting was transcribed and answered as though
+// they had heard all of it.
+func TestGreetingGatesInboundLikeAnyOtherBotSpeech(t *testing.T) {
+	s := NewSerializer(consts.DefaultRate)
+	const chunk = 160 // 20ms at 8kHz
+
+	// Before the announcement the bot is idle and inbound passes, which is what
+	// makes the bug below possible in the first place.
+	if got := s.keepInbound(tone(300, chunk)); got == nil {
+		t.Fatal("inbound should pass while the bot is genuinely silent")
+	}
+
+	// Now a 5-second greeting goes out through the announcement path.
+	s.NoteAnnouncement(5 * time.Second)
+
+	// Quiet talking-over must be gated, exactly as during normal bot speech.
+	for i := 0; i < 5; i++ {
+		if got := s.keepInbound(tone(300, chunk)); got != nil {
+			t.Fatalf("inbound at %d passed while the greeting was still playing — "+
+				"this is the bug: the caller gets transcribed mid-greeting", i)
+		}
+	}
+}
+
+// The clock must not go backwards: a short announcement after a long one still
+// leaves the longer one's tail protected.
+func TestNoteAnnouncementExtendsRatherThanReplaces(t *testing.T) {
+	s := NewSerializer(consts.DefaultRate)
+	s.NoteAnnouncement(5 * time.Second)
+	s.NoteAnnouncement(0)                // no-op
+	s.NoteAnnouncement(-1 * time.Second) // no-op
+	if got := s.keepInbound(tone(300, 160)); got != nil {
+		t.Error("a zero or negative announcement must not clear the existing hold")
+	}
+}
