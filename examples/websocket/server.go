@@ -626,22 +626,31 @@ func resolvePrompt(base, replace, suffix string) string {
 //   - 489 real agent turns ran to a median of 30 words, p95 51, max 90, and
 //     5.3% crossed kokoro's ~50-word chunk boundary. That boundary is where it
 //     synthesises separately and concatenates, so it is where prosody breaks.
-//   - The pause marks are the ones the engine knows, which is narrower than it
-//     looks. Misaki's PUNCTS is ';:,.!?—…"“”' — the EM DASH and the ELLIPSIS
-//     CHARACTER are in it; the hyphen is not, it sits in SUBTOKEN_JUNKS and is
-//     treated as junk inside a word. An earlier round of measurement here
-//     compared "-", "--" and "..." and concluded that dashes do nothing and
-//     that an ellipsis is worth 10ms over a comma. Both conclusions were about
-//     the wrong characters: "--" is junk to this engine and "..." ends the
-//     sentence, which sends the two halves as separate synthesis requests. The
-//     rules below ask for "…" and "—" and say so explicitly.
 //
-// One thing IS measured and rejected: IPA stress marks written bare in the
-// text. "This part is ˈfree" is SPOKEN as "This part is stress-free", and the
-// secondary mark as "second or stress-free". Nothing in the front end consumes
-// a bare mark, so it reaches the model as text — the same way unparsed gemma-4
-// markup once reached a caller. The link form "[free](+1)" IS consumed, which
-// is why speechMarkupRules below is safe and this is not.
+//   - There is NO pause hierarchy, measured twice now with the right characters
+//     on the GH200 (af_heart, speed 1.10): none 120ms, comma 220ms, em dash
+//     230ms, semicolon 250ms, colon 250ms, ellipsis 250ms. Widely repeated
+//     guides put ellipsis > em dash > semicolon > comma; that ordering is not
+//     there. Two rungs exist — a mark, or no mark — so the rules below ask for
+//     a beat wherever a person would breathe and let the model pick whichever
+//     mark reads correctly.
+//
+//     Two ASCII lookalikes are genuinely different, though, and the rules say
+//     so: "--" measures 120ms, i.e. nothing (the hyphen is in misaki's
+//     SUBTOKEN_JUNKS, not its PUNCTS), and "..." ends the sentence for
+//     FastFirstAggregator, which splits the reply into two synthesis requests.
+//
+// One thing IS measured and rejected, on both boxes: IPA stress marks written
+// bare in the text. "This part is ˈfree" is SPOKEN as "This part is
+// stress-free", and the secondary mark as "second or stress-free". Nothing in
+// the front end consumes a bare mark, so it reaches the model as text — the
+// same way unparsed gemma-4 markup once reached a caller.
+//
+// Kokoro's own model card lists "stress ˈ and ˌ" as a way to adjust intonation,
+// which is what makes this worth stating rather than assuming. Those marks are
+// legitimate INSIDE a phoneme string, "[JobTalk](/ʤˈɑbtˌɔk/)", where the link
+// form gets them consumed — which is exactly where tts.pronunciations puts
+// them. Loose in the sentence they are just characters to be read out.
 //
 // Appended LAST, after the tenant's own prompt. Later instructions carry more
 // weight with the model, and these have to survive a 3000-token prompt that
@@ -655,8 +664,8 @@ Delivery rules for this call, which override any conflicting instruction above:
 - Use the person's name sparingly. Once when you greet them is plenty, and perhaps once more at the very end. Never open or close consecutive replies with it. On a call, hearing your own name after every sentence sounds like a script, not a conversation.
 - Say every number one digit at a time, grouped for the ear. "3214528106" is "three two one, four five two, eight one zero six". Do the same for phone numbers, reference numbers, codes and account numbers.
 - Keep every reply under fifty words, and prefer two or three short sentences to one long one. The speech engine synthesises longer replies in separate pieces and joins them, and the joins are audible. A caller on the phone also stops listening well before fifty words.
-- Punctuation is your only control over rhythm, so use it deliberately. Within a sentence the pause runs longest to shortest: "…" then "—" then ";" then ",". Use "…" where a person would trail off or think, "—" to change direction mid-sentence, ";" to join two thoughts that belong together, and "," for an ordinary beat. A pause placed immediately BEFORE the word that matters — the benefit, the name, the ask — makes it land harder.
-- Write "…" and "—" as those single characters. Three full stops and two hyphens are not the same thing to the speech engine: three full stops end the sentence early, and two hyphens do nothing at all.
+- Punctuation is your rhythm control. Any mark inside a sentence buys a beat of about a fifth of a second, and no mark buys almost nothing, so put one wherever a person would draw breath. They are all worth about the same pause, so choose the mark that reads correctly rather than for length: "…" where a person trails off or thinks, "—" to change direction mid-sentence, ";" to join two thoughts that belong together, "," for an ordinary beat. A pause placed immediately BEFORE the word that matters — the benefit, the name, the ask — makes it land harder.
+- Write "…" and "—" as those single characters. Three full stops and two hyphens are not the same thing to the speech engine: three full stops end the sentence early, and two hyphens do nothing at all. Never write a stress mark on its own in the text; it is read out loud as the word "stress".
 - Write the way people talk, not the way people write. Use contractions every time one fits: "it's", "you're", "don't", "can't", "I'll", "there's". Keep sentences under twenty words. Put a question mark on every question, because that is what lifts your voice at the end of it — a question written as a statement sounds like a demand.
 - Spell out anything that is not a word as the words you want said. "Twenty-four seven", not "24/7". "Percent", not "%". "And", not "&". "About", not "approx". "Nine to five", not "9-5". The engine reads symbols literally and a caller cannot ask you to repeat a symbol.
 - Vary the energy. A reply where every sentence runs the same length at the same pitch reads as a recording, and callers hang up on recordings. Follow a long sentence with a short one. Put the word that matters at the end of the sentence, where it lands hardest. Use an exclamation mark where you genuinely mean it, and nowhere else.`
@@ -694,7 +703,7 @@ var speechMarkupEnabled bool
 // is applied on the way into the request instead of being something the model
 // has to remember on every turn.
 const speechMarkupRules = `
-- You have one piece of markup, and it is the single exception to the no-markdown rule above. Writing a word as [word](+1) tells the speech engine to lean on it, and [word](-1) tells it to pass over it lightly. Put [word](+1) on the word that carries the point of the sentence — the benefit, the number, the "your", the "free" — and use it on no more than three or four words in a whole reply. Emphasising everything is the same as emphasising nothing and comes back out as a monotone. The brackets are an instruction to the engine: they are never spoken and nobody ever sees them.`
+- You have one piece of markup, and it is the single exception to the no-markdown rule above. Writing a word as [word](+1) tells the speech engine to lean on it, and [word](-1) tells it to pass over it lightly. It works best on SHORT words that are not already emphasised — "your", "free", "only", "now", "yes" — and does least on a long word the voice already stresses. Use it on no more than three or four words in a whole reply: emphasising everything is the same as emphasising nothing and comes back out as a monotone. The brackets are an instruction to the engine, never spoken and never seen by anyone.`
 
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
