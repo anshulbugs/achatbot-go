@@ -1932,7 +1932,35 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// A mailbox recording a few extra seconds of greeting is a
 			// cosmetic problem on calls nobody listens to. A break in the
 			// greeting is heard by every real person we ring. Not a close call.
+			// SPLIT THE GREETING AGAIN, now that a verdict arrives in time.
+			//
+			// The split was removed because the seam was audible: the tail was
+			// sent on the wait timeout and landed at Telnyx exactly as the head
+			// ran out. That was a symptom of slow detection -- verdicts took
+			// 11-14s against a head of similar length, so the tail was always
+			// late.
+			//
+			// Removing the answering_machine_detection_config block fixed that.
+			// MEASURED over 121 machine verdicts since: min 4.0s, median 5.0s,
+			// max 9.0s, and humans land sooner still at a median of 3.0s. A ten
+			// second head therefore has real margin -- the verdict beats it on
+			// every observed call -- and the tail goes out while the head is
+			// still playing, which is what makes the join inaudible.
+			//
+			// What this buys: a machine hears ten seconds of greeting instead
+			// of the whole thing. The campaign greeting runs fifteen to twenty
+			// seconds, so it halves what a mailbox records before the message.
+			// Clearing the audio instead is not an option -- see the note in
+			// runVoicemailCall on how `clear` silenced every voicemail message.
+			const greetingHead = 10 * time.Second
+			headBytes := int(greetingHead/time.Millisecond) * ttsRate / 1000 * 2
 			head, tail := pcm, []byte(nil)
+			if headBytes > 0 && len(pcm) > headBytes {
+				// Cut on a sample boundary, or the split lands mid-sample and
+				// the join clicks.
+				headBytes -= headBytes % 2
+				head, tail = pcm[:headBytes], pcm[headBytes:]
+			}
 			spoken := time.Duration(len(head)/2) * time.Second / time.Duration(ttsRate)
 			announceStart := time.Now()
 			// The greeting is bot speech and the echo gate has to know it, or
@@ -2056,8 +2084,15 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// greeting. Sent while the head is still playing, so it joins on
 			// without a seam.
 			if len(tail) > 0 {
+				tailDur := time.Duration(len(tail)/2) * time.Second / time.Duration(ttsRate)
 				playAnnouncement(tw, tail, ttsRate, stop)
-				spoken += time.Duration(len(tail)/2) * time.Second / time.Duration(ttsRate)
+				spoken += tailDur
+				// The tail is bot speech too. Without this the echo gate
+				// believes the bot fell silent when the head ended, and a
+				// caller talking over the REST of the greeting comes back as a
+				// reply to it -- the same failure NoteAnnouncement exists to
+				// prevent for the head.
+				ser.NoteAnnouncement(tailDur)
 
 				// Keep listening while the tail plays. A verdict at 9-11s — the
 				// band that used to be timed out into not_sure — still lands
