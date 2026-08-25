@@ -1497,34 +1497,34 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 		return
 	}
 
-	// Wait for the beep. Telnyx times its own beep detection out and reports
-	// no_beep_detected, so this bound only covers the event never arriving.
-	beepResult := ""
-	beepDeadline := time.After(35 * time.Second)
-	// Ticked so a call that ENDS while we are waiting is noticed.
+	// DO NOT WAIT ON THE CARRIER'S BEEP EVENT.
 	//
-	// One did: it hung up at 04:38:43 and this waited out the full 35s beep
-	// timeout, then listened to the dead line for another 28s, then played the
-	// message thirty seconds after the call was over. Nothing was recorded
-	// because there was nothing to record into, and the hangup that followed
-	// returned 422 because the call no longer existed.
-	alive := time.NewTicker(time.Second)
-	defer alive.Stop()
-waitBeep:
-	for {
-		select {
-		case beepResult = <-beep:
-			log.Printf("telnyx amd: beep signal (%s) call=%s", beepResult, id)
-			break waitBeep
-		case <-beepDeadline:
-			log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
-			break waitBeep
-		case <-alive.C:
-			if calls.get(id) == nil {
-				log.Printf("telnyx amd: call ended before the beep, no message to leave call=%s", id)
-				return
-			}
-		}
+	// MEASURED over 91 voicemails: it arrives a MEDIAN OF 35 SECONDS after
+	// answer, and identically so whether it reports beep_detected or
+	// no_beep_detected -- 34s and 35s medians respectively. A mailbox beeps and
+	// starts recording when its own greeting ends, commonly ten to twenty
+	// seconds in, and many stop recording at thirty. Waiting for the event
+	// therefore records twenty-odd seconds of silence and then runs out of tape
+	// part way through the message, which is what was reported from live calls.
+	//
+	// greeting_duration_millis used to cap that wait at ten seconds, which is
+	// why the message used to land promptly. It is not coming back: removing it
+	// is what took human_business from 58% of verdicts to 1%, and machine from
+	// 14% to 71%.
+	//
+	// waitForMailboxToFinish below already solves this properly by listening to
+	// the greeting itself, and it was only ever reached AFTER this wait had
+	// already spent its 35 seconds. So the event is now taken only if it has
+	// ALREADY arrived, and the audio decides in every other case.
+	beepResult := ""
+	select {
+	case beepResult = <-beep:
+		log.Printf("telnyx amd: beep signal (%s) already waiting call=%s", beepResult, id)
+	default:
+	}
+	if calls.get(id) == nil {
+		log.Printf("telnyx amd: call ended before the message could be left call=%s", id)
+		return
 	}
 	if calls.get(id) == nil {
 		log.Printf("telnyx amd: call ended before the message could be played call=%s", id)
