@@ -1,6 +1,7 @@
 package processors
 
 import (
+	"math"
 	"strings"
 	"unicode"
 
@@ -15,6 +16,34 @@ import (
 // asrSampleRate is the rate the audio handed to Transcribe is at (16 kHz, 16-bit
 // mono), used only to report a duration alongside each transcript.
 const asrSampleRate = 16000
+
+// segmentRMS is the loudness of one ASR segment on the int16 scale.
+//
+// Logged with every transcript because the ASR HALLUCINATES ON NEAR-SILENCE and
+// nothing else distinguishes that from a real reply. MEASURED against the
+// production Parakeet (nvidia/parakeet-tdt-0.6b-v2), 0.8s clips:
+//
+//	digital silence   RMS    0.0  -> ""
+//	phone-band noise  RMS    1.0  -> "Yeah."
+//	phone-band noise  RMS    5.8  -> "Yeah."
+//	phone-band noise  RMS   31.4  -> "Uh"
+//	real speech       RMS 1425.0  -> "Hello."
+//
+// "Yeah." was 97 of 290 short transcripts in one run -- 21% of every ASR result
+// on the box -- which is not a thing callers do. Note the gap: three orders of
+// magnitude between what fools it and what a person sounds like.
+func segmentRMS(pcm []byte) float64 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i < n; i++ {
+		v := float64(int16(uint16(pcm[2*i]) | uint16(pcm[2*i+1])<<8))
+		sum += v * v
+	}
+	return math.Sqrt(sum / float64(n))
+}
 
 // fillerWords are hesitation tokens that, when a transcript contains nothing
 // else, mean the caller merely paused to think — not a turn to answer.
@@ -52,6 +81,10 @@ type ASRProcessor struct {
 	// callID identifies which call this transcript belongs to. Empty on
 	// browser sessions, which are one at a time and need no disambiguation.
 	callID string
+	// minRMS, when > 0, discards a segment quieter than this instead of
+	// transcribing it. Zero disables the check -- see segmentRMS for why it
+	// exists and why the threshold is measured rather than guessed.
+	minRMS float64
 	// turns counts transcripts emitted on this call, so the FIRST one -- the
 	// one callers report as garbled -- can be found without reading backwards
 	// through the whole call.
@@ -75,6 +108,18 @@ type ASRProcessor struct {
 // matters when callers report their first sentence being misheard.
 func (p *ASRProcessor) WithCallID(id string) *ASRProcessor {
 	p.callID = id
+	return p
+}
+
+// WithMinRMS discards segments quieter than rms without transcribing them.
+//
+// Off by default (0), deliberately. The measurement above says a floor
+// anywhere between about 60 and 300 separates hallucination from speech with
+// enormous margin, but that was measured on synthetic audio, and a real phone
+// line is quieter than a rendered voice. Set it from production RMS once
+// logged, rather than shipping a guess that could swallow a quiet "no".
+func (p *ASRProcessor) WithMinRMS(rms float64) *ASRProcessor {
+	p.minRMS = rms
 	return p
 }
 
@@ -103,14 +148,22 @@ func (p *ASRProcessor) WithOnTranscript(fn func(text string)) *ASRProcessor {
 // trigger a spurious LLM turn (which otherwise makes the model ramble or
 // guess a language). Also notifies the transcript callback.
 func (p *ASRProcessor) emit(audio []byte) {
-	text := strings.TrimSpace(p.provider.Transcribe(audio))
 	p.turns++
+	rms := segmentRMS(audio)
+	secs0 := float64(len(audio)) / float64(asrSampleRate*2)
+	if p.minRMS > 0 && rms < p.minRMS {
+		// Not transcribed at all: this is the audio the model invents "Yeah."
+		// from, and skipping it saves the GPU call as well.
+		logger.Infof("ASR dropped call=%s turn=%d (%.2fs audio, rms %.0f < %.0f): too quiet to be speech",
+			p.callID, p.turns, secs0, rms, p.minRMS)
+		return
+	}
+	text := strings.TrimSpace(p.provider.Transcribe(audio))
 	// Duration, not byte count: "0.96s of audio came back as No?" is a fact
 	// anyone can judge, where "30720 bytes" needs the sample rate and a
 	// calculator first. asrSampleRate is what Transcribe is fed.
-	secs := float64(len(audio)) / float64(asrSampleRate*2)
-	logger.Infof("ASR result call=%s turn=%d (%.2fs audio -> %d chars): %q",
-		p.callID, p.turns, secs, len(text), text)
+	logger.Infof("ASR result call=%s turn=%d (%.2fs audio, rms %.0f -> %d chars): %q",
+		p.callID, p.turns, secs0, rms, len(text), text)
 	if text == "" || fillerOnly(text) {
 		return
 	}

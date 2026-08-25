@@ -64,3 +64,57 @@ func TestASRProcessorWorksWithoutACallID(t *testing.T) {
 		t.Errorf("transcript = %q, want %q", got, "hello")
 	}
 }
+
+// The ASR invents "Yeah." from near-silence -- measured at RMS 1.0 and 5.8
+// against real speech at 1425 -- so a floor must drop those segments before
+// they reach the model, and must not touch anything that sounds like a person.
+func TestASRProcessorDropsSegmentsTooQuietToBeSpeech(t *testing.T) {
+	quiet := &fakeASR{says: []string{"Yeah."}}
+	p := NewASRProcessor(quiet).WithCallID("v3:abc").WithMinRMS(60)
+	var delivered []string
+	p.WithOnTranscript(func(text string) { delivered = append(delivered, text) })
+
+	p.emit(pcmAt(5, 12800)) // 0.4s at RMS 5 -- the level that hallucinates
+	if len(delivered) != 0 {
+		t.Errorf("near-silence reached the conversation as %v", delivered)
+	}
+	if len(quiet.says) != 1 {
+		t.Error("near-silence was sent to the ASR; the GPU call should be skipped entirely")
+	}
+	// It still counts as a turn: a dropped opening is exactly what we want to
+	// be able to find in the log.
+	if p.turns != 1 {
+		t.Errorf("turns = %d, want 1", p.turns)
+	}
+
+	p.emit(pcmAt(1400, 12800)) // real speech
+	if len(delivered) != 1 || delivered[0] != "Yeah." {
+		t.Errorf("real speech was dropped: %v", delivered)
+	}
+}
+
+// With no floor set the processor must behave exactly as before.
+func TestASRProcessorFloorIsOffByDefault(t *testing.T) {
+	p := NewASRProcessor(&fakeASR{says: []string{"Yeah."}})
+	var delivered []string
+	p.WithOnTranscript(func(text string) { delivered = append(delivered, text) })
+	p.emit(pcmAt(2, 12800))
+	if len(delivered) != 1 {
+		t.Errorf("default behaviour changed: %v", delivered)
+	}
+}
+
+// pcmAt builds 16-bit mono PCM of n bytes at approximately the given RMS.
+func pcmAt(rms float64, n int) []byte {
+	b := make([]byte, n)
+	v := int16(rms) // a square wave: |sample| == RMS
+	for i := 0; i+1 < n; i += 2 {
+		s := v
+		if (i/2)%2 == 1 {
+			s = -v
+		}
+		b[i] = byte(uint16(s))
+		b[i+1] = byte(uint16(s) >> 8)
+	}
+	return b
+}
