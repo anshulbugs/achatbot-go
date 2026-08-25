@@ -89,7 +89,7 @@ const dashboardHTML = `<!doctype html>
     <div class="label">On GPU</div>
     <div class="big" id="ongpu">–</div>
     <div class="sub" id="ceil">holding a pipeline</div>
-    <div class="bar" id="bar"><i style="width:0"></i></div>
+    <div class="bar" id="gpubar"><i style="width:0"></i></div>
   </div>
   <div class="card">
     <div class="label">Ringing</div>
@@ -110,6 +110,7 @@ const dashboardHTML = `<!doctype html>
     <div class="label">Headroom</div>
     <div class="big" id="head">–</div>
     <div class="sub" id="cost">of the GPU ceiling</div>
+    <div class="bar" id="costbar"><i style="width:0"></i></div>
   </div>
 </div>
 
@@ -230,19 +231,32 @@ function render(d){
   if (max > 0){
     $("ceil").textContent = "of " + max + " ceiling";
     $("head").textContent = Math.round(d.capacity.headroom*100) + "%";
-    // The bar tracks weighted GPU COST, not the raw pipeline count: that is
-    // the number admission actually decides on, and while calls are ringing
-    // it is the only one that reflects what has been committed.
     $("cost").textContent = "cost " + d.capacity.gpu_cost.toFixed(1) + " of " + max;
+
+    // EACH BAR MEASURES THE NUMBER PRINTED ABOVE IT.
+    //
+    // There used to be one bar, under "On GPU", and it was filled from the
+    // weighted GPU COST. Cost counts ringing calls as well as live pipelines,
+    // so the bar sat at 70% under a card reading "8 of 20" -- which reads as
+    // 40%. A reader was left to work out that the bar belonged to a different
+    // number entirely, and reported it as the dashboard being broken.
+    //
+    // Cost is still the number admission decides on, so it keeps a bar and
+    // keeps the warning colours. It just lives on the Headroom card now, next
+    // to the "cost X of Y" line it has always been describing.
+    const onGPU = Math.min(100, Math.round(d.calls.on_gpu / max * 100));
+    $("gpubar").firstElementChild.style.width = onGPU + "%";
+
     const used = Math.min(100, Math.round(d.capacity.gpu_cost / max * 100));
-    const bar = $("bar");
+    const bar = $("costbar");
     bar.className = "bar" + (used >= 90 ? " bad" : used >= 75 ? " warn" : "");
     bar.firstElementChild.style.width = used + "%";
   } else {
     $("ceil").textContent = "no ceiling configured";
     $("head").textContent = "∞";
     $("cost").textContent = "";
-    $("bar").firstElementChild.style.width = "0";
+    $("gpubar").firstElementChild.style.width = "0";
+    $("costbar").firstElementChild.style.width = "0";
   }
   $("totalcap").textContent = d.capacity.max_total_calls > 0
     ? "of " + d.capacity.max_total_calls + " hard cap" : "all three states";
