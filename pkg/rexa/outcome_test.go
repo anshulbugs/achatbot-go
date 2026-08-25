@@ -113,3 +113,46 @@ func TestDispatchFailureBeatsEverything(t *testing.T) {
 		t.Errorf("status = %q, want failed", status)
 	}
 }
+
+// A voicemail found by the transcript guard must reach the platform as
+// voicemail, exactly as one the carrier's AMD found.
+//
+// It did not, and this test is the reason the bug was caught before the next
+// campaign. Report() decided voicemail solely from isMachineAMD, and a guarded
+// call carries the verdict the carrier actually returned -- human_business, the
+// mislabel the guard exists to correct. The call was answered and the agent
+// ended it, so it fell through to completed / agent_hung_up: our own counter
+// said voicemail while the platform was told a conversation had happened.
+func TestReport_VoicemailDetectedByTranscriptGuard(t *testing.T) {
+	// The exact shape of a guarded call: the carrier said a human answered,
+	// the transcript said otherwise, and we left the message and hung up.
+	o := Outcome{
+		AMDVerdict:        "human_business",
+		Answered:          true,
+		AgentEnded:        true,
+		VoicemailDetected: true,
+		Direction:         "outbound",
+		HangupCause:       "normal_clearing",
+	}
+	status, reason := o.Report()
+	if status != CallStatusVoicemail || reason != EndReasonVoicemail {
+		t.Fatalf("got %s/%s, want %s/%s", status, reason, CallStatusVoicemail, EndReasonVoicemail)
+	}
+}
+
+// The flag must not invent a voicemail out of a call that never connected.
+func TestReport_VoicemailDetectedNeverOverridesDispatchFailure(t *testing.T) {
+	o := Outcome{DispatchFailed: true, VoicemailDetected: true, Direction: "outbound"}
+	if status, reason := o.Report(); status != CallStatusFailed || reason != EndReasonProviderFail {
+		t.Fatalf("got %s/%s, want failed/provider_fail", status, reason)
+	}
+}
+
+// Without the flag, nothing changes: a human_business call the guard did not
+// act on is still an ordinary completed conversation.
+func TestReport_HumanBusinessWithoutTheGuardIsStillCompleted(t *testing.T) {
+	o := Outcome{AMDVerdict: "human_business", Answered: true, AgentEnded: true, Direction: "outbound"}
+	if status, _ := o.Report(); status != CallStatusCompleted {
+		t.Fatalf("got %s, want completed", status)
+	}
+}

@@ -30,6 +30,16 @@ type Outcome struct {
 	// DispatchFailed is true when the call could not be placed at all
 	// (credentials rejected, carrier unreachable).
 	DispatchFailed bool
+	// VoicemailDetected is true when something OTHER than the carrier's AMD
+	// concluded a machine answered -- today, the transcript guard reading a
+	// recorded greeting off the caller's own words.
+	//
+	// It has to be a separate signal because such a call carries the verdict
+	// the carrier actually returned, which is precisely the mislabel the guard
+	// exists to correct: human_business. Deriving voicemail from AMDVerdict
+	// alone reported those calls as ordinary completed conversations while our
+	// own counter called them voicemail.
+	VoicemailDetected bool
 }
 
 // Report returns the call_status and end_reason for this outcome.
@@ -44,10 +54,11 @@ func (o Outcome) Report() (callStatus, endReason string) {
 	case o.DispatchFailed:
 		return CallStatusFailed, EndReasonProviderFail
 
-	// A machine answered. This is the case with no pipeline behind it — the
-	// report is emitted from the carrier lifecycle, because there is no
-	// session teardown to hang it off.
-	case isMachineAMD(o.AMDVerdict):
+	// A machine answered — either the carrier said so, or the transcript guard
+	// did. Ordered ABOVE the answered/AgentEnded branches on purpose: a call
+	// the guard acted on was answered and was ended by us, so leaving it any
+	// lower reports it as an ordinary completed conversation.
+	case isMachineAMD(o.AMDVerdict) || o.VoicemailDetected:
 		return CallStatusVoicemail, EndReasonVoicemail
 
 	// Never answered. The cause distinguishes busy from ringing out; both are

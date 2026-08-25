@@ -164,6 +164,11 @@ type rexaCall struct {
 	amdVerdict  string
 	hangupCause string
 	agentEnded  bool
+	// voicemailDetected is set when something other than the carrier's AMD
+	// concluded a machine answered -- the transcript guard. Kept apart from
+	// amdVerdict because the verdict on such a call is the carrier's mislabel
+	// (human_business), and the report must not be derived from it.
+	voicemailDetected bool
 
 	// reported guards the report against double-emission. Both call.hangup and
 	// a dispatch failure can reach the reporter, and the platform dedupes on
@@ -347,6 +352,17 @@ func (r *callRegistry) markAgentEnded(id string) {
 	defer r.mu.Unlock()
 	if p := r.m[id]; p != nil && p.platform != nil {
 		p.platform.agentEnded = true
+	}
+}
+
+// markVoicemailDetected records that this call reached a machine, as concluded
+// by something other than the carrier's AMD. Feeds Outcome.VoicemailDetected so
+// the platform is told voicemail rather than a completed conversation.
+func (r *callRegistry) markVoicemailDetected(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.m[id]; p != nil && p.platform != nil {
+		p.platform.voicemailDetected = true
 	}
 }
 
@@ -867,6 +883,10 @@ func reportCallEnded(id string) {
 		Direction:   rc.direction,
 		Answered:    rc.answered,
 		AgentEnded:  rc.agentEnded,
+		// Set by the transcript guard. Without it a guarded call reports as
+		// completed/agent_hung_up, because its AMD verdict is the carrier's
+		// human_business mislabel.
+		VoicemailDetected: rc.voicemailDetected,
 	}.Report()
 
 	report := rexa.EndOfCallReport{
@@ -1346,6 +1366,9 @@ func truncateForLog(s string, n int) string {
 func takeAgentOffAndLeaveMessage(id string, p *callParams) {
 	{
 		calls.markHandedOver(id)
+		// The report is derived from signals, not from this counter, so the
+		// platform needs telling separately or it hears "completed".
+		calls.markVoicemailDetected(id)
 		calls.stopMediaFor(id)
 		calls.markAgentEnded(id)
 		markVoicemail(id)
