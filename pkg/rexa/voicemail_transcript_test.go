@@ -66,3 +66,52 @@ func TestLooksLikeVoicemailGreeting_IsCaseAndPunctuationInsensitive(t *testing.T
 		}
 	}
 }
+
+// Greetings that escaped the first phrase list, taken from 719 transcripts on
+// the 25 Aug campaign. Call screening was the single biggest gap: the list had
+// "record your message" but not "record your name", and that one word let a
+// third of the misses through.
+func TestLooksLikeVoicemailGreeting_SecondRoundFromTheLogs(t *testing.T) {
+	machine := []string{
+		"If you record your name and reason for calling, I'll see if this person is available.",
+		"Record your name and reason for calling. I'll see if this person is available.",
+		"Hi, this is Ron. Give me your name and number, and I'll return your call. Thanks.",
+		"You've reached Adelia. I'm unable to pick up the phone, but please leave your name, number, and a brief message.",
+		"John, I can't take your call. Please leave a message.",
+		"Can't take your call now.",
+		"Please press 1 to connect with our sales department. Please press 2 to connect with our recruitment department.",
+		"Press 1 to dial by name. Press 2 for a list of extensions.",
+		"Eric, if you would like me to get back to you, please leave a message. Thanks.",
+		"Robert Nebel. I am unavailable at the moment, so if you could please leave me a message.",
+	}
+	for _, s := range machine {
+		if !LooksLikeVoicemailGreeting(s) {
+			t.Errorf("still missing a real greeting: %q", s)
+		}
+	}
+}
+
+// THREE CANDIDATES WERE DELIBERATELY LEFT OUT, and these lock that decision in.
+//
+// Each appeared in the logs often enough to be tempting -- "you've reached" 9
+// times, "reason for calling" 37, "stay on the line" 28 -- and each is also
+// something a live person at a business genuinely says. Since human_business is
+// exactly the population the guard acts on, matching them would hang up on the
+// receptionists we most need to keep. The screening greetings they appear in
+// are caught by "see if this person is available" anyway, so excluding them
+// costs coverage nothing.
+func TestLooksLikeVoicemailGreeting_ReceptionistPhrasesAreLeftAlone(t *testing.T) {
+	humans := []string{
+		"You've reached Acme Staffing, this is Bob, how can I help you?",
+		"You have reached the front desk.",
+		"Please stay on the line while I transfer you.",
+		"Stay on the line, I'll put you through.",
+		"May I ask the reason for calling?",
+		"Sure, what's the reason for calling today?",
+	}
+	for _, s := range humans {
+		if LooksLikeVoicemailGreeting(s) {
+			t.Errorf("would have hung up on a receptionist: %q", s)
+		}
+	}
+}

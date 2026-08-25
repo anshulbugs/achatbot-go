@@ -70,7 +70,41 @@ var voicemailPhrases = []string{
 	"no longer in service",
 	"has been forwarded to",
 
+	// Call screening. The single biggest gap in the first list: it had "record
+	// your message" but not "record your name", and screening services were a
+	// third of everything that escaped.
+	//
+	// "reason for calling" and "stay on the line" appear in the SAME greetings
+	// and are deliberately absent: a receptionist says both ("may I ask the
+	// reason for calling?", "stay on the line while I transfer you"), and the
+	// phrases below already catch those calls without that risk.
+	"record your name",
+	"see if this person is available",
+	"see if the person is available",
+
+	// Unavailability, stated by the person themselves -- which only a recording
+	// can do, since someone who says it is by definition on the call.
+	"cant take your call",
+	"can not take your call",
+	"unable to take your call",
+	"unable to pick up",
+	"i am unavailable",
+	"return your call",
+
+	// Requests to leave something. "please leave a message" is the machine
+	// form; a receptionist offers instead -- "can I take a message?" -- which
+	// is why the bare "leave a message" is not here.
+	"please leave a message",
+	"please leave me a message",
+	"leave your name",
+
 	// Menu prompts. A person does not offer you keypad options.
+	"press 1",
+	"press one",
+	"press 2",
+	"press two",
+	"dial by name",
+	"list of extensions",
 	"press pound",
 	"press the pound key",
 	"press one to leave",
