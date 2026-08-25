@@ -65,6 +65,44 @@ func TestASRProcessorWorksWithoutACallID(t *testing.T) {
 	}
 }
 
+// The opening floor must survive REPEATED phantoms. Protecting only "turn 1"
+// leaves a second invented word to be answered, and the caller still has not
+// spoken.
+func TestOpeningFloorHoldsUntilTheCallerIsActuallyHeard(t *testing.T) {
+	fake := &fakeASR{says: []string{"Yeah.", "Okay.", "Hello, who is this?"}}
+	p := NewASRProcessor(fake).WithCallID("v3:abc").WithOpeningMinRMS(1000)
+	var delivered []string
+	p.WithOnTranscript(func(text string) { delivered = append(delivered, text) })
+
+	p.emit(pcmAt(113, 12800))  // the measured phantom level
+	p.emit(pcmAt(400, 12800))  // still not a person
+	p.emit(pcmAt(1800, 12800)) // the caller, at last
+
+	if len(delivered) != 1 || delivered[0] != "Yeah." {
+		t.Fatalf("delivered %v; want only the segment loud enough to be real", delivered)
+	}
+	if len(fake.says) != 2 {
+		t.Error("a quiet opening was sent to the ASR; the GPU call should be skipped")
+	}
+	if p.turns != 3 {
+		t.Errorf("turns = %d, want 3 -- dropped openings must still be countable", p.turns)
+	}
+}
+
+// Once the caller has been heard, the strict opening floor must stop applying:
+// a quiet "no" later in the call is a real answer.
+func TestOpeningFloorStopsAfterTheCallerHasSpoken(t *testing.T) {
+	p := NewASRProcessor(&fakeASR{says: []string{"Hello?", "No."}}).WithOpeningMinRMS(1000)
+	var delivered []string
+	p.WithOnTranscript(func(text string) { delivered = append(delivered, text) })
+
+	p.emit(pcmAt(1800, 12800)) // opening, loud
+	p.emit(pcmAt(300, 12800))  // a quiet reply mid-call
+	if len(delivered) != 2 || delivered[1] != "No." {
+		t.Errorf("delivered %v; a quiet answer after the opening must survive", delivered)
+	}
+}
+
 // The ASR invents "Yeah." from near-silence -- measured at RMS 1.0 and 5.8
 // against real speech at 1425 -- so a floor must drop those segments before
 // they reach the model, and must not touch anything that sounds like a person.

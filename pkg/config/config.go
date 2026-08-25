@@ -339,6 +339,19 @@ type VADConfig struct {
 
 // ASRConfig selects the speech-recognition model and its provider pool.
 type ASRConfig struct {
+	// OpeningMinRMS discards an opening segment quieter than this (int16 RMS)
+	// instead of transcribing it, until the caller has been heard once. 0
+	// disables it.
+	//
+	// The model does not return empty for a quiet phone line -- it returns a
+	// plausible short word. MEASURED against parakeet-tdt-0.6b-v2 on 0.8s
+	// clips: RMS 1.0 and 5.8 both came back "Yeah.", against real speech at
+	// 1425. On live traffic the first segment of a call measured 1072-3527 for
+	// real speech and 113 for a phantom.
+	//
+	// It matters most on the opening because there a phantom "Yeah." answers
+	// "Is this a good time to chat?" for someone who only said hello.
+	OpeningMinRMS float64 `mapstructure:"opening_min_rms"`
 	// Model is the ASR model name; see ValidASRModels. Model files must be
 	// downloaded under models/ as documented in the README.
 	Model string `mapstructure:"model"`
@@ -516,6 +529,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("vad.stop_secs", 0.32)
 
 	v.SetDefault("asr.model", "sense_voice")
+	// 1000 sits below every real opening measured (the quietest was 1072) and
+	// well above the phantoms (113). The margin is thin on a small sample, so
+	// the "ASR dropped" log line carries the RMS: real speech appearing there
+	// means lower this.
+	v.SetDefault("asr.opening_min_rms", 1000.0)
 	v.SetDefault("asr.pool_size", 1)
 	v.SetDefault("asr.num_threads", 1)
 	v.SetDefault("asr.language", "")

@@ -85,6 +85,15 @@ type ASRProcessor struct {
 	// transcribing it. Zero disables the check -- see segmentRMS for why it
 	// exists and why the threshold is measured rather than guessed.
 	minRMS float64
+	// openingMinRMS is a stricter floor applied only until the caller has said
+	// something real. See WithOpeningMinRMS.
+	openingMinRMS float64
+	// heard is set once a transcript has been accepted, which is what ends the
+	// opening. Deliberately NOT "turn 1": when the opening produces two
+	// phantoms in a row, protecting only the first leaves the second to be
+	// answered, and the whole point is that nothing invented gets answered
+	// before the caller has actually spoken.
+	heard bool
 	// turns counts transcripts emitted on this call, so the FIRST one -- the
 	// one callers report as garbled -- can be found without reading backwards
 	// through the whole call.
@@ -123,6 +132,31 @@ func (p *ASRProcessor) WithMinRMS(rms float64) *ASRProcessor {
 	return p
 }
 
+// WithOpeningMinRMS discards segments quieter than rms until the caller has
+// been heard for the first time.
+//
+// THE OPENING IS WHERE THIS COSTS MOST. A phantom mid-conversation is a wasted
+// turn; a phantom on the opening answers "Is this a good time to chat?" on
+// behalf of someone who only said hello, or routes them into the do-not-call
+// branch. Both happened on real calls.
+//
+// MEASURED on one run, RMS of the first segment of each call:
+//
+//	1072 1289 1629 1779 2387 2551 2562 3527   real speech
+//	 113                                       "Yeah." from nothing
+//
+// The gap is wide but the floor is NOT far below the quietest real opening --
+// 1000 against 1072 is about 7% of margin on a sample of nine. That is thin,
+// and the failure it buys is mild: a dropped opening is silence, so the caller
+// simply speaks again, and on most calls the greeting is still playing anyway.
+// The failure it prevents is the agent acting on words nobody said. Watch the
+// "ASR dropped" lines, which carry the RMS: real speech appearing there means
+// this is set too high.
+func (p *ASRProcessor) WithOpeningMinRMS(rms float64) *ASRProcessor {
+	p.openingMinRMS = rms
+	return p
+}
+
 func NewASRProcessor(provider common.IASRProvider) *ASRProcessor {
 	return &ASRProcessor{
 		AsyncFrameProcessor: processors.NewAsyncFrameProcessor("ASRProcessor"),
@@ -151,11 +185,15 @@ func (p *ASRProcessor) emit(audio []byte) {
 	p.turns++
 	rms := segmentRMS(audio)
 	secs0 := float64(len(audio)) / float64(asrSampleRate*2)
-	if p.minRMS > 0 && rms < p.minRMS {
+	floor, why := p.minRMS, "too quiet to be speech"
+	if !p.heard && p.openingMinRMS > floor {
+		floor, why = p.openingMinRMS, "too quiet to be the caller's opening"
+	}
+	if floor > 0 && rms < floor {
 		// Not transcribed at all: this is the audio the model invents "Yeah."
 		// from, and skipping it saves the GPU call as well.
-		logger.Infof("ASR dropped call=%s turn=%d (%.2fs audio, rms %.0f < %.0f): too quiet to be speech",
-			p.callID, p.turns, secs0, rms, p.minRMS)
+		logger.Infof("ASR dropped call=%s turn=%d (%.2fs audio, rms %.0f < %.0f): %s",
+			p.callID, p.turns, secs0, rms, floor, why)
 		return
 	}
 	text := strings.TrimSpace(p.provider.Transcribe(audio))
@@ -167,6 +205,7 @@ func (p *ASRProcessor) emit(audio []byte) {
 	if text == "" || fillerOnly(text) {
 		return
 	}
+	p.heard = true
 	if p.onTranscript != nil {
 		p.onTranscript(text)
 	}

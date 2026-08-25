@@ -1072,6 +1072,10 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 		// Label transcripts with the call, so a garbled first turn can be found
 		// in a log carrying fifty conversations at once.
 		WithCallID(sc.callID).
+		// Refuse to transcribe an opening too quiet to be a person: the model
+		// answers near-silence with "Yeah.", and on the opening that reads as
+		// consent from someone who only said hello.
+		WithOpeningMinRMS(cfg.ASR.OpeningMinRMS).
 		WithOnTranscript(func(text string) {
 			touchUser() // the caller spoke: reset the idle timer
 
