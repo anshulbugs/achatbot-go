@@ -1186,6 +1186,34 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 							actMu.Lock()
 							idlePrompts++
 							actMu.Unlock()
+							continue
+						}
+
+						// BOTH PROMPTS WENT UNANSWERED: end the call.
+						//
+						// Without this the line simply stays open. The prompts
+						// stop at two and nothing else is watching, so a dead
+						// call -- the callee walked away, put the phone down
+						// without hanging up, or a machine we never identified
+						// -- holds its VAD, ASR and TTS slots until
+						// max_call_secs, which is twenty minutes by default.
+						//
+						// `ref` already accounts for our own prompt: it takes
+						// the latest of the caller's last transcript, their last
+						// audible speech, and the end of our own playback. So
+						// this fires only when the line has been silent for a
+						// full idle window AFTER the second prompt finished
+						// playing, and any sound from the caller resets it.
+						if np >= 2 && time.Since(ref) >= idleDur && sc.call != nil && sc.callID != "" {
+							log.Printf("idle: no answer after %d prompts and %.0fs of silence -- hanging up call=%s",
+								np, time.Since(ref).Seconds(), sc.callID)
+							// We are ending this, not the callee: the report
+							// must attribute it to the agent.
+							calls.markAgentEnded(sc.callID)
+							if err := sc.call.tc().Hangup(context.Background(), sc.callID); err != nil {
+								log.Printf("idle hangup err on call=%s: %v", sc.callID, err)
+							}
+							return
 						}
 					}
 				}
