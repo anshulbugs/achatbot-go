@@ -731,6 +731,11 @@ func botIsSpeaking(s serializers.Serializer) bool {
 // there the model answers the caller instead of opening with a preamble of its
 // own.
 func withCallStyle(prompt, spokenGreeting string) string {
+	// Strip instructions for actions this agent cannot perform, BEFORE the
+	// style rules are appended. A campaign prompt's Send SMS / Send Email steps
+	// have no tool behind them and no way to complete, so the model says the
+	// same sentence on every turn forever; see rexa.RewriteUnsupportedActions.
+	prompt = rexa.RewriteUnsupportedActions(prompt)
 	rules := callStyleRules
 	if speechMarkupEnabled {
 		rules += speechMarkupRules

@@ -609,6 +609,12 @@ func (c *Conn) ReadMessage() (consts.MessageType, []byte, error) {
 	return consts.BinaryMessage, data, err
 }
 
+// SetReadDeadline bounds how long the next ReadMessage may block, so a reader
+// that also has to watch a stop signal can come back and check it. A zero time
+// clears the deadline; a gorilla socket whose read deadline has expired is NOT
+// reusable for reads, so clear it before handing the socket to another reader.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.ws.SetReadDeadline(t) }
+
 // WriteMessage sends data to Telnyx as a text frame.
 func (c *Conn) WriteMessage(_ consts.MessageType, data []byte) error {
 	if len(data) == 0 {

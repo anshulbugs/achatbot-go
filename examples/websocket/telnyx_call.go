@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -1012,6 +1013,77 @@ var telnyxUpgrader = websocket.Upgrader{
 // WebSocket (base64 µ-law/8 kHz). It runs the full voice pipeline over a
 // Telnyx serializer, so the caller talks to the same VAD->ASR->LLM->TTS agent
 // as the browser client.
+// drainInbound consumes the caller's audio while the greeting plays and throws
+// it away, returning a function that stops the drain and waits for it to let go
+// of the socket.
+//
+// WHY THROWING IT AWAY IS THE FIX. Between the media stream connecting and the
+// pipeline starting -- the answering-machine window, about three seconds --
+// NOTHING read this socket. Telnyx kept sending 20 ms frames the whole time and
+// they queued, so the pipeline's first read drained three seconds of audio in
+// about a millisecond. That made the caller's opening words the ONLY audio on
+// the call processed as a burst, and keepInbound is not burst-safe: its
+// gateOpenUntil is a wall-clock deadline, so a backlog that drains faster than
+// the deadline holds the gate open for audio real time would have gated.
+//
+// MEASURED on the same three seconds of audio, gate output paced vs burst:
+// 1440 ms vs 1840 ms. Same input, different result, and only ever on turn one --
+// which is the turn callers report as garbled.
+//
+// Discarding is right rather than merely convenient. This window is the
+// greeting, and a caller talking over a greeting is answering it, not saying
+// something the agent needs: the backchannel filter already drops "Hello?"
+// spoken over the bot. Nothing is lost that was previously used, because
+// nothing was reading these frames at all -- they were only ever going to
+// arrive late and in a lump.
+//
+// Marks are still deserialized, or the greeting-playout measurement never fires.
+func drainInbound(id string, conn *telnyx.Conn, ser *telnyx.Serializer) func() {
+	if conn == nil || ser == nil {
+		return func() {}
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		var frames int
+		for {
+			select {
+			case <-stop:
+				// Clear the deadline: a gorilla socket left with an expired
+				// one cannot be read again, and the pipeline is about to.
+				_ = conn.SetReadDeadline(time.Time{})
+				log.Printf("announce: drained %d inbound frames during the greeting call=%s", frames, id)
+				return
+			default:
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				// A timeout is the loop breathing so it can see stop; anything
+				// else means the socket is gone and the caller will find out.
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					continue
+				}
+				_ = conn.SetReadDeadline(time.Time{})
+				return
+			}
+			// Deserialize rather than discard the bytes: this is what delivers
+			// the greeting mark, and it keeps the echo gate's floor tracking
+			// the line instead of meeting it cold at pipeline start.
+			if _, err := ser.Deserialize(data); err == nil {
+				frames++
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
+}
+
 // isMachineVerdict reports whether an AMD result means "no human is listening".
 //
 // The standard modes (detect, detect_beep, detect_words, greeting_end) only ever
@@ -1971,6 +2043,10 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			// the audio, which is a question for Telnyx and not something we
 			// can fix from here.
 			markAt := time.Now()
+			// Keep the socket read from here until the pipeline takes it over,
+			// so the caller's first words are never delivered as a backlog
+			// burst. See drainInbound.
+			stopDrain := drainInbound(id, conn, ser)
 			ser.SetMarkHandler(func(name string) {
 				if name != greetingMark {
 					return
@@ -2060,6 +2136,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			}
 			if isMachineVerdict(verdict) {
 				stopOnce.Do(func() { close(stop) })
+				stopDrain()
 				log.Printf("telnyx amd: machine verdict=%q on call=%s -- holding back %.1fs of greeting, no pipeline will be used",
 					verdict, id, float64(len(tail)/2)/float64(ttsRate))
 				runVoicemailCall(id, conn, tw, ser, ttsRate, p, p.beepCh)
@@ -2096,6 +2173,7 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 					timer.Stop()
 					if isMachineVerdict(verdict) {
 						stopOnce.Do(func() { close(stop) })
+						stopDrain()
 						log.Printf("telnyx amd: machine verdict=%q on call=%s during the greeting tail -- no pipeline will be used", verdict, id)
 						runVoicemailCall(id, conn, tw, ser, ttsRate, p, p.beepCh)
 						log.Printf("telnyx media stream ended call=%s (voicemail, 0 pool slots)", id)
@@ -2118,6 +2196,9 @@ func handleTelnyxMedia(w http.ResponseWriter, r *http.Request) {
 			if verdict == "" {
 				amdVerdictMissed()
 			}
+			// Hand the socket over BEFORE the pipeline starts reading it: two
+			// readers on one WebSocket lose frames to whichever wakes first.
+			stopDrain()
 			log.Printf("announce: greeting done call=%s (finished=%t verdict=%q) -> starting pipeline", id, finished, verdict)
 			go watchLateAMD(id, p)
 			// Human: the greeting has already played, so the session must not
