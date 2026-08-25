@@ -1508,13 +1508,44 @@ func runVoicemailCall(id string, conn *telnyx.Conn, tw *achatbot_processors.Webs
 	// message thirty seconds after the call was over. Nothing was recorded
 	// because there was nothing to record into, and the hangup that followed
 	// returned 422 because the call no longer existed.
-	alive := time.NewTicker(time.Second)
+	alive := time.NewTicker(200 * time.Millisecond)
 	defer alive.Stop()
+
+	// THE CARRIER'S BEEP EVENT IS TOO SLOW TO WAIT FOR ON ITS OWN.
+	//
+	// MEASURED over 57 voicemails: the beep signal arrives a median of 35s
+	// after answer, whether it reports beep_detected or no_beep_detected. A
+	// mailbox beeps and starts recording when its OWN greeting ends, commonly
+	// ten to twenty seconds in, and many stop recording after thirty. Waiting
+	// for the carrier therefore records twenty-odd seconds of silence and then
+	// runs out of tape mid-message, which is exactly what was reported.
+	//
+	// greeting_duration_millis used to cap that wait at ten seconds, and it is
+	// why the message used to land promptly -- but it also wrecked
+	// classification, taking human_business from 1% to 58% of all verdicts. It
+	// is not coming back.
+	//
+	// So the greeting is timed from the audio we already have. A mailbox
+	// greeting is speech followed by silence; once the line has been quiet for
+	// a beat AFTER we have actually heard the greeting, the beep has been and
+	// gone. That is the same inbound audio the transcript guard reads, and it
+	// needs nothing from Telnyx.
+	const (
+		// Long enough not to trip on the pauses inside a sentence, short
+		// enough that the message still lands inside a thirty-second tape.
+		greetingQuiet = 1600 * time.Millisecond
+		// Never speak before this: a mailbox that answers with a beat of
+		// silence before its greeting would otherwise be talked over.
+		minGreetingWait = 3 * time.Second
+	)
+	startedWaiting := time.Now()
+
 waitBeep:
 	for {
 		select {
 		case beepResult = <-beep:
-			log.Printf("telnyx amd: beep signal (%s) call=%s", beepResult, id)
+			log.Printf("telnyx amd: beep signal (%s) after %.1fs call=%s",
+				beepResult, time.Since(startedWaiting).Seconds(), id)
 			break waitBeep
 		case <-beepDeadline:
 			log.Printf("telnyx amd: no beep event within 35s, speaking anyway call=%s", id)
@@ -1523,6 +1554,22 @@ waitBeep:
 			if calls.get(id) == nil {
 				log.Printf("telnyx amd: call ended before the beep, no message to leave call=%s", id)
 				return
+			}
+			// The greeting has to have been heard before its silence means
+			// anything: a line that is quiet because nothing has started yet
+			// is not a mailbox waiting to record.
+			last := ser.LastSpeechAt()
+			if last.IsZero() {
+				continue
+			}
+			if time.Since(startedWaiting) < minGreetingWait {
+				continue
+			}
+			if quiet := time.Since(last); quiet >= greetingQuiet {
+				log.Printf("telnyx amd: greeting stopped %.1fs ago after %.1fs of waiting -- speaking without the carrier's beep call=%s",
+					quiet.Seconds(), time.Since(startedWaiting).Seconds(), id)
+				beepResult = "greeting-silence"
+				break waitBeep
 			}
 		}
 	}
