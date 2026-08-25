@@ -159,98 +159,39 @@ func (c *Client) Dial(ctx context.Context, to, webhookURL, clientState, amd stri
 	return res.Data.CallControlID, nil
 }
 
-// amdConfigFor returns the detection tuning to send with a dial, or nil to
-// accept Telnyx's defaults.
+// amdConfigFor returns the detection tuning to send with a dial. It now always
+// returns nil: premium runs on TELNYX'S OWN DEFAULTS, with no config block.
 //
-// Set explicitly for `premium` because Telnyx's own documentation contradicts
-// itself on what the default is: the OpenAPI spec gives
-// total_analysis_time_millis a default of 3500, while the prose on the premium
-// page says "by default, the timeout is set to 30 seconds" and their sample
-// request passes 30000. Those are not close enough to guess between — one
-// judges on three and a half seconds of audio, the other can take half a minute
-// to answer.
+// WHAT WE TRIED, AND WHAT THE NUMBERS SAID.
 //
-// 10s is chosen against OUR call, not against either default. The agent plays a
-// pre-rendered greeting of roughly fifteen seconds and waits out that audio for
-// a verdict before committing a pipeline, so a verdict inside ten seconds
-// arrives with margin to spare and can still route the call to voicemail and
-// leave the message. A verdict at thirty seconds would land after the pipeline
-// had started, where the best available outcome is hanging up on the machine
-// without leaving anything. Ten seconds also gives premium detection nearly
-// three times the audio that standard AMD's 3.5s default allows it.
+// We used to send total_analysis_time_millis and greeting_duration_millis. Both
+// were added against real failures and both turned out to be the wrong lever.
 //
-// Only for premium: the standard modes have consistent documented defaults and
-// their own well-tested tuning, and overriding those would be changing
-// something that is not in question.
+// total_analysis_time_millis: raised 10000 -> 15000 -> 30000 (Telnyx's own
+// premium default) on the theory that detection was running out of time,
+// because every `machine` verdict landed at 11-14s against a 15s ceiling.
+// MEASURED after doubling it: machine still min 11.0s, median 12.0s, max 13.0s,
+// and the machine share went 15% -> 13%. Nothing moved. Detection was never
+// near the ceiling; 11s is simply how long premium takes to recognise the
+// pattern, and when it answers sooner it answers human_business and stops.
+//
+// greeting_duration_millis: 10000, added so Telnyx would keep listening for the
+// beep rather than giving up at ~4s and letting the agent talk over a greeting
+// still in progress. It is NOT documented for premium -- Telnyx documents
+// total_analysis_time_millis as the only parameter that applies -- so what it
+// does to a premium analysis was always a guess. It is a suspect for the early
+// human_business verdicts, which cluster at a median of 8s with a max of 13s:
+// exactly where a ten-second greeting bound would force a decision.
+//
+// A working reference settles it. Another agent on this same account and the
+// same premium mode sends NO config block at all and detects voicemail far
+// better. The difference between the two systems is this block.
+//
+// The beep problem it was added for is solved without it: act on
+// greeting.ended for no_beep_detected as well as beep_detected, which is what
+// that handler already does.
 func amdConfigFor(amd string) map[string]any {
-	if amd != "premium" {
-		return nil
-	}
-	return map[string]any{
-		// How long detection gets before it gives up.
-		//
-		// 10000 was manufacturing "not_sure". Every verdict in the log tells
-		// the same story: human_residence lands at 3-4s, machine at 4-5s,
-		// silence at 5s — and every single not_sure at 9, 10 or 11 seconds,
-		// twelve of them, all pressed against a ten second deadline. That is
-		// not detection being uncertain, it is detection running out of time,
-		// and because not_sure is treated as human those calls put the agent
-		// into a conversation with a voicemail. It is the long-ringing numbers
-		// that land here: the ones whose mailbox picks up after a lengthy ring
-		// and opens with a slow greeting are exactly the ones that need more
-		// than ten seconds to characterise.
-		//
-		// Raising it does NOT slow down the calls that already work — a real
-		// verdict still arrives in 3-5s and the pipeline starts the moment it
-		// does. This only extends the deadline for the cases currently being
-		// timed out into a wrong answer.
-		// 30000 is TELNYX'S OWN DEFAULT for premium, and we were running at
-		// half of it.
-		//
-		// MEASURED over two campaigns, 77 machine verdicts: not one arrived
-		// before 11.0s, and they run to 14.0s -- finishing with a second to
-		// spare inside the old 15s ceiling. Premium will not commit to
-		// "machine" until it has heard the whole pattern, the greeting and the
-		// silence or beep after it, and a mailbox greeting that runs long
-		// pushes that past any budget this short.
-		//
-		// What it returns when it must answer early is human_business: a
-		// voicemail greeting IS a human voice reading a business-like message,
-		// so on voice characteristics alone that is the reasonable guess. It
-		// was 107 of 188 verdicts in one campaign and WRONG on every one --
-		// nothing ever followed it, because Telnyx stops tracking the greeting
-		// once it has called a human, which also kills the greeting.ended event
-		// that would otherwise correct it.
-		//
-		// Raising this costs human callers NOTHING. The pipeline does not wait
-		// on this window: the wait before committing is bounded separately by
-		// the greeting's own length (capped at 16s), and a verdict arriving
-		// after that is picked up by watchLateAMD for a further 60 seconds and
-		// routed into the same voicemail path. This only buys detection room to
-		// finish the job it currently runs out of time for.
-		"total_analysis_time_millis": 30000,
-		// How long to keep listening for the beep after concluding "machine".
-		//
-		// THIS IS WHY A VOICEMAIL RECORDED SILENCE. The default is a few
-		// seconds: on a real call the verdict landed at 4s and the greeting
-		// event followed at 10s reporting no_beep_detected — Telnyx had given
-		// up while the machine was still reading its own greeting. The agent
-		// took that as its cue, played the message over the greeting, and hung
-		// up; the machine then beeped and recorded the silence that followed.
-		//
-		// 10000 is the CEILING Telnyx allows: the documented range is
-		// (100, 10000) and anything above it fails the dial outright with
-		// "parameter is outside the valid range" — which is not a degraded
-		// voicemail, it is no call at all. 30000 was tried and did exactly
-		// that.
-		//
-		// So this is as much beep-detection as the carrier will sell us, and it
-		// is still short of a long outgoing greeting. A greeting that outlasts
-		// it reports no_beep_detected rather than beep_detected, and the
-		// voicemail path has to handle that case on its own rather than trust
-		// the cue. See runVoicemailCall.
-		"greeting_duration_millis": 10000,
-	}
+	return nil
 }
 
 // DialSIP places a call to a SIP URI and returns its call-control id.
