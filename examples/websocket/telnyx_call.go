@@ -297,6 +297,30 @@ func (r *callRegistry) markHandedOver(id string) {
 	r.mu.Unlock()
 }
 
+// claimAgentOff wins the right to end this call ONCE, returning false to every
+// caller after the first.
+//
+// Two paths reach voicemail now -- a late AMD verdict and the transcript guard
+// -- and on a real call they BOTH fired: the guard at 18:32:00 from the
+// mailbox's own greeting, the carrier's machine verdict a second later. Each
+// spoke the message and each scheduled a hangup, so the mailbox recorded the
+// message once, heard it start again, and had it cut off mid-sentence by the
+// first path's hangup.
+//
+// Checking handedOver from the caller is not enough: the flag is set inside
+// takeAgentOffAndLeaveMessage, so two goroutines can both read false and both
+// proceed. The test and the set have to happen under one lock.
+func (r *callRegistry) claimAgentOff(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.m[id]
+	if p == nil || p.handedOver {
+		return false
+	}
+	p.handedOver = true
+	return true
+}
+
 // handedOver reports whether the agent has already left this call.
 func (r *callRegistry) handedOver(id string) bool {
 	r.mu.Lock()
@@ -1364,8 +1388,14 @@ func truncateForLog(s string, n int) string {
 // machine" would drift, and the half that drifts is the half that stops
 // releasing the slot.
 func takeAgentOffAndLeaveMessage(id string, p *callParams) {
+	// ONCE PER CALL. Both voicemail paths can fire on the same call, a second
+	// apart; without this the message is spoken twice and the first hangup
+	// truncates the second reading.
+	if !calls.claimAgentOff(id) {
+		log.Printf("telnyx amd: agent already off call=%s -- not leaving the message twice", id)
+		return
+	}
 	{
-		calls.markHandedOver(id)
 		// The report is derived from signals, not from this counter, so the
 		// platform needs telling separately or it hears "completed".
 		calls.markVoicemailDetected(id)
