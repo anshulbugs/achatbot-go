@@ -160,6 +160,24 @@ type ServerConfig struct {
 	// own TTS after the pipeline is released, so leaving a message costs no GPU.
 	// Empty means hang up as soon as a machine is detected.
 	VoicemailMessage string `mapstructure:"voicemail_message"`
+	// VoicemailTranscriptGuard is a second line of answering-machine detection
+	// that reads the first few transcripts of a live call and acts when they are
+	// unmistakably a recorded greeting.
+	//
+	// It exists because the carrier's verdict is not reliable enough alone.
+	// MEASURED over 95 dialled calls: at least 57 reached voicemail, AMD called
+	// 12 of them machine, and 38 of the misses came back `human_business`. Each
+	// miss holds a GPU slot for a full conversation with a machine, never leaves
+	// the message, and is counted as a human answer.
+	//
+	// Off by default: it can take the agent off a live call, so it is opt-in
+	// per deployment rather than something that arrives with an upgrade.
+	VoicemailTranscriptGuard bool `mapstructure:"voicemail_transcript_guard"`
+	// VoicemailTranscriptGuardTurns bounds how many of the caller's transcripts
+	// the guard inspects. A greeting is the FIRST thing a machine says, so
+	// looking further buys nothing and risks acting on a human quoting a phrase
+	// later in a real conversation. Zero means 2.
+	VoicemailTranscriptGuardTurns int `mapstructure:"voicemail_transcript_guard_turns"`
 	// RecordCalls asks Telnyx to record every answered call (dual channel, mp3).
 	// Recordings are billed and stored by Telnyx — keep this off for large runs.
 	RecordCalls bool `mapstructure:"record_calls"`
@@ -481,6 +499,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.turn_gate_max_wait_secs", 2.5)
 	v.SetDefault("server.first_chunk_words", 4)
 	v.SetDefault("server.voicemail_detection", "disabled")
+	v.SetDefault("server.voicemail_transcript_guard", false)
+	v.SetDefault("server.voicemail_transcript_guard_turns", 2)
 	// Telnyx's own default, so an unset key changes nothing.
 	v.SetDefault("server.dial_timeout_secs", 30)
 	// Safe by default: Join keeps working without any change on the platform

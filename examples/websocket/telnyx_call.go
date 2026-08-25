@@ -1285,6 +1285,66 @@ func watchLateAMD(id string, p *callParams) {
 			return
 		}
 		log.Printf("telnyx amd: late machine verdict=%q on call=%s -- taking the agent off and leaving the message", v, id)
+		takeAgentOffAndLeaveMessage(id, p)
+	case <-timer.C:
+	}
+}
+
+// voicemailTranscriptGuard is the second line of answering-machine detection.
+//
+// The carrier's verdict is the first line and it misses: MEASURED over 95
+// dialled calls, at least 57 reached voicemail and AMD called only 12 of them
+// machine, with 38 of the misses labelled `human_business`. Those calls run a
+// full pipeline against a recording — a GPU slot held for the whole message,
+// no voicemail left, and a human answer recorded in the metrics.
+//
+// So when the caller's own words are unmistakably a recorded greeting, this
+// reaches the same ending a late AMD verdict would.
+//
+// Bounded to the first few transcripts on purpose. A greeting is the first
+// thing a machine says, so looking further buys nothing and starts risking a
+// real conversation in which somebody quotes one of these phrases.
+//
+// Returns true when it acted.
+func voicemailTranscriptGuard(callID, text string, turn, maxTurns int) bool {
+	if callID == "" || turn > maxTurns {
+		return false
+	}
+	if !rexa.LooksLikeVoicemailGreeting(text) {
+		return false
+	}
+	p, id := calls.resolve(callID)
+	if p == nil {
+		return false
+	}
+	// Already off this call: a late AMD verdict or a transfer got here first.
+	if calls.handedOver(id) {
+		return false
+	}
+	log.Printf("voicemail guard: transcript on call=%s reads as a recorded greeting (turn %d) %q -- taking the agent off and leaving the message",
+		id, turn, truncateForLog(text, 120))
+	takeAgentOffAndLeaveMessage(id, p)
+	return true
+}
+
+// truncateForLog keeps one transcript on one log line.
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// takeAgentOffAndLeaveMessage ends a live call that turned out to be a machine:
+// it releases the pipeline and its GPU slot, records the call as voicemail, and
+// leaves the message through the CARRIER rather than the media socket.
+//
+// Split out of watchLateAMD so the transcript guard reaches voicemail exactly
+// the same way a late AMD verdict does. Two implementations of "hang up on a
+// machine" would drift, and the half that drifts is the half that stops
+// releasing the slot.
+func takeAgentOffAndLeaveMessage(id string, p *callParams) {
+	{
 		calls.markHandedOver(id)
 		calls.stopMediaFor(id)
 		calls.markAgentEnded(id)
@@ -1326,7 +1386,6 @@ func watchLateAMD(id string, p *callParams) {
 		if err := p.tc().Hangup(context.Background(), id); err != nil {
 			log.Printf("telnyx amd: late hangup failed on call=%s: %v", id, err)
 		}
-	case <-timer.C:
 	}
 }
 
