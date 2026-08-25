@@ -204,7 +204,31 @@ func amdConfigFor(amd string) map[string]any {
 		// verdict still arrives in 3-5s and the pipeline starts the moment it
 		// does. This only extends the deadline for the cases currently being
 		// timed out into a wrong answer.
-		"total_analysis_time_millis": 15000,
+		// 30000 is TELNYX'S OWN DEFAULT for premium, and we were running at
+		// half of it.
+		//
+		// MEASURED over two campaigns, 77 machine verdicts: not one arrived
+		// before 11.0s, and they run to 14.0s -- finishing with a second to
+		// spare inside the old 15s ceiling. Premium will not commit to
+		// "machine" until it has heard the whole pattern, the greeting and the
+		// silence or beep after it, and a mailbox greeting that runs long
+		// pushes that past any budget this short.
+		//
+		// What it returns when it must answer early is human_business: a
+		// voicemail greeting IS a human voice reading a business-like message,
+		// so on voice characteristics alone that is the reasonable guess. It
+		// was 107 of 188 verdicts in one campaign and WRONG on every one --
+		// nothing ever followed it, because Telnyx stops tracking the greeting
+		// once it has called a human, which also kills the greeting.ended event
+		// that would otherwise correct it.
+		//
+		// Raising this costs human callers NOTHING. The pipeline does not wait
+		// on this window: the wait before committing is bounded separately by
+		// the greeting's own length (capped at 16s), and a verdict arriving
+		// after that is picked up by watchLateAMD for a further 60 seconds and
+		// routed into the same voicemail path. This only buys detection room to
+		// finish the job it currently runs out of time for.
+		"total_analysis_time_millis": 30000,
 		// How long to keep listening for the beep after concluding "machine".
 		//
 		// THIS IS WHY A VOICEMAIL RECORDED SILENCE. The default is a few
