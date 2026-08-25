@@ -13,10 +13,20 @@ func TestOutcomeReport(t *testing.T) {
 		// reports, even though no pipeline ever ran.
 		{"premium machine", Outcome{AMDVerdict: "machine", Answered: true},
 			CallStatusVoicemail, EndReasonVoicemail},
-		{"premium silence", Outcome{AMDVerdict: "silence", Answered: true},
-			CallStatusVoicemail, EndReasonVoicemail},
 		{"premium fax", Outcome{AMDVerdict: "fax_detected", Answered: true},
 			CallStatusVoicemail, EndReasonVoicemail},
+
+		// silence is a person who picked up and waited, and the dialler routes
+		// it to the agent. Reporting it as voicemail contradicted the
+		// conversation that call actually had; see IsMachineAMD.
+		{"premium silence is a human who waited", Outcome{AMDVerdict: "silence",
+			Answered: true, Direction: "outbound", HangupCause: "normal_clearing"},
+			CallStatusCompleted, EndReasonCalleeHungUp},
+
+		// ...and when a silent answer really was a mailbox, greeting.ended
+		// overwrites the verdict, so the report still lands on voicemail.
+		{"silence corrected by greeting.ended", Outcome{AMDVerdict: "machine",
+			Answered: true}, CallStatusVoicemail, EndReasonVoicemail},
 
 		// Premium's human variants must NOT be mistaken for machines.
 		{"human_residence", Outcome{AMDVerdict: "human_residence", Answered: true},
@@ -118,7 +128,7 @@ func TestDispatchFailureBeatsEverything(t *testing.T) {
 // voicemail, exactly as one the carrier's AMD found.
 //
 // It did not, and this test is the reason the bug was caught before the next
-// campaign. Report() decided voicemail solely from isMachineAMD, and a guarded
+// campaign. Report() decided voicemail solely from IsMachineAMD, and a guarded
 // call carries the verdict the carrier actually returned -- human_business, the
 // mislabel the guard exists to correct. The call was answered and the agent
 // ended it, so it fell through to completed / agent_hung_up: our own counter
@@ -154,5 +164,40 @@ func TestReport_HumanBusinessWithoutTheGuardIsStillCompleted(t *testing.T) {
 	o := Outcome{AMDVerdict: "human_business", Answered: true, AgentEnded: true, Direction: "outbound"}
 	if status, _ := o.Report(); status != CallStatusCompleted {
 		t.Fatalf("got %s, want completed", status)
+	}
+}
+
+// The dialler decides whether to run a pipeline and the reporter decides what
+// to file the call as, and for one release they disagreed about `silence`:
+// those calls talked to a person and were reported as voicemail, about eleven
+// per campaign run. isMachineVerdict in the dialler is now a bare wrapper over
+// this, so the only way they can disagree again is if someone reintroduces a
+// second copy of the policy. This pins the values that wrapper is trusted to
+// return.
+func TestIsMachineAMDIsTheOnlyRoutingPolicy(t *testing.T) {
+	machines := []string{"machine", "fax_detected"}
+	humans := []string{"human", "human_residence", "human_business", "not_sure",
+		"silence", "", "garbage"}
+
+	for _, v := range machines {
+		if !IsMachineAMD(v) {
+			t.Errorf("IsMachineAMD(%q) = false, want true -- the agent would talk to a machine", v)
+		}
+	}
+	for _, v := range humans {
+		if IsMachineAMD(v) {
+			t.Errorf("IsMachineAMD(%q) = true, want false -- a person would never be spoken to", v)
+		}
+	}
+}
+
+// A guard-detected voicemail must still report as one on a silence verdict:
+// removing silence from the machine set must not cost the guard its signal.
+func TestGuardStillReportsVoicemailOnASilenceVerdict(t *testing.T) {
+	o := Outcome{AMDVerdict: "silence", Answered: true, AgentEnded: true,
+		VoicemailDetected: true}
+	if status, reason := o.Report(); status != CallStatusVoicemail || reason != EndReasonVoicemail {
+		t.Errorf("= (%q, %q), want (%q, %q)", status, reason,
+			CallStatusVoicemail, EndReasonVoicemail)
 	}
 }

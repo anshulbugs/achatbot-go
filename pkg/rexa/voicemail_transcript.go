@@ -13,7 +13,7 @@ import "strings"
 // a GPU slot for the length of it, never left the voicemail message, and the
 // call was recorded as a human answer, which inflates answer_rate as well.
 //
-// isMachineAMD stays exactly as it is. It mirrors what the carrier documents,
+// IsMachineAMD stays exactly as it is. It mirrors what the carrier documents,
 // and rewriting `human_business` to mean machine would turn every receptionist
 // into a voicemail. This looks at the transcript instead, which is evidence
 // about this call rather than a label about it.

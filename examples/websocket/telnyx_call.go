@@ -1020,30 +1020,17 @@ var telnyxUpgrader = websocket.Upgrader{
 // Testing `== "machine"` therefore silently routes a fax tone down the human
 // path and burns a full pipeline on it for the whole call.
 //
-// not_sure stays on the human path deliberately: Telnyx documents it as
-// "treat as human", and hanging up on a real person is far worse than spending
-// a pipeline slot on a machine.
+// The reasoning for each verdict — why not_sure and silence stay on the human
+// path — lives on rexa.IsMachineAMD, which this delegates to.
 //
-// `silence` is NOT a machine, deliberately, and it used to be.
-//
-// It means detection heard nothing to judge — which is most often a person who
-// picked up and waited, exactly what people do when a call opens with a pause.
-// Routing them to the voicemail path costs the call: the agent never speaks to
-// them, and on one real call the line then hung up while we sat waiting for a
-// beep that was never coming.
-//
-// Treating it as human is also the recoverable direction. If a silent answer
-// really was a mailbox, `call.machine.greeting.ended` follows — that event is
-// only ever emitted for a machine, and it now overrides a non-machine verdict —
-// so the call still reaches the voicemail path. The reverse has no recovery: a
-// person sent to voicemail is simply never spoken to.
+// IT DELEGATES BECAUSE THE COPY DRIFTED. This function and the reporter's
+// predicate were written to agree and did not: `silence` was dropped here and
+// left there, so those calls ran a full pipeline against a person and were
+// then reported as voicemail. Two functions that must agree, in two packages,
+// with two sets of comments explaining themselves, will diverge again. One
+// wrapper with no policy in it cannot.
 func isMachineVerdict(result string) bool {
-	switch result {
-	case "machine", "fax_detected":
-		return true
-	default:
-		return false
-	}
+	return rexa.IsMachineAMD(result)
 }
 
 // amdMode returns the answering-machine-detection mode to request.

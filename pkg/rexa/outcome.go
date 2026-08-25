@@ -58,7 +58,7 @@ func (o Outcome) Report() (callStatus, endReason string) {
 	// did. Ordered ABOVE the answered/AgentEnded branches on purpose: a call
 	// the guard acted on was answered and was ended by us, so leaving it any
 	// lower reports it as an ordinary completed conversation.
-	case isMachineAMD(o.AMDVerdict) || o.VoicemailDetected:
+	case IsMachineAMD(o.AMDVerdict) || o.VoicemailDetected:
 		return CallStatusVoicemail, EndReasonVoicemail
 
 	// Never answered. The cause distinguishes busy from ringing out; both are
@@ -96,14 +96,29 @@ func (o Outcome) Report() (callStatus, endReason string) {
 	return CallStatusCompleted, EndReasonCalleeHungUp
 }
 
-// isMachineAMD reports whether an AMD verdict means no human is listening.
+// IsMachineAMD reports whether an AMD verdict means no human is listening.
 //
-// Mirrors the dialler's own predicate. `not_sure` is treated as human because
-// Telnyx documents it that way, and recording a real conversation as a
-// voicemail is worse than the reverse.
-func isMachineAMD(verdict string) bool {
+// THIS IS THE ONE PREDICATE. The dialler used to carry its own copy, and the
+// two drifted: the dialler dropped `silence` from the machine set — for good
+// reasons, below — and the reporter kept it. Roughly eleven calls per campaign
+// run therefore held a full conversation with a person and were filed as
+// voicemail. Exported so `isMachineVerdict` in the dialler delegates here
+// rather than restating it; routing and reporting must not be able to disagree
+// about what answered the phone.
+//
+// `not_sure` is human. Telnyx documents it that way, and recording a real
+// conversation as a voicemail is worse than the reverse.
+//
+// `silence` is human, and it used to be a machine. It means detection heard
+// nothing to judge, which is most often a person who picked up and waited —
+// exactly what people do when a call opens with a pause. Treating it as a
+// machine is also the unrecoverable direction: if a silent answer really was a
+// mailbox, `call.machine.greeting.ended` follows, that event is only ever
+// emitted for a machine, and it overwrites the verdict with `machine`, so the
+// call still reports as voicemail. Nothing rescues a person filed as one.
+func IsMachineAMD(verdict string) bool {
 	switch verdict {
-	case "machine", "silence", "fax_detected":
+	case "machine", "fax_detected":
 		return true
 	default:
 		return false
