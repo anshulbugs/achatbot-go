@@ -44,13 +44,13 @@ func TestRewriteRemovesTheSentenceThatLooped(t *testing.T) {
 
 // The closing words are correct as written -- they ask the caller to do the one
 // thing the agent cannot. Only the repetition is a defect.
-func TestRewriteKeepsTheClosingLineButStopsItRepeating(t *testing.T) {
+func TestRewriteKeepsTheClosingLineAndPointsItAtEndCall(t *testing.T) {
 	out := RewriteUnsupportedActions(realSteps)
 	if !strings.Contains(out, "Please feel free to cut the call if you have no other questions") {
 		t.Fatal("the polite hand-off to the caller must survive")
 	}
-	if !strings.Contains(out, "Do not say goodbye a second time") {
-		t.Error("the Hang Up step gained no stop condition, so it can loop again")
+	if !strings.Contains(out, "invoke the end_call tool in the same turn") {
+		t.Error("the Hang Up step was not pointed at the tool that actually ends the call")
 	}
 }
 
@@ -62,7 +62,7 @@ func TestRewriteIsIdempotent(t *testing.T) {
 	if once != twice {
 		t.Error("rewriting twice changed the prompt again; the note would stack")
 	}
-	if n := strings.Count(twice, "You have no way to hang up"); n != 1 {
+	if n := strings.Count(twice, "Saying goodbye does not end the call"); n != 1 {
 		t.Errorf("guidance note appears %d times, want 1", n)
 	}
 }

@@ -986,6 +986,11 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// of the calls in flight invoked it.
 	if sc.call != nil && sc.callID != "" {
 		registerTransferTool(session, sc.call, sc.callID)
+		// end_call needs the telephony serializer to know when the closing
+		// line has actually reached the caller. Browser sessions carry a
+		// different serializer and no carrier leg, so they get no tool.
+		telSer, _ := serializer.(*telnyx.Serializer)
+		registerEndCallTool(session, sc.call, sc.callID, telSer)
 		// Repair the case where the model TELLS the caller it is connecting
 		// them and never invokes the tool. Installed after the observer above
 		// so it runs alongside whatever else watches agent turns.

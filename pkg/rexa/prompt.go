@@ -33,9 +33,11 @@ import (
 // time the candidate spoke, the model re-entered the step and said its goodbye
 // again. So it gets a termination rule rather than a rewrite.
 //
-// That is a mitigation, not a cure. The durable fix is an end_call tool -- the
-// carrier hangup already exists as telnyx.Client.Hangup and is called from four
-// other places -- which would make all six steps do what they say.
+// The tool now exists: end_call hangs up at the carrier once the closing line has
+// finished playing, so these steps can complete. The rewrite points the step at
+// it, because a step that says "Hang Up" and nothing else leaves the model to
+// infer that saying goodbye is the action -- which is exactly how call_transfer
+// was missed twice on one call.
 //
 // CACHE COST IS NIL, and that is not luck. Prefix caching only holds up to the
 // first byte that differs between calls, and in these prompts the candidate's
@@ -60,9 +62,9 @@ func RewriteUnsupportedActions(prompt string) string {
 // backstops step wording this does not recognise: the steps are authored per
 // campaign, so an exact-match list will always be incomplete.
 const promptActionNote = "\n\n## Ending the call, and sending things\n" +
-	"You have no way to hang up. Say the closing line ONCE and then stop closing: " +
-	"if the caller keeps talking, answer what they asked in one short sentence and " +
-	"leave it to them to put the phone down. Never say goodbye twice in one call. " +
+	"Saying goodbye does not end the call. To end it you MUST invoke the end_call " +
+	"tool, in the same turn as your closing line. Never say goodbye without invoking " +
+	"it, and never say it twice.\n" +
 	"You cannot send a text or an email while the call is running. Never say one " +
 	"is being sent now, and never say you are doing it \"right now\" -- say it will " +
 	"be sent after the call, once, and then move on to the next step. If the caller " +
@@ -102,6 +104,6 @@ var promptRewrites = []struct {
 		regexp.MustCompile(`(?m)^(### Step \d+: Hang Up)[ \t]*$`),
 		// The header itself is changed, not just annotated: a rule that leaves
 		// its own trigger intact appends again on every pass.
-		"$1 -- say this once\n(If the caller speaks again afterwards, reply briefly and let them hang up. Do not say goodbye a second time.)",
+		"$1 -- say the closing line ONCE and invoke the end_call tool in the same turn.",
 	},
 }
