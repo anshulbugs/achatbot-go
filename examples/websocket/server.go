@@ -17,8 +17,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"achatbot/pkg/rexa"
 
 	"github.com/gorilla/websocket"
 	"github.com/weedge/pipeline-go/pkg/frames"
@@ -705,6 +708,14 @@ var speechMarkupEnabled bool
 const speechMarkupRules = `
 - You have one piece of markup, and it is the single exception to the no-markdown rule above. Writing a word as [word](+1) tells the speech engine to lean on it, and [word](-1) tells it to pass over it lightly. It works best on SHORT words that are not already emphasised — "your", "free", "only", "now", "yes" — and does least on a long word the voice already stresses. Use it on no more than three or four words in a whole reply: emphasising everything is the same as emphasising nothing and comes back out as a monotone. The brackets are an instruction to the engine, never spoken and never seen by anyone.`
 
+// botIsSpeaking reports whether the transport thinks the bot's audio is still
+// playing out. Telephony serializers track this to run the echo gate; anything
+// else (the browser path) reports false and nothing is dropped.
+func botIsSpeaking(s serializers.Serializer) bool {
+	b, ok := s.(interface{ BotActive() bool })
+	return ok && b.BotActive()
+}
+
 // withCallStyle appends the delivery rules, and the greeting already spoken, to
 // a system prompt.
 //
@@ -737,7 +748,14 @@ func withCallStyle(prompt, spokenGreeting string) string {
 			"The call is under way. Do not say any of it again, do not reintroduce " +
 			"yourself, and do not open with a fresh greeting. Answer what they just said " +
 			"and carry the conversation forward. If they only said \"hello\", acknowledge " +
-			"it in a few words and put your first real question to them."
+			"it in a few words and put your first real question to them.\n\n" +
+			"They may have started speaking BEFORE the opening line finished playing, " +
+			"in which case they have not heard the end of it. So a bare acknowledgement " +
+			"-- \"hello\", \"yeah\", \"yes\", \"okay\", \"sorry\" and the like, with nothing " +
+			"else in it -- is them picking up the phone. It is NOT an answer to the " +
+			"question the opening line ends on. Never treat one as agreement, interest " +
+			"or consent, and never thank them for it. Put that question to them yourself " +
+			"before you act on any answer to it."
 	}
 	return out
 }
@@ -1033,9 +1051,47 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	}
 	defer asrPool.Put(asrPoolInstanceInfo)
 	asrProvider := asrPoolInstanceInfo.GetInstance().(common.IASRProvider)
+	// Counts the caller's transcripts so the voicemail guard can look only at
+	// the opening of the call. Atomic because the hook runs on the ASR
+	// processor's goroutine, not this one.
+	var userTurns atomic.Int64
 	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider).
 		WithOnTranscript(func(text string) {
 			touchUser() // the caller spoke: reset the idle timer
+
+			// BACKCHANNEL OVER THE BOT'S OWN SPEECH IS NOT A TURN.
+			//
+			// A caller said "hello" while the greeting was still playing. The
+			// echo gate only opens once inbound audio clears the echo floor, so
+			// the onset was already gone by then and ASR returned "Yeah" -- and
+			// because the model is told the greeting was delivered and replied
+			// to, it read that as agreement to the question the greeting ends
+			// on and answered "That's great to hear". The caller had not heard
+			// the question.
+			//
+			// Only while the bot is actually speaking, and only for utterances
+			// that are entirely backchannel: "stop calling me" must always get
+			// through. See rexa.IsShortAcknowledgement.
+			if botIsSpeaking(serializer) && rexa.IsShortAcknowledgement(text) {
+				log.Printf("backchannel: dropped %q spoken over the bot call=%s", text, sc.callID)
+				return
+			}
+
+			// SECOND-LINE ANSWERING-MACHINE DETECTION. The carrier's AMD misses
+			// most voicemails on this account -- see voicemailTranscriptGuard --
+			// and a miss costs a GPU slot for the length of a conversation with
+			// a recording. Off unless the deployment opts in, because acting on
+			// this takes the agent off a live call.
+			if cfg.Server.VoicemailTranscriptGuard && sc.callID != "" {
+				maxTurns := cfg.Server.VoicemailTranscriptGuardTurns
+				if maxTurns <= 0 {
+					maxTurns = 2
+				}
+				turn := int(userTurns.Add(1))
+				if voicemailTranscriptGuard(sc.callID, text, turn, maxTurns) {
+					return // the agent is off this call; nothing more to send
+				}
+			}
 			// Surface the user's transcript to the client, tagged so the UI
 			// can render it as the user's turn (bot text uses "TextFrame").
 			// Harmless for telephony: the Telnyx serializer drops TextFrames.
