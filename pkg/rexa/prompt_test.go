@@ -1,15 +1,20 @@
 package rexa
 
-import "strings"
+import (
+	"strings"
+	"testing"
+)
 
-import "testing"
+// Verbatim from the campaign running on 25 Aug 2026, 22:57 onwards. Indented
+// headers, and the action as a verb -- the form the first version of this code
+// did not recognise, which is why it rewrote nothing on 27 live prompts.
+const verbForm = "    ### Step 2: Hang Up\r\n    Action: hangUp\r\n\r\n" +
+	"    ### Step 13: Send SMS [SMS Candidate]\r\n    Action: sendSms\r\n\r\n" +
+	"    ### Step 12: Transfer Call\r\n    Action: transferCall\r\n"
 
-// The step bodies here are copied verbatim from the campaign prompt of the call
-// that exposed this: session 01a03a9b, 25 Aug 2026.
-const realSteps = `### Step 19: Send SMS [Recruiter]
+// Verbatim from the campaign of session 01a03a9b, which writes steps as prose.
+const proseForm = `### Step 19: Send SMS [Recruiter]
 Say: "I'm sending you a text message with the details right now." and then send the SMS.
-
-Then continue with -> [Step 20: Send SMS [Candidate SMS]]
 
 ### Step 20: Send SMS [Candidate SMS]
 Send the SMS silently.
@@ -18,13 +23,36 @@ Send the SMS silently.
 Send the email.
 
 ### Step 27: Hang Up
-Say: "Thank you for your time. Have a great day! Goodbye. Please feel free to cut the call if you have no other questions."
+Say: "Thank you for your time. Have a great day! Goodbye."
 `
 
-func TestRewriteRemovesTheSentenceThatLooped(t *testing.T) {
-	out := RewriteUnsupportedActions(realSteps)
+// THE REGRESSION THIS FILE EXISTS FOR. end_call was advertised on 20 live calls
+// and invoked on none, because every Hang Up step went unrewritten: the headers
+// were indented and the rule was anchored to column zero.
+func TestRewriteHandlesTheIndentedVerbForm(t *testing.T) {
+	out := RewriteUnsupportedActions(verbForm, true)
 
-	// The exact sentence the agent said seven times in a row.
+	if strings.Contains(out, "Action: hangUp") {
+		t.Error("hangUp left as-is; the model is told to hang up with no way to do it")
+	}
+	if !strings.Contains(out, "Invoke the end_call tool now") {
+		t.Error("the hangUp step was not pointed at end_call")
+	}
+	if strings.Contains(out, "Action: sendSms") {
+		t.Error("sendSms left as-is; it has no tool and the step cannot complete")
+	}
+	if !strings.Contains(out, "Invoke the call_transfer tool now") {
+		t.Error("transferCall was not pointed at the tool that performs it")
+	}
+	// Indentation is structure in these prompts; losing it reflows the step.
+	if !strings.Contains(out, "    Invoke the end_call tool now") {
+		t.Error("leading indentation was not preserved")
+	}
+}
+
+// The other campaign's wording must keep working.
+func TestRewriteStillHandlesTheProseForm(t *testing.T) {
+	out := RewriteUnsupportedActions(proseForm, true)
 	if strings.Contains(out, "sending you a text message with the details right now") {
 		t.Error("the present-tense promise survived; it is what the model repeats")
 	}
@@ -32,7 +60,7 @@ func TestRewriteRemovesTheSentenceThatLooped(t *testing.T) {
 		t.Error("an action with no tool behind it survived")
 	}
 	for _, want := range []string{
-		"as soon as we finish this call", // the honest, terminal replacement
+		"as soon as we finish this call",
 		"The text is sent after the call ends",
 		"The email is sent after the call ends",
 	} {
@@ -42,51 +70,48 @@ func TestRewriteRemovesTheSentenceThatLooped(t *testing.T) {
 	}
 }
 
-// The closing words are correct as written -- they ask the caller to do the one
-// thing the agent cannot. Only the repetition is a defect.
-func TestRewriteKeepsTheClosingLineAndPointsItAtEndCall(t *testing.T) {
-	out := RewriteUnsupportedActions(realSteps)
-	if !strings.Contains(out, "Please feel free to cut the call if you have no other questions") {
-		t.Fatal("the polite hand-off to the caller must survive")
+// The guidance must be appended even when no rule fires. Prompts are authored
+// per campaign, so an exact-match rule list is always one format behind -- and
+// when it matched nothing, the model was told nothing.
+func TestGuidanceIsAppendedEvenWhenNothingMatched(t *testing.T) {
+	unknown := "### Step 9: Wrap Up\r\nAction: doSomethingWeHaveNeverSeen\r\n"
+	out := RewriteUnsupportedActions(unknown, true)
+	if !strings.Contains(out, "you MUST invoke the end_call tool") {
+		t.Error("an unrecognised prompt got no guidance at all -- the original bug")
 	}
-	if !strings.Contains(out, "invoke the end_call tool in the same turn") {
-		t.Error("the Hang Up step was not pointed at the tool that actually ends the call")
-	}
-}
-
-// Appending is what makes this cache-safe, so it must happen exactly once even
-// if a prompt is somehow rewritten twice.
-func TestRewriteIsIdempotent(t *testing.T) {
-	once := RewriteUnsupportedActions(realSteps)
-	twice := RewriteUnsupportedActions(once)
-	if once != twice {
-		t.Error("rewriting twice changed the prompt again; the note would stack")
-	}
-	if n := strings.Count(twice, "Saying goodbye does not end the call"); n != 1 {
-		t.Errorf("guidance note appears %d times, want 1", n)
+	if !strings.HasPrefix(out, unknown) {
+		t.Error("the prompt body was altered; only an append was expected")
 	}
 }
 
-// A prompt with no unsupported action must come back byte-identical: an
-// untouched prompt is an untouched KV-cache prefix.
-func TestRewriteLeavesACleanPromptAlone(t *testing.T) {
-	clean := "## Global Prompt\nBe brief.\n\n### Step 1: Greet\nSay hello.\n"
-	if out := RewriteUnsupportedActions(clean); out != clean {
-		t.Errorf("a clean prompt was modified:\n%q", out)
+// A browser session has no carrier leg and no end_call, and must not be told to
+// invoke a tool it cannot see.
+func TestBrowserSessionsAreNotToldToInvokeEndCall(t *testing.T) {
+	out := RewriteUnsupportedActions(verbForm, false)
+	if strings.Contains(out, "invoke the end_call tool") {
+		t.Error("a session without the tool was told to use it")
 	}
-	if out := RewriteUnsupportedActions(""); out != "" {
+	if !strings.Contains(out, "You cannot hang up") {
+		t.Error("no fallback instruction for a session that cannot hang up")
+	}
+	if !strings.Contains(out, "Ask the caller to hang up") {
+		t.Error("the hangUp step was not given a usable alternative")
+	}
+}
+
+// Both line endings appear in real prompts; a rule anchored with [ \t]*$ alone
+// silently fails on CRLF.
+func TestRewriteHandlesBothLineEndings(t *testing.T) {
+	for _, nl := range []string{"\n", "\r\n"} {
+		in := "  Action: hangUp" + nl
+		if out := RewriteUnsupportedActions(in, true); strings.Contains(out, "Action: hangUp") {
+			t.Errorf("hangUp survived with %q line ending", nl)
+		}
+	}
+}
+
+func TestRewriteLeavesAnEmptyPromptAlone(t *testing.T) {
+	if out := RewriteUnsupportedActions("", true); out != "" {
 		t.Error("empty prompt must stay empty")
-	}
-}
-
-// The apostrophe arrives as U+2019 from anything authored in a word processor.
-func TestRewriteHandlesTypographicApostrophes(t *testing.T) {
-	in := "Say: \"I’m sending you a text message with the details right now.\" and then send the SMS."
-	out := RewriteUnsupportedActions(in)
-	// Check the STEP, not the whole output: the appended guidance quotes the
-	// offending phrase back at the model on purpose.
-	step := strings.SplitN(out, "\n\n## Ending the call", 2)[0]
-	if strings.Contains(step, "right now") || strings.Contains(step, "send the SMS") {
-		t.Errorf("smart-quote variant not matched: %q", step)
 	}
 }

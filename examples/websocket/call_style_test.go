@@ -12,12 +12,12 @@ func TestSpeechMarkupRulesFollowTheFlag(t *testing.T) {
 	defer func(prev bool) { speechMarkupEnabled = prev }(speechMarkupEnabled)
 
 	speechMarkupEnabled = false
-	if got := withCallStyle("You are an agent.", ""); strings.Contains(got, "[word](+1)") {
+	if got := withCallStyle("You are an agent.", "", true); strings.Contains(got, "[word](+1)") {
 		t.Error("markup rule offered to the model while markup is off")
 	}
 
 	speechMarkupEnabled = true
-	if got := withCallStyle("You are an agent.", ""); !strings.Contains(got, "[word](+1)") {
+	if got := withCallStyle("You are an agent.", "", true); !strings.Contains(got, "[word](+1)") {
 		t.Error("markup rule missing while markup is on")
 	}
 }
@@ -29,7 +29,7 @@ func TestCallStyleRulesComeLast(t *testing.T) {
 	speechMarkupEnabled = true
 
 	const tenant = "You are Sarah from JobTalk."
-	got := withCallStyle(tenant, "")
+	got := withCallStyle(tenant, "", true)
 	if !strings.HasPrefix(got, tenant) {
 		t.Error("tenant prompt is no longer first, which breaks prefix caching")
 	}

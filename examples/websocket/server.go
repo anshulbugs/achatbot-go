@@ -730,12 +730,12 @@ func botIsSpeaking(s serializers.Serializer) bool {
 // instructions is both more honest and easier for the model to act on — with it
 // there the model answers the caller instead of opening with a preamble of its
 // own.
-func withCallStyle(prompt, spokenGreeting string) string {
-	// Strip instructions for actions this agent cannot perform, BEFORE the
-	// style rules are appended. A campaign prompt's Send SMS / Send Email steps
-	// have no tool behind them and no way to complete, so the model says the
-	// same sentence on every turn forever; see rexa.RewriteUnsupportedActions.
-	prompt = rexa.RewriteUnsupportedActions(prompt)
+func withCallStyle(prompt, spokenGreeting string, canEndCall bool) string {
+	// Point every action step at the tool that performs it, or say plainly
+	// there is none, BEFORE the style rules are appended. A step with no tool
+	// behind it cannot complete, so the model re-enters it and repeats itself;
+	// see rexa.RewriteUnsupportedActions.
+	prompt = rexa.RewriteUnsupportedActions(prompt, canEndCall)
 	rules := callStyleRules
 	if speechMarkupEnabled {
 		rules += speechMarkupRules
@@ -998,7 +998,10 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 			sc.agentTurnObserver, transferOnPromise(session, sc.callID)))
 	}
 	session.InitChatMessage(map[string]any{
-		"role": "system", "content": withCallStyle(sc.systemPrompt, sc.spokenGreeting),
+		// end_call is registered only for carrier calls, and the prompt must
+		// not tell a browser session to invoke a tool it cannot see.
+		"role": "system", "content": withCallStyle(sc.systemPrompt, sc.spokenGreeting,
+			sc.call != nil && sc.callID != ""),
 	})
 
 	// Log which prompt this session actually got. Answering "did my prompt
