@@ -529,11 +529,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("vad.stop_secs", 0.32)
 
 	v.SetDefault("asr.model", "sense_voice")
-	// 1000 sits below every real opening measured (the quietest was 1072) and
-	// well above the phantoms (113). The margin is thin on a small sample, so
-	// the "ASR dropped" log line carries the RMS: real speech appearing there
-	// means lower this.
-	v.SetDefault("asr.opening_min_rms", 1000.0)
+	// 250, from 41 measured openings. Every opening below 250 was either empty
+	// or a phantom ("Yeah." at 113 and 206); the quietest opening that looked
+	// like a real person was 309 ("Just down here."), and 575 ("Okay, okay.")
+	// sat just above it. A floor of 1000 was tried first and would have taken
+	// both of those while catching not one phantom more -- the remaining
+	// phantoms are at full speech level and no threshold reaches them.
+	v.SetDefault("asr.opening_min_rms", 250.0)
 	v.SetDefault("asr.pool_size", 1)
 	v.SetDefault("asr.num_threads", 1)
 	v.SetDefault("asr.language", "")

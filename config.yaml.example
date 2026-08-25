@@ -35,11 +35,13 @@ vad:
   buffer_size_seconds: 100
 
 asr:
-  opening_min_rms: 1000     # discard an opening quieter than this (int16 RMS) rather
+  opening_min_rms: 250      # discard an opening quieter than this (int16 RMS) rather
                             # than transcribe it. The model answers a quiet phone line
                             # with "Yeah." instead of nothing, and on the opening that
                             # reads as consent from someone who only said hello.
-                            # Measured live: real openings 1072-3527, phantom 113.
+                            # Measured live over 41 openings: phantoms at 113 and 206,
+                            # quietest real person 309. 1000 was tried and ate real
+                            # callers without catching any more phantoms.
                             # 0 disables. Watch "ASR dropped" lines for real speech.
   # sense_voice | whisper | paraformer | zipformer_ctc | moonshine |
   # fire_red_asr | dolphin | nemo_ctc

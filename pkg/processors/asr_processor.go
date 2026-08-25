@@ -140,18 +140,26 @@ func (p *ASRProcessor) WithMinRMS(rms float64) *ASRProcessor {
 // behalf of someone who only said hello, or routes them into the do-not-call
 // branch. Both happened on real calls.
 //
-// MEASURED on one run, RMS of the first segment of each call:
+// MEASURED across 41 live openings, sorted by RMS:
 //
-//	1072 1289 1629 1779 2387 2551 2562 3527   real speech
-//	 113                                       "Yeah." from nothing
+//	 39  109  209        ""            (empty either way)
+//	113  206             "Yeah."       invented from nothing
+//	271                  "Mm."         filler, dropped anyway
+//	309                  "Just down here."   a quiet person
+//	575                  "Okay, okay."       a quiet person
+//	1072 and above       ordinary speech
 //
-// The gap is wide but the floor is NOT far below the quietest real opening --
-// 1000 against 1072 is about 7% of margin on a sample of nine. That is thin,
-// and the failure it buys is mild: a dropped opening is silence, so the caller
-// simply speaks again, and on most calls the greeting is still playing anyway.
-// The failure it prevents is the agent acting on words nobody said. Watch the
-// "ASR dropped" lines, which carry the RMS: real speech appearing there means
-// this is set too high.
+// The floor belongs in the gap at 250. Everything below it was empty or
+// invented; the quietest thing that looked like a person was 309.
+//
+// A FLOOR OF 1000 WAS TRIED FIRST AND IS WRONG. It catches the same two
+// phantoms and additionally eats "Just down here." and "Okay, okay." -- real
+// callers, silently ignored on their opening. It buys nothing for that: the
+// other phantom openings measured 1370, 1387 and 1629, full speech level,
+// where no threshold can separate them from a real "Yeah."
+//
+// Watch the "ASR dropped" lines, which carry the RMS. Real speech appearing
+// there means this is set too high.
 func (p *ASRProcessor) WithOpeningMinRMS(rms float64) *ASRProcessor {
 	p.openingMinRMS = rms
 	return p
