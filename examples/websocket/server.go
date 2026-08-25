@@ -1066,6 +1066,9 @@ func runVoiceSession(wsConn common.IWebSocketConn, serializer serializers.Serial
 	// processor's goroutine, not this one.
 	var userTurns atomic.Int64
 	asrProcessor := achatbot_processors.NewASRProcessor(asrProvider).
+		// Label transcripts with the call, so a garbled first turn can be found
+		// in a log carrying fifty conversations at once.
+		WithCallID(sc.callID).
 		WithOnTranscript(func(text string) {
 			touchUser() // the caller spoke: reset the idle timer
 

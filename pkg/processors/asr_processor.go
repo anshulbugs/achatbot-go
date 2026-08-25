@@ -12,6 +12,10 @@ import (
 	achatbot_frames "achatbot/pkg/types/frames"
 )
 
+// asrSampleRate is the rate the audio handed to Transcribe is at (16 kHz, 16-bit
+// mono), used only to report a duration alongside each transcript.
+const asrSampleRate = 16000
+
 // fillerWords are hesitation tokens that, when a transcript contains nothing
 // else, mean the caller merely paused to think — not a turn to answer.
 var fillerWords = map[string]bool{
@@ -45,6 +49,33 @@ type ASRProcessor struct {
 	*processors.AsyncFrameProcessor
 	provider     common.IASRProvider
 	onTranscript func(text string)
+	// callID identifies which call this transcript belongs to. Empty on
+	// browser sessions, which are one at a time and need no disambiguation.
+	callID string
+	// turns counts transcripts emitted on this call, so the FIRST one -- the
+	// one callers report as garbled -- can be found without reading backwards
+	// through the whole call.
+	turns int
+}
+
+// WithCallID labels every transcript from this processor with the call it came
+// from.
+//
+// WHY THIS IS NOT COSMETIC. The log is one interleaved stream from up to fifty
+// concurrent calls, and an ASR line carried no identity at all, so two lines a
+// millisecond apart could belong to different conversations:
+//
+//	ASR result (30720 audio bytes -> 3 chars): "No?"
+//	ASR result (50176 audio bytes -> 16 chars): "Yeah, thank you."
+//
+// Attributing one of those to a specific call meant finding a phrase unique to
+// that conversation inside an LLM ChatHistory dump and working backwards. That
+// is just about workable for a post-mortem on a call you already know about,
+// and useless for "how often does this happen?" -- which is the question that
+// matters when callers report their first sentence being misheard.
+func (p *ASRProcessor) WithCallID(id string) *ASRProcessor {
+	p.callID = id
+	return p
 }
 
 func NewASRProcessor(provider common.IASRProvider) *ASRProcessor {
@@ -73,7 +104,13 @@ func (p *ASRProcessor) WithOnTranscript(fn func(text string)) *ASRProcessor {
 // guess a language). Also notifies the transcript callback.
 func (p *ASRProcessor) emit(audio []byte) {
 	text := strings.TrimSpace(p.provider.Transcribe(audio))
-	logger.Infof("ASR result (%d audio bytes -> %d chars): %q", len(audio), len(text), text)
+	p.turns++
+	// Duration, not byte count: "0.96s of audio came back as No?" is a fact
+	// anyone can judge, where "30720 bytes" needs the sample rate and a
+	// calculator first. asrSampleRate is what Transcribe is fed.
+	secs := float64(len(audio)) / float64(asrSampleRate*2)
+	logger.Infof("ASR result call=%s turn=%d (%.2fs audio -> %d chars): %q",
+		p.callID, p.turns, secs, len(text), text)
 	if text == "" || fillerOnly(text) {
 		return
 	}
