@@ -70,6 +70,20 @@ func (o Outcome) Report() (callStatus, endReason string) {
 			return CallStatusBusy, EndReasonBusy
 		case "no_answer", "timeout", "originator_cancel", "no_user_response":
 			return CallStatusNoAnswer, EndReasonNoAnswer
+		case "normal_clearing":
+			// A clean clearing with nobody having answered is a call that rang
+			// out or was cleared by the carrier -- NOT a failure of ours.
+			//
+			// It used to fall through to the default and report failed/error,
+			// which is how +12163017498 was filed: rang 22s, cleared normally,
+			// no media stream, no greeting, and the platform was told our
+			// system had errored. It also covers the out-of-order case seen on
+			// that call, where call.hangup was processed before call.answered
+			// and the report was built with Answered still false.
+			//
+			// A real conversation cannot reach here: it would have set
+			// Answered on the way in.
+			return CallStatusNoAnswer, EndReasonNoAnswer
 		case "call_rejected", "rejected":
 			// Rejected is a deliberate decline, which reads as busy to a
 			// campaign far better than it reads as a failure.

@@ -46,6 +46,25 @@ func TestOutcomeReport(t *testing.T) {
 			CallStatusFailed, EndReasonError},
 		{"no cause at all", Outcome{}, CallStatusNoAnswer, EndReasonNoAnswer},
 
+		// Rang out and cleared cleanly, nobody having picked up. This reported
+		// failed/error for a while, which tells a campaign our system broke
+		// when in fact the phone simply was not answered. Seen on a live call
+		// (+12163017498): 22s of ringing, normal_clearing, no media stream.
+		{"rang out and cleared cleanly", Outcome{HangupCause: "normal_clearing"},
+			CallStatusNoAnswer, EndReasonNoAnswer},
+
+		// The same cause once the call WAS answered still means the far end
+		// hung up on a real conversation.
+		{"answered then cleared cleanly", Outcome{Answered: true, Direction: "outbound",
+			HangupCause: "normal_clearing"}, CallStatusCompleted, EndReasonCalleeHungUp},
+
+		// An unroutable number (SIP 404) is a genuine failure to place the
+		// call, and stays one: the platform enum has no "invalid number", and
+		// calling it no_answer would invite the campaign to retry a number
+		// that can never connect.
+		{"unroutable number", Outcome{HangupCause: "not_found"},
+			CallStatusFailed, EndReasonError},
+
 		// Direction-aware hangup attribution.
 		{"outbound human hangup", Outcome{Answered: true, Direction: "outbound",
 			HangupCause: "normal_clearing"}, CallStatusCompleted, EndReasonCalleeHungUp},
